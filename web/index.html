@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#071522" />
+    <title>SecureVault · 动态敏感数据安全管理</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+    <div id="app" class="app-shell is-sealed">
+      <div id="toast-region" class="toast-region" aria-live="polite"></div>
+
+      <section id="sealed-screen" class="sealed-screen" aria-label="封印状态">
+        <div class="sealed-mark" aria-hidden="true"><span class="lock-shackle"></span><span class="lock-body"></span></div>
+        <div class="eyebrow">SECUREVAULT / ZERO-TRUST SEALED</div>
+        <h1>开启你的安全数据空间</h1>
+        <p class="sealed-copy">敏感字段始终加密驻留。解锁后，所有访问会被记录，并在空闲超时后自动封印。</p>
+        <form id="unlock-form" class="unlock-form">
+          <label for="master-password">主密码</label>
+          <div class="password-wrap">
+            <input id="master-password" type="password" autocomplete="current-password" placeholder="输入主密码" minlength="12" required />
+            <button id="toggle-password" class="icon-button" type="button" aria-label="显示密码">◉</button>
+          </div>
+          <label id="confirm-password-label" for="confirm-password" hidden>确认主密码</label>
+          <div id="confirm-password-wrap" class="password-wrap" hidden><input id="confirm-password" type="password" autocomplete="new-password" placeholder="再次输入主密码" minlength="12" /></div>
+          <button class="primary-button unlock-button" type="submit"><span class="button-icon">↗</span> 解锁数据空间</button>
+          <div class="sealed-meta"><span><i class="status-dot"></i> 服务在线</span><span>Argon2id · AES-256-GCM</span></div>
+          <p id="vault-mode-note" class="demo-note">主密码只用于本机解锁，不会保存明文。</p>
+        </form>
+      </section>
+
+      <main id="vault-screen" class="vault-screen" aria-label="SecureVault 主控制台">
+        <header class="topbar">
+          <div class="brand-lockup"><div class="brand-icon">S<span>V</span></div><div><strong>SecureVault</strong><small>敏感数据安全管理</small></div></div>
+          <div class="topbar-actions">
+            <div class="session-pill"><i class="status-dot"></i><span>已解锁</span><b id="idle-countdown">29:59</b></div>
+            <button id="lock-button" class="ghost-button" title="立即封印"><span>⌁</span> 立即封印</button>
+            <div class="avatar" title="当前操作员">LX</div>
+          </div>
+        </header>
+
+        <div class="content-wrap">
+          <section class="welcome-row">
+            <div><div class="eyebrow">VAULT OVERVIEW / 2026.09.22</div><h2>数据空间</h2><p>保持专注，敏感字段按需解封。</p></div>
+            <div class="quick-stats"><div><span>记录总数</span><strong id="record-count">05</strong></div><div><span>数据集</span><strong id="namespace-count">04</strong></div><div><span>密文字段</span><strong id="secret-count">16</strong></div></div>
+          </section>
+
+          <section class="search-panel">
+            <div class="search-row"><div class="search-input-wrap"><span class="search-symbol">⌕</span><input id="search-input" type="search" placeholder="搜索别名、商户号或字段值…" autocomplete="off" /><kbd>⌘ K</kbd></div><button id="new-dataset-button" class="secondary-button"><span>＋</span> 新建数据集</button><button id="import-button" class="secondary-button"><span>⇧</span> 导入文件</button></div>
+            <div class="filter-row"><span class="filter-label">环境标签</span><div id="environment-filters" class="chip-group"></div><button id="clear-filters" class="clear-button">清除筛选</button><button id="edit-dataset-button" class="clear-button">编辑当前数据集</button></div>
+            <div class="query-hint"><span class="hint-dot"></span><span>目录用于归拢数据集，环境是可选标签；支持 <code>category:</code>、<code>env:</code> 精确查询</span><span id="result-summary" class="result-summary"></span></div>
+          </section>
+
+          <div class="data-workspace">
+            <aside class="category-sidebar"><div class="sidebar-heading"><span class="eyebrow">DIRECTORIES</span><strong>分类目录</strong></div><button id="all-categories" class="tree-all selected"><span>▤</span><b>全部数据</b><em id="all-category-count">0</em></button><nav id="category-tree" class="category-tree" aria-label="分类目录树"></nav></aside>
+            <div class="results-pane">
+              <section class="results-header"><div><span class="eyebrow" id="active-category-path">ALL DATASETS</span><h3>检索结果</h3></div><div class="view-tools"><span id="search-latency">12ms</span><button class="icon-button active" title="列表视图">☷</button></div></section>
+              <div class="record-list-header"><span>记录 / 分类</span><span>展示字段</span><span>敏感字段</span><span>最近更新</span></div>
+              <label class="expired-filter"><input id="include-expired" type="checkbox" />包含过期记录</label>
+              <section id="records-grid" class="records-grid"></section>
+              <div id="empty-state" class="empty-state" hidden><div class="empty-icon">⌕</div><h3>没有匹配记录</h3><p>试试别的关键词，或清除当前筛选。</p></div>
+              <nav id="pagination" class="pagination" aria-label="记录分页" hidden><button id="previous-page" class="pagination-button" title="上一页">←</button><span id="page-status">第 1 / 1 页</span><button id="next-page" class="pagination-button" title="下一页">→</button><span class="page-size-note">每页 40 条</span></nav>
+            </div>
+          </div>
+        </div>
+        <footer class="footer"><span><i class="status-dot"></i> 所有系统正常</span><span>密钥从不落盘 · 最后审计 2 分钟前</span><span>SecureVault v1.4.0</span></footer>
+      </main>
+
+      <div id="reveal-modal" class="reveal-modal" hidden><div class="modal-backdrop"></div><section class="reveal-dialog" role="dialog" aria-modal="true" aria-labelledby="reveal-title"><button id="close-reveal" class="modal-close" aria-label="关闭">×</button><div class="dialog-icon">◈</div><div class="eyebrow">SINGLE-FIELD DECRYPTION</div><h3 id="reveal-title">确认查看敏感字段？</h3><p>明文仅在当前设备显示 30 秒，倒计时结束后立即恢复掩码。</p><div class="reveal-target"><span id="reveal-target-name">api_key</span><span id="reveal-target-id">rec_01hxyz</span></div><div class="dialog-actions"><button id="cancel-reveal" class="secondary-button">取消</button><button id="confirm-reveal" class="primary-button">解密并查看 <span>↗</span></button></div></section></div>
+      <div id="secrets-modal" class="reveal-modal" hidden><div class="modal-backdrop"></div><section class="reveal-dialog secrets-dialog" role="dialog" aria-modal="true" aria-labelledby="secrets-title"><button id="close-secrets" class="modal-close" aria-label="关闭">×</button><div class="dialog-icon">◇</div><div class="eyebrow">ON-DEMAND SECRETS</div><h3 id="secrets-title">敏感字段</h3><p id="secrets-record-meta">字段默认掩码，仅在当前窗口按需解密。</p><div id="secret-fields-list" class="secret-fields-list"></div></section></div>
+      <div id="import-modal" class="reveal-modal" hidden><div class="modal-backdrop"></div><section class="reveal-dialog import-dialog" role="dialog" aria-modal="true"><button id="close-import" class="modal-close" aria-label="关闭">×</button><div class="dialog-icon">＋</div><div class="eyebrow">IMPORT RECORDS</div><h3>导入数据集记录</h3><label>目标数据集<select id="import-dataset-select"></select></label><input id="import-file" type="file" accept=".json,.csv,.xlsx,application/json,text/csv" hidden /><button id="choose-file" class="primary-button">选择 JSON / CSV / XLSX 文件 <span>↗</span></button><div id="batch-options" hidden><p id="batch-summary"></p><label>映射模板<select id="mapping-template-select"><option value="">不使用已保存模板</option></select></label><div id="mapping-list" class="mapping-list"></div><div id="first-schema" hidden><div class="schema-preview-head"><strong>定义字段 Schema</strong><span>设置展示名称、存储区域和逻辑唯一 KEY</span></div><div id="first-schema-fields" class="schema-fields"></div></div><label>导入模板名称<input id="mapping-template" placeholder="可选，保存当前字段映射" /></label><label class="check-line"><input id="skip-existing" type="checkbox" />跳过已存在的唯一 KEY</label><label class="check-line"><input id="delete-missing" type="checkbox" />删除本批次不存在的旧记录</label><div class="dialog-actions"><button id="commit-import" class="primary-button">开始导入</button></div></div></section></div>
+      <div id="dataset-modal" class="reveal-modal" hidden><div class="modal-backdrop"></div><section class="reveal-dialog dataset-dialog" role="dialog" aria-modal="true" aria-labelledby="dataset-title"><button id="close-dataset" class="modal-close" aria-label="关闭">×</button><div class="dialog-icon">⌘</div><div class="eyebrow">DATASET DEFINITION</div><h3 id="dataset-title">定义数据集</h3><p id="dataset-help">可先创建空数据集，首次导入时再定义 Schema。</p><div class="dataset-form-grid"><label>分类目录路径<input id="dataset-category" placeholder="例如：国内/支付 或 ultrasdk/hzqh/usdk" /></label><label>环境标签（可选）<input id="dataset-environment" placeholder="例如：prod、staging" /></label></div><div class="schema-preview"><div class="schema-preview-head"><strong>Schema</strong><span>首次导入时可自动识别和配置</span></div><div id="schema-fields" class="schema-fields"></div></div><div class="dialog-actions"><button id="cancel-dataset" class="secondary-button">取消</button><button id="save-dataset" class="primary-button">创建数据集 <span>↗</span></button></div></section></div>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>
