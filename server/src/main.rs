@@ -1267,6 +1267,33 @@ async fn list_datasets(State(state): State<AppState>) -> ApiResult<Json<Value>> 
     }).await
 }
 
+// Store values as text to preserve identifiers and prevent formula interpretation.
+fn export_xlsx(records: &[Value]) -> ApiResult<Vec<u8>> {
+    let mut columns = std::collections::BTreeSet::new();
+    for record in records { if let Some(map) = record.as_object() { columns.extend(map.keys().cloned()); } }
+    if columns.len() > 16_384 || records.len() > 1_048_575 { return Err(bad_request("数据超过 XLSX 行列限制，请下载 JSON 或 CSV")); }
+    let columns: Vec<_> = columns.into_iter().collect();
+    let mut workbook = rust_xlsxwriter::Workbook::new();
+    let worksheet = workbook.add_worksheet();
+    worksheet.set_name("数据集").map_err(internal)?;
+    let header_format = rust_xlsxwriter::Format::new().set_bold();
+    for (column, name) in columns.iter().enumerate() {
+        worksheet.write_string_with_format(0, column as u16, name, &header_format).map_err(internal)?;
+        worksheet.set_column_width(column as u16, 24).map_err(internal)?;
+    }
+    for (row, record) in records.iter().enumerate() {
+        for (column, field) in columns.iter().enumerate() {
+            if let Some(value) = record.get(field) {
+                let text = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string());
+                if text.chars().count() > 32_767 { return Err(bad_request("字段内容超过 XLSX 单元格限制，请下载 JSON")); }
+                worksheet.write_string((row + 1) as u32, column as u16, text).map_err(internal)?;
+            }
+        }
+    }
+    worksheet.set_freeze_panes(1, 0).map_err(internal)?;
+    workbook.save_to_buffer().map_err(internal)
+}
+
 async fn export_dataset(
     State(state): State<AppState>,
     Path(dataset_id): Path<String>,
@@ -1274,7 +1301,7 @@ async fn export_dataset(
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     let format = query.format.as_deref().unwrap_or("json");
-    if !matches!(format, "json" | "csv") { return Err(bad_request("export format must be json or csv")); }
+    if !matches!(format, "json" | "csv" | "xlsx") { return Err(bad_request("export format must be json, csv or xlsx")); }
     with_connection(&state, |connection, keys| {
         authorize_app_dataset(connection, &headers, &dataset_id, if query.include_secrets { "secrets" } else { "search" })?;
         let exists: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM datasets WHERE id=?1)", [&dataset_id], |row| row.get(0)).map_err(internal)?;
@@ -1303,6 +1330,8 @@ async fn export_dataset(
             writer.write_record(&columns).map_err(internal)?;
             for record in &records { let row = columns.iter().map(|field| record.get(field).map(|value| if value.is_string() { value.as_str().unwrap_or_default().to_owned() } else { value.to_string() }).unwrap_or_default()).collect::<Vec<_>>(); writer.write_record(row).map_err(internal)?; }
             ("text/csv; charset=utf-8", writer.into_inner().map_err(internal)?)
+        } else if format == "xlsx" {
+            ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", export_xlsx(&records)?)
         } else { ("application/json", serde_json::to_vec_pretty(&Value::Array(records)).map_err(internal)?) };
         connection.execute("INSERT INTO audit_events(event,record_id,field_name) VALUES('dataset_export',?1,?2)", params![dataset_id, if query.include_secrets { "with_secrets" } else { "without_secrets" }]).map_err(internal)?;
         let mut response = bytes.into_response();
@@ -1704,6 +1733,25 @@ async fn reveal_secret(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xlsx_export_round_trips_text_and_rejects_oversized_cells() {
+        let records = vec![json!({"编号": "00123", "公式文本": "=1+1", "内容": {"中文": true}}), json!({"编号": "99999999999999999999"})];
+        let bytes = export_xlsx(&records).unwrap();
+        let mut workbook = open_workbook_auto_from_rs(Cursor::new(bytes)).unwrap();
+        let range = workbook.worksheet_range("数据集").unwrap();
+        let rows: Vec<_> = range.rows().collect();
+        assert_eq!(rows.len(), 3);
+        let headers: Vec<_> = rows[0].iter().map(ToString::to_string).collect();
+        let id_column = headers.iter().position(|name| name == "编号").unwrap();
+        let formula_column = headers.iter().position(|name| name == "公式文本").unwrap();
+        assert_eq!(rows[1][id_column].to_string(), "00123");
+        assert_eq!(rows[2][id_column].to_string(), "99999999999999999999");
+        assert_eq!(rows[1][formula_column].to_string(), "=1+1");
+        assert!(workbook.worksheet_formula("数据集").unwrap().get_value((1, formula_column as u32)).is_none());
+        assert!(export_xlsx(&[]).is_ok());
+        assert!(export_xlsx(&[json!({"large": "x".repeat(32_768)})]).is_err());
+    }
 
     #[tokio::test]
     async fn embedded_web_serves_assets_and_rejects_unknown_paths() {

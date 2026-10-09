@@ -17,6 +17,12 @@ const state = {
   reveal: null,
   pendingReveal: null,
   secretModalRecordId: null,
+  recordDetail: null,
+  detailRevealRequest: 0,
+  workspace: "search",
+  importReturn: "search",
+  editorReturn: "search",
+  editorReturnScroll: 0,
   timer: null,
   searchTimer: null,
   unlockAt: 0,
@@ -150,6 +156,11 @@ async function sealVault(message = "数据空间已手动封印", callServer = t
   state.unlocked = false;
   state.persistent = false;
   state.reveal = null;
+  closeRecordDetail();
+  $("#dataset-info-modal").close();
+  $("#secrets-modal").hidden = true;
+  state.secretModalRecordId = null;
+  showWorkspace("search");
   state.pendingReveal = null;
   state.pendingBatchId = null;
   state.currentBatchSources = [];
@@ -177,7 +188,12 @@ function startWatchdog() {
     $("#idle-countdown").textContent = state.persistent ? "持续" : formatCountdown(Math.max(0, remaining));
     if (state.reveal && state.reveal.expiresAt <= Date.now()) {
       state.reveal = null;
-      if (state.secretModalRecordId) renderSecretFields();
+    }
+    if (state.secretModalRecordId) renderSecretFields();
+    if (state.recordDetail) {
+      const timer = $("#detail-protected-fields .secret-timer");
+      if (!state.reveal && timer) renderDetailSecrets();
+      else if (timer) timer.textContent = `${Math.max(0, Math.ceil((state.reveal.expiresAt - now) / 1000))}s`;
     }
     if (!state.persistent && remaining <= 0) sealVault("会话已超时并自动封印");
   }, 1000);
@@ -374,15 +390,100 @@ async function openRecordDetail(recordId) {
     const labels = Object.fromEntries((dataset?.fields || []).map((field) => [field.source_key, field.display_name || field.source_key]));
     $("#record-detail-title").textContent = labels.alias ? `${labels.alias} · 记录详情` : "记录详情";
     $("#record-detail-meta").textContent = `${detail.category}${detail.environment ? ` · ${detail.environment}` : ""}${detail.expired ? " · 已过期" : ""}`;
-    const protectedFields = (detail.protected_fields || []).map((field) => `<div class="detail-row protected"><span>${escapeHtml(labels[field.field_name] || field.field_name)}<small>${escapeHtml(field.zone)}</small></span><strong>${escapeHtml(field.masked)} <button class="detail-secret-button" data-record="${escapeHtml(detail.id)}">按需查看</button></strong></div>`).join("");
-    $("#record-detail-content").innerHTML = `<section class="detail-section"><h4>索引字段</h4>${detailRows(detail.indexes, labels)}</section><section class="detail-section"><h4>展示字段</h4>${detailRows(detail.display, labels)}</section><section class="detail-section"><h4>受保护字段</h4>${protectedFields || '<p class="detail-empty">无受保护字段</p>'}</section>`;
-    $$('[data-record].detail-secret-button').forEach((button) => button.addEventListener("click", () => { $("#record-detail-modal").hidden = true; openSecrets(button.dataset.record); }));
+    state.reveal = null;
+    state.recordDetail = { ...detail, labels };
+    $("#record-detail-content").innerHTML = `<section class="detail-section"><h4>索引字段</h4>${detailRows(detail.indexes, labels)}</section><section class="detail-section"><h4>展示字段</h4>${detailRows(detail.display, labels)}</section><section class="detail-section"><h4>受保护字段</h4><p>敏感字段可在此临时查看，30 秒后恢复掩码。</p><div id="detail-protected-fields"></div></section>`;
+    renderDetailSecrets();
     $("#record-detail-modal").hidden = false;
   } catch (error) { showToast(error.message, "error"); }
 }
 
+function closeRecordDetail() {
+  state.detailRevealRequest++;
+  state.recordDetail = null;
+  state.reveal = null;
+  $("#record-detail-modal").hidden = true;
+  $("#record-detail-content").replaceChildren();
+}
+
+function renderDetailSecrets() {
+  const detail = state.recordDetail;
+  if (!detail) return;
+  $("#detail-protected-fields").innerHTML = (detail.protected_fields || []).map((field) => {
+    const revealed = state.reveal?.recordId === detail.id && state.reveal.field === field.field_name && state.reveal.expiresAt > Date.now();
+    const remaining = revealed ? Math.ceil((state.reveal.expiresAt - Date.now()) / 1000) : 0;
+    return `<div class="detail-row protected"><span>${escapeHtml(detail.labels[field.field_name] || field.field_name)}<small>${field.zone === "hidden" ? "隐藏加密字段" : "敏感字段"}</small></span><strong><span class="detail-secret-value ${revealed ? "revealed" : ""}">${escapeHtml(revealed ? state.reveal.value : field.masked)}</span>${field.zone === "secrets" ? `<span class="detail-secret-actions">${revealed ? `<span class="secret-timer">${remaining}s</span>` : ""}<button class="detail-secret-button" data-field="${escapeHtml(field.field_name)}">${revealed ? "立即隐藏" : "按需查看"}</button></span>` : '<small>仅加密存储，不可查看</small>'}</strong></div>`;
+  }).join("") || '<p class="detail-empty">无受保护字段</p>';
+  $$(".detail-secret-button").forEach((button) => button.addEventListener("click", async () => {
+    const field = button.dataset.field;
+    const request = ++state.detailRevealRequest;
+    if (state.reveal?.recordId === detail.id && state.reveal.field === field) {
+      state.reveal = null;
+      renderDetailSecrets();
+      return;
+    }
+    button.disabled = true;
+    touch();
+    try {
+      const value = await showSecret(detail.id, field);
+      if (state.recordDetail !== detail || request !== state.detailRevealRequest || !state.unlocked) return;
+      state.reveal = { recordId: detail.id, field, value: typeof value === "string" ? value : JSON.stringify(value), expiresAt: Date.now() + 30000 };
+    } catch (error) { showToast(error.message, "error"); }
+    renderDetailSecrets();
+  }));
+}
+
+function showWorkspace(page) {
+  closeDatasetDownloads();
+  state.workspace = page;
+  const sections = { search: "search-workspace", datasets: "dataset-manager-modal", editor: "dataset-modal", import: "import-modal" };
+  Object.entries(sections).forEach(([name, id]) => { $(`#${id}`).hidden = name !== page; });
+  window.scrollTo({ top: 0 });
+}
+
+function openDatasetEditor() {
+  state.editorReturn = state.workspace;
+  state.editorReturnScroll = window.scrollY;
+  $("#close-dataset").textContent = state.editorReturn === "search" ? "← 返回检索" : "← 返回数据集管理";
+  showWorkspace("editor");
+}
+
+function returnFromDatasetEditor() {
+  state.editDatasetId = null;
+  if (state.editorReturn === "datasets") renderDatasetManager();
+  showWorkspace(state.editorReturn);
+  window.scrollTo({ top: state.editorReturnScroll });
+}
+
+function openDatasetManager() {
+  $("#export-with-secrets").checked = false;
+  renderDatasetManager();
+  showWorkspace("datasets");
+}
+
+function openImport() {
+  state.importReturn = state.workspace === "search" ? "search" : "datasets";
+  datasetOptions();
+  showWorkspace("import");
+}
+
+function closeDatasetDownloads() {
+  $$(".dataset-download-menu").forEach((menu) => { menu.hidden = true; });
+  $$(".dataset-download-toggle").forEach((button) => button.setAttribute("aria-expanded", "false"));
+}
+
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".dataset-download")) closeDatasetDownloads();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  const toggle = $(".dataset-download-toggle[aria-expanded='true']");
+  if (toggle) { closeDatasetDownloads(); toggle.focus(); }
+});
+
 function renderDatasetManager() {
-  $("#dataset-manager-list").innerHTML = state.datasets.map((dataset) => `<div class="dataset-manager-row"><div><strong>${escapeHtml(dataset.category_path)}</strong><span>${dataset.environment ? `环境：${escapeHtml(dataset.environment)}` : "无环境标签"} · ${dataset.record_count} 条记录 · ${dataset.fields.length} 个字段 · KEY ${dataset.identity_fields.length ? dataset.identity_fields.join(" + ") : "未设置"}</span></div><div class="row-actions"><button class="secondary-button dataset-export-button" data-format="json" data-dataset-id="${escapeHtml(dataset.id)}">JSON</button><button class="secondary-button dataset-export-button" data-format="csv" data-dataset-id="${escapeHtml(dataset.id)}">CSV</button><button class="secondary-button dataset-edit-button" data-dataset-id="${escapeHtml(dataset.id)}">编辑</button></div></div>`).join("") || '<p class="detail-empty">暂无数据集</p>';
+  $("#dataset-manager-list").innerHTML = state.datasets.map((dataset) => `<div class="dataset-manager-row"><div><strong>${escapeHtml(dataset.category_path)}</strong><span>${dataset.environment ? `环境：${escapeHtml(dataset.environment)}` : "无环境标签"} · ${dataset.record_count} 条记录 · ${dataset.fields.length} 个字段 · KEY ${dataset.identity_fields.length ? dataset.identity_fields.join(" + ") : "未设置"}</span></div><div class="row-actions"><div class="dataset-download"><button class="secondary-button dataset-download-toggle" aria-expanded="false" aria-controls="download-${escapeHtml(dataset.id)}"><span aria-hidden="true">⤓</span> 下载 <span aria-hidden="true">▾</span></button><div id="download-${escapeHtml(dataset.id)}" class="dataset-download-menu" hidden><span class="download-menu-label">选择下载格式</span>${["json", "csv", "xlsx"].map((format) => `<button class="dataset-export-button" data-format="${format}" data-dataset-id="${escapeHtml(dataset.id)}">${format.toUpperCase()}</button>`).join("")}</div></div><button class="secondary-button dataset-view-button" data-dataset-id="${escapeHtml(dataset.id)}">查看</button><button class="secondary-button dataset-edit-button" data-dataset-id="${escapeHtml(dataset.id)}">编辑</button></div></div>`).join("") || '<p class="detail-empty">暂无数据集</p>';
+  $$(".dataset-view-button").forEach((button) => button.addEventListener("click", () => openDatasetInfo(button.dataset.datasetId)));
   $$(".dataset-edit-button").forEach((button) => button.addEventListener("click", () => {
     const dataset = state.datasets.find((item) => item.id === button.dataset.datasetId);
     if (!dataset) return;
@@ -394,15 +495,38 @@ function renderDatasetManager() {
     renderSchemaFields(dataset.fields || []);
     renderListConfig(dataset.fields || [], dataset.list_fields || []);
     $("#save-dataset").innerHTML = "保存修改";
-    $("#dataset-manager-modal").hidden = true;
-    $("#dataset-modal").hidden = false;
+    openDatasetEditor();
   }));
-  $$(".dataset-export-button").forEach((button) => button.addEventListener("click", () => exportDataset(button.dataset.datasetId, button.dataset.format, $("#export-with-secrets").checked)));
+  $$(".dataset-download-toggle").forEach((button) => button.addEventListener("click", () => {
+    const menu = button.nextElementSibling;
+    const open = menu.hidden;
+    closeDatasetDownloads();
+    menu.hidden = !open;
+    button.setAttribute("aria-expanded", String(open));
+  }));
+  $$(".dataset-export-button").forEach((button) => button.addEventListener("click", () => {
+    closeDatasetDownloads();
+    button.closest(".dataset-download").querySelector(".dataset-download-toggle").focus();
+    exportDataset(button.dataset.datasetId, button.dataset.format, $("#export-with-secrets").checked);
+  }));
+}
+
+function openDatasetInfo(datasetId) {
+  const dataset = state.datasets.find((item) => item.id === datasetId);
+  if (!dataset) return;
+  const zones = { indexes: "索引字段", display: "展示字段", secrets: "敏感字段（按需查看）", hidden: "隐藏加密字段" };
+  const formats = { single_line: "单行截断", multiline: "多行换行", json: "JSON" };
+  const identity = new Set(dataset.identity_fields || []);
+  const fields = [...dataset.fields].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+  const visible = (dataset.list_fields?.length ? dataset.list_fields : fields.filter((field) => ["indexes", "display"].includes(field.zone))).filter((field) => field.visible !== false && fields.some((definition) => definition.source_key === field.source_key && ["indexes", "display"].includes(definition.zone))).sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+  $("#dataset-info-content").innerHTML = `<dl class="dataset-info-summary"><div><dt>目录路径</dt><dd>${escapeHtml(dataset.category_path)}</dd></div><div><dt>环境标签</dt><dd>${escapeHtml(dataset.environment || "未设置")}</dd></div><div><dt>记录数量</dt><dd>${dataset.record_count} 条</dd></div><div><dt>字段数量</dt><dd>${fields.length} 个</dd></div><div><dt>逻辑唯一 KEY</dt><dd>${escapeHtml([...identity].join(" + ") || "未设置")}</dd></div><div><dt>重复处理</dt><dd>${dataset.conflict_strategy === "allow_mark" ? "允许导入并标记重复" : escapeHtml(dataset.conflict_strategy)}</dd></div></dl><h4>字段定义</h4><div class="dataset-info-table-wrap"><table class="dataset-info-table"><thead><tr><th>源字段</th><th>可读名称</th><th>数据区域</th><th>唯一 KEY</th></tr></thead><tbody>${fields.map((field) => `<tr><td>${escapeHtml(field.source_key)}</td><td>${escapeHtml(field.display_name || field.source_key)}</td><td>${escapeHtml(zones[field.zone] || field.zone)}</td><td>${identity.has(field.source_key) ? "是" : "—"}</td></tr>`).join("") || '<tr><td colspan="4">尚未定义字段</td></tr>'}</tbody></table></div><h4>检索列表展示</h4><p class="dataset-info-note">按展示顺序排列；敏感和隐藏字段不会直接显示在检索列表中。</p><div class="dataset-info-table-wrap"><table class="dataset-info-table"><thead><tr><th>字段</th><th>展示名称</th><th>展示形式</th></tr></thead><tbody>${visible.map((field) => `<tr><td>${escapeHtml(field.source_key)}</td><td>${escapeHtml(field.display_name || field.source_key)}</td><td>${escapeHtml(formats[field.format || "single_line"] || field.format)}</td></tr>`).join("") || '<tr><td colspan="3">未配置可见字段</td></tr>'}</tbody></table></div>`;
+  closeDatasetDownloads();
+  $("#dataset-info-modal").showModal();
 }
 
 async function exportDataset(datasetId, format = "json", includeSecrets = false) {
   try {
-    const response = await fetch(`/api/datasets/${encodeURIComponent(datasetId)}/export?format=${format}&include_secrets=${includeSecrets}`, { headers: { Accept: format === "csv" ? "text/csv" : "application/json" } });
+    const response = await fetch(`/api/datasets/${encodeURIComponent(datasetId)}/export?format=${format}&include_secrets=${includeSecrets}`, { headers: { Accept: format === "xlsx" ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" : format === "csv" ? "text/csv" : "application/json" } });
     if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error || `导出失败 (${response.status})`); }
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
@@ -523,8 +647,8 @@ async function createDataset() {
       const identityFields = fields.filter((field) => field.unique).map((field) => field.source_key);
       await api(`/datasets/${encodeURIComponent(state.editDatasetId)}`, { method: "PATCH", body: JSON.stringify({ category_path: categoryPath, environment: $("#dataset-environment").value.trim() || null, clear_environment: !$("#dataset-environment").value.trim(), fields, identity_fields: identityFields, list_fields: readListConfig() }) });
       state.editDatasetId = null;
-      $("#dataset-modal").hidden = true;
       await refreshAfterWrite();
+      returnFromDatasetEditor();
       showToast("数据集属性已更新", "success");
       return;
     }
@@ -535,11 +659,11 @@ async function createDataset() {
       identity_fields: [],
       conflict_strategy: "allow_mark",
     }) });
-    $("#dataset-modal").hidden = true;
     state.category = result.category_path;
     state.environment = "all";
     state.page = 1;
     await refreshAfterWrite();
+    returnFromDatasetEditor();
     showToast("数据集已创建，可首次导入时定义 Schema", "success");
   } catch (error) { showToast(error.message, "error"); }
 }
@@ -644,8 +768,9 @@ async function commitImport() {
     $("#mapping-template-select").value = "";
     $("#skip-existing").checked = false;
     $("#delete-missing").checked = false;
-    $("#import-modal").hidden = true; $("#batch-options").hidden = true; state.pendingBatchId = null;
+    showWorkspace(state.importReturn); $("#batch-options").hidden = true; state.pendingBatchId = null;
     await refreshAfterWrite();
+    if (state.importReturn === "datasets") renderDatasetManager();
     const stats = result.import || result;
     showToast(`导入完成：${stats.imported ?? 0} 条，更新 ${stats.updated ?? 0} 条${result.deleted_missing ? `，删除 ${result.deleted_missing} 条` : ""}`, "success");
   } catch (error) { showToast(error.message, "error"); }
@@ -669,34 +794,43 @@ $("#clear-filters").addEventListener("click", async () => {
 });
 $("#previous-page").addEventListener("click", async () => { if (state.page > 1) { state.page--; await fetchRecords(); window.scrollTo({ top: 0, behavior: "smooth" }); } });
 $("#next-page").addEventListener("click", async () => { if (state.page * state.pageSize < state.total) { state.page++; await fetchRecords(); window.scrollTo({ top: 0, behavior: "smooth" }); } });
-$("#dataset-manager-button").addEventListener("click", () => { $("#export-with-secrets").checked = false; renderDatasetManager(); $("#dataset-manager-modal").hidden = false; });
+$("#dataset-manager-button").addEventListener("click", openDatasetManager);
+$("#manager-new-dataset").addEventListener("click", () => $("#new-dataset-button").click());
+$("#manager-import").addEventListener("click", openImport);
 $("#app-manager-button").addEventListener("click", async () => { try { await loadApps(); $("#app-manager-modal").hidden = false; } catch (error) { showToast(error.message, "error"); } });
 $("#create-app").addEventListener("click", async () => { try { const name = $("#app-name").value.trim(); if (!name) throw new Error("请填写应用名称"); const result = await api("/apps", { method: "POST", body: JSON.stringify({ name, permission: $("#app-permission").value, datasets: [] }) }); $("#app-name").value = ""; await loadApps(); window.prompt("请立即保存新的 API Key（只显示这一次）", result.key); } catch (error) { showToast(error.message, "error"); } });
-$("#new-dataset-button").addEventListener("click", () => { state.editDatasetId = null; state.evolvedFields = []; state.currentBatchSources = []; $("#dataset-title").textContent = "定义数据集"; $("#dataset-help").textContent = "可先创建空数据集，首次导入时再定义 Schema。"; $("#dataset-category").value = ""; $("#dataset-environment").value = ""; renderSchemaFields([]); $("#list-config").hidden = true; $("#list-config-fields").replaceChildren(); $("#first-schema-fields").replaceChildren(); $("#first-schema").hidden = true; $("#save-dataset").innerHTML = "创建数据集 <span>↗</span>"; $("#dataset-modal").hidden = false; $("#dataset-category").focus(); });
+$("#new-dataset-button").addEventListener("click", () => { state.editDatasetId = null; state.evolvedFields = []; state.currentBatchSources = []; $("#dataset-title").textContent = "定义数据集"; $("#dataset-help").textContent = "可先创建空数据集，首次导入时再定义 Schema。"; $("#dataset-category").value = ""; $("#dataset-environment").value = ""; renderSchemaFields([]); $("#list-config").hidden = true; $("#list-config-fields").replaceChildren(); $("#first-schema-fields").replaceChildren(); $("#first-schema").hidden = true; $("#save-dataset").innerHTML = "创建数据集 <span>↗</span>"; openDatasetEditor(); $("#dataset-category").focus(); });
 $("#edit-dataset-button").addEventListener("click", () => {
-  renderDatasetManager(); $("#dataset-manager-modal").hidden = false;
+  openDatasetManager();
 });
-$("#import-button").addEventListener("click", () => { datasetOptions(); $("#import-modal").hidden = false; });
+$("#import-button").addEventListener("click", openImport);
 $("#choose-file").addEventListener("click", () => $("#import-file").click());
 $("#import-file").addEventListener("change", (event) => importFile(event.target.files[0]));
 $("#commit-import").addEventListener("click", commitImport);
 $("#include-expired").addEventListener("change", async (event) => { state.includeExpired = event.target.checked; state.page = 1; await fetchRecords(); });
-$("#close-import").addEventListener("click", () => { $("#import-modal").hidden = true; });
+$("#close-import").addEventListener("click", () => showWorkspace(state.importReturn));
 $("#close-reveal").addEventListener("click", () => { $("#reveal-modal").hidden = true; state.pendingReveal = null; });
 $("#close-secrets").addEventListener("click", () => { $("#secrets-modal").hidden = true; state.secretModalRecordId = null; state.reveal = null; });
-$("#close-record-detail").addEventListener("click", () => { $("#record-detail-modal").hidden = true; });
-$("#close-dataset-manager").addEventListener("click", () => { $("#dataset-manager-modal").hidden = true; });
+$("#close-record-detail").addEventListener("click", closeRecordDetail);
+$("#close-dataset-info").addEventListener("click", () => $("#dataset-info-modal").close());
+$("#dataset-info-modal").addEventListener("click", (event) => {
+  if (event.target !== event.currentTarget) return;
+  const bounds = event.currentTarget.getBoundingClientRect();
+  if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) event.currentTarget.close();
+});
+$("#dataset-info-modal").addEventListener("close", () => $("#dataset-info-content").replaceChildren());
+$("#close-dataset-manager").addEventListener("click", () => showWorkspace("search"));
 $("#close-app-manager").addEventListener("click", () => { $("#app-manager-modal").hidden = true; });
 $("#cancel-reveal").addEventListener("click", () => { $("#reveal-modal").hidden = true; state.pendingReveal = null; });
 $("#confirm-reveal").addEventListener("click", () => { if (state.pendingReveal) handleSecretAction("reveal", state.pendingReveal.field); $("#reveal-modal").hidden = true; });
 $("#detect-schema")?.addEventListener("click", detectSchema);
 $("#save-dataset").addEventListener("click", createDataset);
-$("#close-dataset").addEventListener("click", () => { $("#dataset-modal").hidden = true; });
-$("#cancel-dataset").addEventListener("click", () => { $("#dataset-modal").hidden = true; });
+$("#close-dataset").addEventListener("click", returnFromDatasetEditor);
+$("#cancel-dataset").addEventListener("click", returnFromDatasetEditor);
 $("#load-dataset-file")?.addEventListener("click", () => $("#dataset-file")?.click());
 document.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); $("#search-input").focus(); }
-  if (event.key === "Escape") { ["#reveal-modal", "#import-modal", "#dataset-modal", "#secrets-modal", "#record-detail-modal", "#dataset-manager-modal", "#app-manager-modal"].forEach((selector) => { $(selector).hidden = true; }); }
+  if (event.key === "Escape") { closeRecordDetail(); state.reveal = null; state.secretModalRecordId = null; ["#reveal-modal", "#secrets-modal", "#app-manager-modal"].forEach((selector) => { $(selector).hidden = true; }); }
 });
 document.addEventListener("pointerdown", touch, { passive: true });
 
