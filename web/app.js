@@ -20,6 +20,8 @@ const state = {
   recordDetail: null,
   detailRevealRequest: 0,
   workspace: "search",
+  securityReturn: "search",
+  passwordChangeBusy: false,
   importReturn: "search",
   editorReturn: "search",
   editorReturnScroll: 0,
@@ -107,7 +109,7 @@ async function checkStatus() {
     $("#confirm-password").required = !status.initialized;
     $("#master-password").autocomplete = status.initialized ? "current-password" : "new-password";
     $("#master-password").minLength = status.initialized ? 1 : 12;
-    $("#vault-mode-note").textContent = status.initialized ? "主密码只用于本机解锁，不会保存明文。" : "首次使用请设置至少 12 个字符的主密码。";
+    $("#vault-mode-note").textContent = status.initialized ? "主密码用于解封数据密钥，不会保存明文。" : "首次使用请设置至少 12 个字符的主密码。";
     $(".unlock-button").lastChild.textContent = status.initialized ? " 解锁数据空间" : " 创建安全数据空间";
     if (!status.sealed && status.persistent && !state.unlocked) {
       state.unlocked = true;
@@ -128,7 +130,7 @@ async function unlockVault(event) {
   const password = $("#master-password").value;
   try {
     if (!state.initialized) {
-      if (password.length < 12) throw new Error("主密码至少需要 12 个字符");
+      if ([...password].length < 12) throw new Error("主密码至少需要 12 个字符");
       if (password !== $("#confirm-password").value) throw new Error("两次输入的主密码不一致");
       await api("/vault/setup", { method: "POST", body: JSON.stringify({ password }) });
       state.initialized = true;
@@ -437,10 +439,54 @@ function renderDetailSecrets() {
 
 function showWorkspace(page) {
   closeDatasetDownloads();
+  if (state.workspace === "security" && page !== "security") clearPasswordChange();
   state.workspace = page;
-  const sections = { search: "search-workspace", datasets: "dataset-manager-modal", editor: "dataset-modal", import: "import-modal" };
+  const sections = { security: "security-workspace", search: "search-workspace", datasets: "dataset-manager-modal", editor: "dataset-modal", import: "import-modal" };
   Object.entries(sections).forEach(([name, id]) => { $(`#${id}`).hidden = name !== page; });
   window.scrollTo({ top: 0 });
+}
+
+function clearPasswordChange() {
+  $("#change-password-form").reset();
+  $("#password-change-status").textContent = "";
+}
+
+function openSecuritySettings() {
+  if (state.passwordChangeBusy) return;
+  if (state.workspace !== "security") state.securityReturn = state.workspace;
+  clearPasswordChange();
+  showWorkspace("security");
+  $("#rotation-current-password").focus();
+}
+
+async function changeMasterPassword(event) {
+  event.preventDefault();
+  if (state.passwordChangeBusy) return;
+  const currentPassword = $("#rotation-current-password").value;
+  const newPassword = $("#rotation-new-password").value;
+  const confirmation = $("#rotation-confirm-password").value;
+  const status = $("#password-change-status");
+  if ([...newPassword].length < 12) { status.textContent = "新主密码至少需要 12 个字符"; return; }
+  if (newPassword !== confirmation) { status.textContent = "两次输入的新主密码不一致"; return; }
+  if (currentPassword === newPassword) { status.textContent = "新主密码必须与当前密码不同"; return; }
+  state.passwordChangeBusy = true;
+  ["#submit-password-change", "#cancel-password-change", "#close-security"].forEach((id) => { $(id).disabled = true; });
+  status.textContent = "正在安全更换密码，请勿关闭页面…";
+  try {
+    const result = await api("/vault/password", { method: "POST", body: JSON.stringify({ current_password: currentPassword, new_password: newPassword, confirm_password: confirmation }) });
+    await sealVault("主密码已更换，请使用新密码重新解锁", false);
+    if (result.durability_warning) showToast("密码已生效，但磁盘持久化确认失败。请保留新密码并检查存储状态。", "error");
+    if (result.audit_warning) showToast("密码已生效，但审计记录写入失败。", "error");
+  } catch (error) {
+    status.textContent = `${error.message}。若网络中断，请重新解锁确认密码状态。`;
+    $("#rotation-current-password").value = "";
+    $("#rotation-new-password").value = "";
+    $("#rotation-confirm-password").value = "";
+    showToast(error.message, "error");
+  } finally {
+    state.passwordChangeBusy = false;
+    ["#submit-password-change", "#cancel-password-change", "#close-security"].forEach((id) => { $(id).disabled = false; });
+  }
 }
 
 function openDatasetEditor() {
@@ -796,6 +842,9 @@ $("#clear-filters").addEventListener("click", async () => {
 });
 $("#previous-page").addEventListener("click", async () => { if (state.page > 1) { state.page--; await fetchRecords(); window.scrollTo({ top: 0, behavior: "smooth" }); } });
 $("#next-page").addEventListener("click", async () => { if (state.page * state.pageSize < state.total) { state.page++; await fetchRecords(); window.scrollTo({ top: 0, behavior: "smooth" }); } });
+$("#security-settings-button").addEventListener("click", openSecuritySettings);
+$("#change-password-form").addEventListener("submit", changeMasterPassword);
+["#close-security", "#cancel-password-change"].forEach((id) => $(id).addEventListener("click", () => { if (!state.passwordChangeBusy) showWorkspace(state.securityReturn); }));
 $("#dataset-manager-button").addEventListener("click", openDatasetManager);
 $("#manager-new-dataset").addEventListener("click", () => $("#new-dataset-button").click());
 $("#manager-import").addEventListener("click", openImport);

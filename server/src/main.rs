@@ -34,6 +34,9 @@ use zeroize::{Zeroize, Zeroizing};
 type HmacSha256 = Hmac<Sha256>;
 mod security;
 use security::*;
+mod rotation;
+mod envelope;
+use envelope::*;
 
 #[cfg(any(not(debug_assertions), test))]
 use axum::http::Uri;
@@ -89,14 +92,6 @@ impl Drop for KeySet {
         self.field.zeroize();
         self.identity.zeroize();
     }
-}
-
-#[derive(Serialize, Deserialize)]
-struct VaultMeta {
-    salt: String,
-    verifier: String,
-    #[serde(default = "legacy_kdf")]
-    kdf_version: u32,
 }
 
 #[derive(Debug)]
@@ -390,7 +385,7 @@ fn parse_startup_options(root: &FsPath) -> Result<StartupOptions, Box<dyn std::e
                 password = Some(value.trim_end_matches(['\r', '\n']).to_owned());
             }
             "--help" | "-h" => {
-                println!("SecureVault options: --data-dir PATH --port PORT --addr HOST:PORT --password-stdin");
+                println!("Offline rotation: securevault rotate-keys --data-dir SOURCE --output-dir NEW [--passwords-stdin]\nSecureVault options: --data-dir PATH --port PORT --addr HOST:PORT --password-stdin");
                 std::process::exit(0);
             }
             unknown => return Err(format!("unknown argument: {unknown}").into()),
@@ -406,6 +401,9 @@ fn parse_startup_options(root: &FsPath) -> Result<StartupOptions, Box<dyn std::e
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().nth(1).as_deref() == Some("rotate-keys") {
+        return rotation::run_cli().map_err(|e| std::io::Error::other(e.1).into());
+    }
     // Release binaries are self-contained; debug builds read the project's web directory.
     let executable = std::env::current_exe()?;
     let executable_dir = executable.parent().ok_or("executable has no parent directory")?;
@@ -443,34 +441,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         batches: Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
 
+    let _data_lock = lock_data_directory(&state.data_dir).map_err(|e| std::io::Error::other(e.1))?;
+    if state.data_dir.join("vault.meta.json").exists() || state.data_dir.join("securevault.db").exists() {
+        return Err("old development data layout is unsupported; use a fresh data directory".into());
+    }
     if let Some(password) = options.password {
-        let password = password.as_str();
-        if meta_path(&state).exists() {
-            let meta: VaultMeta = serde_json::from_slice(&fs::read(meta_path(&state))?)?;
-            let salt = hex::decode(meta.salt)?;
-            let keys = derive_keys(password, &salt, meta.kdf_version).map_err(|e| std::io::Error::other(e.1))?;
-            if !valid_verifier(&keys.db, &meta.verifier) {
-                return Err("startup password does not match the vault".into());
-            }
-            let connection = open_database(&database_path(&state), &keys.db).map_err(|e| std::io::Error::other(e.1))?;
-            initialize_schema(&connection).map_err(|e| std::io::Error::other(e.1))?;
-            drop(connection);
-            activate(&state, keys, true).await;
+        let keys = if meta_path(&state).exists() {
+            let meta = read_meta(&state).map_err(|e| std::io::Error::other(e.1))?;
+            if !database_path(&state).is_file() { return Err("vault database is missing".into()); }
+            unwrap_keys(&password, &meta).map_err(|e| std::io::Error::other(e.1))?
         } else {
-            if password.chars().count() < 12 {
-                return Err("startup password must be at least 12 characters".into());
-            }
-            let mut salt = [0u8; 16];
-            OsRng.fill_bytes(&mut salt);
-            let keys = derive_keys(password, &salt, 2).map_err(|e| std::io::Error::other(e.1))?;
-            let meta = VaultMeta { salt: hex::encode(salt), verifier: verifier(&keys.db), kdf_version: 2 };
-            fs::write(meta_path(&state), serde_json::to_vec(&meta)?)?;
-            #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; fs::set_permissions(meta_path(&state), fs::Permissions::from_mode(0o600))?; }
-            let connection = open_database(&database_path(&state), &keys.db).map_err(|e| std::io::Error::other(e.1))?;
-            initialize_schema(&connection).map_err(|e| std::io::Error::other(e.1))?;
-            drop(connection);
-            activate(&state, keys, true).await;
-        }
+            initialize_vault(&state, &password).map_err(|e| std::io::Error::other(e.1))?.0
+        };
+        let connection = open_database(&database_path(&state), &keys.db).map_err(|e| std::io::Error::other(e.1))?;
+        initialize_schema(&connection).map_err(|e| std::io::Error::other(e.1))?;
+        drop(connection);
+        activate(&state, keys, true).await;
     }
 
     let api = Router::new()
@@ -478,6 +464,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/vault/setup", post(vault_setup))
         .route("/vault/unlock", post(vault_unlock))
         .route("/vault/seal", post(vault_seal))
+        .route("/vault/password", post(change_password))
         .route("/datasets/schema-preview", post(schema_preview))
         .route("/datasets", get(list_datasets).post(create_dataset))
         .route("/datasets/{id}", axum::routing::patch(update_dataset))
@@ -524,44 +511,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn meta_path(state: &AppState) -> PathBuf {
-    state.data_dir.join("vault.meta.json")
+    state.data_dir.join("vault/vault.meta.json")
 }
 fn database_path(state: &AppState) -> PathBuf {
-    state.data_dir.join("securevault.db")
-}
-
-fn legacy_kdf() -> u32 { 1 }
-fn derive_keys(password: &str, salt: &[u8], version: u32) -> ApiResult<KeySet> {
-    let mut root = Zeroizing::new([0u8; 32]);
-    let params = match version {
-        1 => argon2::Params::new(19 * 1024, 2, 1, Some(32)),
-        2 => argon2::Params::new(64 * 1024, 3, 1, Some(32)),
-        _ => return Err(bad_request("unsupported KDF version")),
-    }.map_err(internal)?;
-    Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
-        .hash_password_into(password.as_bytes(), salt, &mut *root)
-        .map_err(|e| internal(format!("key derivation failed: {e}")))?;
-    let hk = Hkdf::<Sha256>::new(Some(salt), &*root);
-    let mut db = Zeroizing::new([0u8; 32]);
-    let mut field = Zeroizing::new([0u8; 32]);
-    let mut identity = Zeroizing::new([0u8; 32]);
-    hk.expand(b"securevault/sqlcipher/v1", &mut *db)
-        .map_err(internal)?;
-    hk.expand(b"securevault/field-encryption/v1", &mut *field)
-        .map_err(internal)?;
-    hk.expand(b"securevault/identity-hmac/v1", &mut *identity)
-        .map_err(internal)?;
-    Ok(KeySet {
-        db,
-        field,
-        identity,
-    })
-}
-
-fn verifier(key: &[u8; 32]) -> String {
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(key).expect("HMAC accepts 32-byte keys");
-    mac.update(b"securevault/password-verifier/v1");
-    hex::encode(mac.finalize().into_bytes())
+    state.data_dir.join("vault/securevault.db")
 }
 
 fn unix_now() -> i64 {
@@ -572,13 +525,10 @@ fn unix_now() -> i64 {
 }
 
 fn open_database(path: &FsPath, key: &[u8; 32]) -> ApiResult<Connection> {
-    let connection = Connection::open(path).map_err(internal)?;
+    let connection = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(internal)?;
     let key_hex = Zeroizing::new(hex::encode(key));
-    connection
-        .execute_batch(&format!(
-            "PRAGMA key = \"x'{}'\"; PRAGMA cipher_memory_security = ON;", key_hex.as_str()
-        ))
-        .map_err(internal)?;
+    let key_statement = Zeroizing::new(format!("PRAGMA key = \"x'{}'\"; PRAGMA cipher_memory_security = ON;", key_hex.as_str()));
+    connection.execute_batch(&key_statement).map_err(internal)?;
     connection
         .query_row("SELECT count(*) FROM sqlite_master", [], |row| {
             row.get::<_, i64>(0)
@@ -661,40 +611,10 @@ async fn vault_setup(
     Json(request): Json<PasswordRequest>,
 ) -> ApiResult<Response> {
     let guard = state.runtime.lock().await;
-    if request.password.chars().count() < 12 {
-        return Err(bad_request("master password must be at least 12 characters"));
-    }
-    if meta_path(&state).exists() {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "vault is already initialized".into(),
-        ));
-    }
-    let mut salt = [0u8; 16];
-    OsRng.fill_bytes(&mut salt);
-    let keys = derive_keys(&request.password, &salt, 2)?;
-    let meta = VaultMeta {
-        salt: hex::encode(salt),
-        verifier: verifier(&keys.db),
-        kdf_version: 2,
-    };
-    fs::write(
-        meta_path(&state),
-        serde_json::to_vec(&meta).map_err(internal)?,
-    )
-    .map_err(internal)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(meta_path(&state), fs::Permissions::from_mode(0o600))
-            .map_err(internal)?;
-    }
-    let connection = open_database(&database_path(&state), &keys.db)?;
-    initialize_schema(&connection)?;
-    drop(connection);
+    let (keys, warning) = initialize_vault(&state, &request.password)?;
     drop(guard);
     activate(&state, keys, false).await;
-    owner_session(&state).await
+    owner_session(&state, warning).await
 }
 
 async fn vault_unlock(
@@ -702,25 +622,13 @@ async fn vault_unlock(
     Json(request): Json<PasswordRequest>,
 ) -> ApiResult<Response> {
     let mut guard = state.runtime.lock().await;
-    if guard.unlock_after.is_some_and(|after| Instant::now() < after) {
-        return Err(ApiError(StatusCode::TOO_MANY_REQUESTS, "unlock rate limited; retry later".into()));
-    }
-    let meta: VaultMeta = serde_json::from_slice(
-        &fs::read(meta_path(&state))
-            .map_err(|_| ApiError(StatusCode::NOT_FOUND, "vault is not initialized".into()))?,
-    )
-    .map_err(internal)?;
-    let salt = hex::decode(meta.salt).map_err(internal)?;
-    let keys = derive_keys(&request.password, &salt, meta.kdf_version)?;
-    if !valid_verifier(&keys.db, &meta.verifier) {
-        guard.unlock_failures = guard.unlock_failures.saturating_add(1);
-        let delay = 1u64 << guard.unlock_failures.min(6);
-        guard.unlock_after = Some(Instant::now() + Duration::from_secs(delay));
-        return Err(ApiError(
-            StatusCode::UNAUTHORIZED,
-            "invalid master password".into(),
-        ));
-    }
+    check_password_limit(&guard)?;
+    let meta = read_meta(&state)?;
+    if !database_path(&state).is_file() { return Err(ApiError(StatusCode::CONFLICT, "vault database is missing; restore a complete backup".into())); }
+    let keys = match unwrap_keys(&request.password, &meta) {
+        Ok(keys) => keys,
+        Err(error) => { if error.0 == StatusCode::UNAUTHORIZED { password_failure(&mut guard); } return Err(error); }
+    };
     let connection = open_database(&database_path(&state), &keys.db)?;
     initialize_schema(&connection)?;
     drop(connection);
@@ -728,7 +636,7 @@ async fn vault_unlock(
     guard.unlock_after = None;
     drop(guard);
     activate(&state, keys, false).await;
-    owner_session(&state).await
+    owner_session(&state, false).await
 }
 
 async fn activate(state: &AppState, keys: KeySet, persistent: bool) {
@@ -969,6 +877,7 @@ fn open_field(
     nonce: &[u8],
     ciphertext: &[u8],
 ) -> ApiResult<Value> {
+    if nonce.len() != 12 { return Err(bad_request("invalid protected field nonce")); }
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
     let aad = format!("{record_id}\x1f{field}");
     let mut plaintext = cipher

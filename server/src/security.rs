@@ -33,14 +33,15 @@ pub(super) fn owner_cookie(headers: &HeaderMap, runtime: &Runtime) -> bool {
         && runtime.keys.is_some()
 }
 
-pub(super) async fn owner_session(state: &AppState) -> ApiResult<Response> {
+pub(super) async fn owner_session(state: &AppState, warning: bool) -> ApiResult<Response> {
     let token = Zeroizing::new(format!(
         "{}{}",
         Uuid::new_v4().simple(),
         Uuid::new_v4().simple()
     ));
     state.runtime.lock().await.session_hash = Some(app_key_hash(&token));
-    let mut response = Json(json!({"sealed": false})).into_response();
+    let mut response =
+        Json(json!({"sealed": false, "durability_warning": warning})).into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
         HeaderValue::from_str(&format!(
@@ -167,13 +168,22 @@ pub(super) async fn protect_api(
     response
 }
 
-pub(super) fn valid_verifier(key: &[u8; 32], expected: &str) -> bool {
-    let Ok(expected) = hex::decode(expected) else {
-        return false;
-    };
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(key).unwrap();
-    mac.update(b"securevault/password-verifier/v1");
-    mac.verify_slice(&expected).is_ok()
+pub(super) fn check_password_limit(runtime: &Runtime) -> ApiResult<()> {
+    if runtime
+        .unlock_after
+        .is_some_and(|after| Instant::now() < after)
+    {
+        return Err(ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "password verification rate limited; retry later".into(),
+        ));
+    }
+    Ok(())
+}
+pub(super) fn password_failure(runtime: &mut Runtime) {
+    runtime.unlock_failures = runtime.unlock_failures.saturating_add(1);
+    runtime.unlock_after =
+        Some(Instant::now() + Duration::from_secs(1u64 << runtime.unlock_failures.min(6)));
 }
 
 pub(super) fn csv_safe(value: &str) -> String {
@@ -235,27 +245,9 @@ pub(super) async fn security_headers(request: Request, next: Next) -> Response {
 mod tests {
     use super::*;
     #[test]
-    fn legacy_kdf_remains_compatible_and_verifier_rejects_tampering() {
-        let meta: VaultMeta = serde_json::from_str(r#"{"salt":"00","verifier":"00"}"#).unwrap();
-        assert_eq!(meta.kdf_version, 1);
-        let salt = [7u8; 16];
-        let keys = derive_keys("legacy-password-123", &salt, meta.kdf_version).unwrap();
-        let mut root = [0u8; 32];
-        Argon2::default()
-            .hash_password_into(b"legacy-password-123", &salt, &mut root)
-            .unwrap();
-        let mut expected = [0u8; 32];
-        Hkdf::<Sha256>::new(Some(&salt), &root)
-            .expand(b"securevault/sqlcipher/v1", &mut expected)
-            .unwrap();
-        assert_eq!(*keys.db, expected);
-        assert!(valid_verifier(&keys.db, &verifier(&keys.db)));
-        assert!(!valid_verifier(&keys.db, &"00".repeat(32)));
-    }
-    #[test]
     fn expired_sessions_drop_keys_without_request_activity() {
         let mut runtime = Runtime {
-            keys: Some(derive_keys("test-password-123", &[0; 16], 1).unwrap()),
+            keys: Some(random_keys()),
             unlocked_at: Some(Instant::now()),
             last_activity: Some(Instant::now() - Duration::from_secs(1801)),
             persistent: false,

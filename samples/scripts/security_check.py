@@ -2,6 +2,7 @@
 """Run security regression checks on a new, isolated demo database."""
 import argparse
 import json
+import os
 from pathlib import Path
 import secrets
 import socket
@@ -23,9 +24,12 @@ def main():
     with socket.socket() as sock:
         sock.bind(('127.0.0.1', 0))
         port = sock.getsockname()[1]
+    environment = os.environ.copy()
+    for name in ('SECUREVAULT_PASSWORD','SECUREVAULT_DATA_DIR','SECUREVAULT_ADDR','SECUREVAULT_PUBLIC_ORIGIN'):
+        environment.pop(name, None)
     with tempfile.TemporaryDirectory(prefix='security-', dir=scratch) as test_directory:
         process = subprocess.Popen([str((root / args.binary).resolve()), '--data-dir', test_directory, '--port', str(port)],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=environment)
         try:
             owner, anonymous = Client(port), Client(port)
             for _ in range(100):
@@ -55,7 +59,7 @@ def main():
             app = {'X-App-Id': readonly['id'], 'X-App-Key': readonly['key']}
             for path, method, data in [('/apps','GET',None),('/datasets','GET',None),
                                       ('/datasets','POST',{}),('/imports/upload','POST',{}),
-                                      ('/vault/seal','POST',{}),('/apps/x','PATCH',{}),
+                                      ('/vault/seal','POST',{}),('/vault/password','POST',{}),('/apps/x','PATCH',{}),
                                       ('/records/x/expired','POST',{})]:
                 owner.request(path, data, method=method, headers=app, expected=403)
             owner.request('/records/search', headers={'X-App-Id':'invalid','X-App-Key':'invalid'}, expected=401)
@@ -80,11 +84,53 @@ def main():
             second = Client(port)
             second.request('/vault/unlock', {'password':password})
             owner.request('/records/search', expected=401)
-            second.request('/vault/seal',{})
+            app_baseline = second.request('/records/search',headers=app)['total']
+            baseline = second.request('/datasets/'+payment+'/export?include_secrets=true')
+            new_password = secrets.token_urlsafe(32)
+            rotation = dict(current_password=password, new_password=new_password, confirm_password=new_password)
+            anonymous.request('/vault/password',rotation,expected=401)
+            second.request('/vault/password',rotation,headers=app,expected=403)
+            second.request('/vault/password',dict(rotation,confirm_password='mismatch'),expected=400)
+            second.request('/vault/password',dict(rotation,current_password='incorrect-password-123'),expected=401)
+            second.request('/vault/password',rotation,expected=429)
+            time.sleep(2.1)
+            db_path = Path(test_directory)/'vault/securevault.db'
+            # Assert the actual encrypted payloads and HMAC identities stay unchanged.
+            # Export is the public API check; crypto unit tests compare all three keys.
+            result = second.request('/vault/password',rotation)
+            assert result['sealed'] and result['password_changed'] and not result['durability_warning']
+            assert db_path.exists()
             second.request('/records/search',expected=423)
-            meta = json.loads((Path(test_directory)/'vault.meta.json').read_text())
-            assert meta['kdf_version'] == 2
-            print('通过：18组演示检查及匿名访问、权限隔离、会话轮换、Origin/Host、注入、导出、限速安全回归。')
+            second.request('/vault/unlock',{'password':password},expected=401)
+            time.sleep(2.1)
+            second.request('/vault/unlock',{'password':new_password})
+            assert second.request('/datasets/'+payment+'/export?include_secrets=true') == baseline
+            assert second.request('/records/search',headers=app)['total'] == app_baseline
+            process.terminate()
+            process.wait(timeout=10)
+            process = subprocess.Popen([str((root / args.binary).resolve()), '--data-dir', test_directory, '--port', str(port), '--password-stdin'],
+                                       stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=environment)
+            process.stdin.write((new_password+'\n').encode())
+            process.stdin.close()
+            for _ in range(100):
+                try:
+                    Client(port).request('/vault/status')
+                    break
+                except OSError:
+                    time.sleep(.1)
+            restarted = Client(port)
+            assert restarted.request('/vault/status')['persistent']
+            restarted.request('/datasets',expected=401)
+            assert restarted.request('/records/search',headers=app)['total'] == app_baseline
+            restarted.request('/vault/unlock',{'password':new_password})
+            assert restarted.request('/datasets/'+payment+'/export?include_secrets=true') == baseline
+            second.request('/records/search',expected=401)
+            restarted.request('/vault/seal',{})
+            restarted.request('/records/search',expected=423)
+            meta = json.loads((Path(test_directory)/'vault/vault.meta.json').read_text())
+            assert meta['header']['format'] == 1 and meta['header']['generation'] == 2
+            assert meta['header']['memory_kib'] == 65536 and 'verifier' not in meta
+            print('通过：主密码轮换、重启恢复、原数据及应用授权保持，18组演示检查及匿名访问、权限隔离、会话轮换、Origin/Host、注入、导出、限速安全回归。')
         finally:
             process.terminate()
             process.wait(timeout=10)

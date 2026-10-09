@@ -111,9 +111,10 @@ make clean       # 清理构建产物和 dist
 
 ## 安全与访问控制
 
-浏览器解锁后通过 HttpOnly 会话访问管理功能；应用密钥仅允许授权数据集的检索、查看与导出，不能管理数据集或应用。HTTP 服务仅允许监听回环地址，远程使用须配置 HTTPS 反向代理及 `SECUREVAULT_PUBLIC_ORIGIN`。新数据库使用更强的 Argon2id 参数，旧数据库保持兼容。完整安全边界、部署要求与回归方法见 [安全说明](docs/SECURITY.md)。
+浏览器解锁后通过 HttpOnly 会话访问管理功能；应用密钥仅允许授权数据集的检索、查看与导出，不能管理数据集或应用。HTTP 服务仅允许监听回环地址，远程使用须配置 HTTPS 反向代理及 `SECUREVAULT_PUBLIC_ORIGIN`。数据使用独立随机密钥，主密码通过 Argon2id 保护密钥封装；可在“安全设置”更换主密码，成功后撤销全部管理会话并封印。管理员还可停服运行 `./securevault rotate-keys --data-dir ./data --output-dir ./data-rotated`，完整轮换三把数据密钥；默认隐藏输入密码，生成新库，保留原库，并撤销旧应用凭据。成功后需切换服务的数据目录并重新签发应用凭据。这是全新数据格式，不兼容旧开发数据库。完整安全边界、部署要求与回归方法见 [安全说明](docs/SECURITY.md)。
 
 ```sh
+python3 samples/scripts/rotation_check.py  # 验证离线完整密钥轮换
 python3 samples/scripts/security_check.py  # 先构建 release；临时数据库验证，不影响已有数据
 ```
 

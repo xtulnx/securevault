@@ -499,3 +499,12 @@ html { scroll-padding-top: calc(var(--topbar-height) + 16px); }
   .secrets-dialog .secret-value { font-size: 12px; }
   .secrets-dialog .secret-action { min-width: 44px; min-height: 44px; }
 }
+
+.password-panel { max-width: 780px; }
+.password-change-form { display: grid; gap: 12px; max-width: 560px; }
+.password-change-form input { width: 100%; min-width: 0; min-height: 46px; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--bg-2); color: var(--ink); font: inherit; box-sizing: border-box; outline: 0; }
+.password-change-form input:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(103,216,223,.12); }
+.password-change-form label { color: var(--ink); font-weight: 600; }
+.security-note { color: var(--muted); line-height: 1.7; overflow-wrap: anywhere; }
+#password-change-status { color: var(--cyan); overflow-wrap: anywhere; }
+@media (max-width: 760px) { #security-settings-button { width: 44px; padding: 0; } #security-settings-button b { display: none; } .password-panel { max-width: 100%; } }

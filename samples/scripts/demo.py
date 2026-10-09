@@ -170,7 +170,7 @@ def main():
     args=parser.parse_args()
     if not args.binary.is_file(): parser.error('Build first: cargo build --locked --release --manifest-path server/Cargo.toml')
     if not args.serve and RUNTIME.exists(): parser.error('Demo runtime already exists; use --serve or move samples/.runtime aside to create a new demo.')
-    if args.serve and not (RUNTIME/'data/vault.meta.json').exists(): parser.error('Initialize the demo first.')
+    if args.serve and not (RUNTIME/'data/vault/vault.meta.json').exists(): parser.error('Initialize the demo first.')
     # Refuse occupied ports before starting so an unrelated vault cannot be modified.
     try:
         with socket.socket() as sock:
