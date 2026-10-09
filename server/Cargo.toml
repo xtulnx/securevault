@@ -26,3 +26,5 @@ zeroize = { version = "1", features = ["derive"] }
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 fs2 = "0.4"
 libc = "0.2"
+age = { version = "0.12", default-features = false }
+flate2 = "1"

@@ -209,17 +209,17 @@ pub(super) fn validate_schema(
                 "indexes" | "display" | "secrets" | "hidden"
             )
         {
-            return Err(bad_request("invalid or duplicate field definition"));
+            return Err(bad_request("字段定义无效或重复"));
         }
     }
     if identity.iter().any(|key| !seen.contains(key)) {
-        return Err(bad_request("identity field is not defined in schema"));
+        return Err(bad_request("唯一标识字段未在数据集结构中定义"));
     }
     for field in list {
         if !matches!(field.format.as_str(), "single_line" | "multiline" | "json")
             || !seen.contains(&field.source_key)
         {
-            return Err(bad_request("invalid list field or format"));
+            return Err(bad_request("列表展示字段或格式无效"));
         }
     }
     Ok(())

@@ -107,7 +107,31 @@ make clean       # 清理构建产物和 dist
 
 默认构建本机平台，可通过 `make package TARGET=x86_64-unknown-linux-gnu` 指定 Rust target（须自行安装对应工具链与链接器）。Makefile 使用已提交的 `server/Cargo.lock` 固定依赖版本。
 
-发布包仅包含 `securevault` 单个二进制，HTML、CSS、JavaScript 及其他 `web/` 资源在构建时自动嵌入，无需额外分发前端目录。解压后执行 `./securevault`，访问 `http://127.0.0.1:4173`，默认将数据写入二进制同目录的 `data/`。`make run` / debug 构建仍直接读取项目的 `web/`，便于修改前端后刷新调试；release 构建始终使用嵌入资源，更新前端后需要重新构建并替换二进制。构建脚本会监测 `web/` 的文件变化及新增、删除，自动重新生成嵌入资源。可用 `--data-dir PATH`、`--port PORT`、`--addr HOST:PORT` 覆盖默认设置，或使用 `SECUREVAULT_DATA_DIR`、`SECUREVAULT_ADDR` 环境变量。
+发布包仅包含 `securevault` 单个二进制，HTML、CSS、JavaScript 及其他 `web/` 资源在构建时自动嵌入，无需额外分发前端目录。解压后执行 `./securevault`，访问 `http://127.0.0.1:4173`，默认将数据写入二进制同目录的 `data/`。`make run` / debug 构建仍直接读取项目的 `web/`，便于修改前端后刷新调试；release 构建始终使用嵌入资源，更新前端后需要重新构建并替换二进制。构建脚本会监测 `web/` 的文件变化及新增、删除，自动重新生成嵌入资源。可用 `-d, --data-dir PATH`、`-p, --port PORT`、`-a, --addr HOST:PORT` 覆盖默认设置，或使用 `SECUREVAULT_DATA_DIR`、`SECUREVAULT_ADDR` 环境变量。
+
+CLI 支持长短参数名称，长名称保持兼容：
+
+| 参数 | 短名称 | 适用命令 |
+| --- | --- | --- |
+| `--data-dir` | `-d` | 启动、backup、rotate-keys |
+| `--port` | `-p` | 启动 |
+| `--addr` | `-a` | 启动 |
+| `--input` | `-i` | restore |
+| `--output` / `--output-dir` | `-o` | backup / restore、rotate-keys |
+| `--password-stdin` / `--passwords-stdin` | `-s` | 启动 / 管理命令 |
+| `--password` | `-P` | 启动（会暴露于进程参数，优先使用 `-s`） |
+| `--help` | `-h` | 所有命令 |
+
+## 全量备份与恢复
+
+停服后可导出独立密码保护的 `.jsonl.gz.age` 逻辑备份，包含全部业务数据、敏感/隐藏字段、数据集配置、模板及审计。恢复到新目录并设置新主密码，生成新数据密钥、撤销旧应用凭据。备份格式独立于数据库结构，可通过标准 age 解密、gzip 解压得到公开 JSONL，无需 SecureVault 读取明文。
+
+```sh
+./securevault backup -d ./data -o ./backup.jsonl.gz.age
+./securevault restore -i ./backup.jsonl.gz.age -o ./restored-data
+```
+
+密码默认从终端隐藏输入，备份密码独立于主密码。格式、兼容规则、标准工具解密、sample 操作与验证见 [备份恢复说明](docs/BACKUP_FORMAT.md)。
 
 ## 安全与访问控制
 

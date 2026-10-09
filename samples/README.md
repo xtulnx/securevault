@@ -96,3 +96,7 @@ python3 samples/scripts/api_demo.py
 ## README 截图
 
 项目根目录 [README](../README.md#功能与演示) 已包含总览、检索、详情、敏感字段掩码、导入和应用授权的真实界面截图。图片位于 `docs/screenshots/`，采用 WebP 格式，移除了浏览器截图画布多出的空白边缘；截图不包含主密码或应用密钥明文。
+
+## 保存当前体验状态
+
+`make demo` 重建原始演示；要保存体验期间的修改，停服后使用全量逻辑备份和恢复 CLI。备份独立密码加密，标准 age/gzip 可以独立读取，恢复会重新生成数据密钥并撤销旧应用凭据。命令与格式见 [全量备份恢复说明](../docs/BACKUP_FORMAT.md#sample-与回归)。

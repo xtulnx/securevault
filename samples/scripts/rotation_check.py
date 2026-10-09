@@ -98,7 +98,7 @@ def main():
             assert sum(len(rows) for rows in baseline.values()) == 98
             metadata = (source/'vault/vault.meta.json').read_bytes()
             payload = json.dumps(dict(current_password=password, new_password=replacement, confirm_password=replacement)).encode()
-            command = [binary, 'rotate-keys', '--data-dir', str(source), '--output-dir', str(destination), '--passwords-stdin']
+            command = [binary, 'rotate-keys', '-d', str(source), '-o', str(destination), '-s']
             def rotate(data=payload):
                 return subprocess.run(command, input=data, capture_output=True, env=environment, timeout=90)
             assert rotate().returncode != 0  # Shared exclusive lock rejects online rotation.

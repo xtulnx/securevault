@@ -60,7 +60,7 @@ SECUREVAULT_PUBLIC_ORIGIN=https://vault.example.com ./securevault --addr 127.0.0
 4. 所有应用均被停用，旧凭据的哈希被替换；在新库管理界面为仍需使用的应用重新轮换凭据、分发新凭据并启用。仅重新启用不能恢复旧凭据。管理会话随服务停止失效。
 5. 在验证和新的备份完成后，按管理员的保留策略处理旧目录、旧封装、旧备份和崩溃临时目录。工具保留原目录，不自动删除或声称实现磁盘安全擦除。
 
-自动化可加 `--passwords-stdin`，从标准输入提供 JSON 对象，严格包含 `current_password`、`new_password`、`confirm_password` 三项。不要将密码写在命令行参数、shell 历史或脚本源码中。CLI 不使用 `SECUREVAULT_PASSWORD` 等启动环境变量，不监听 HTTP。
+参数支持 `-d`（`--data-dir`）、`-o`（`--output-dir`）、`-h`（`--help`）；自动化可加 `-s` / `--passwords-stdin`，从标准输入提供 JSON 对象，严格包含 `current_password`、`new_password`、`confirm_password` 三项。不要将密码写在命令行参数、shell 历史或脚本源码中。CLI 不使用 `SECUREVAULT_PASSWORD` 等启动环境变量，不监听 HTTP。
 
 源目录与新目录共享服务的独占锁机制，源服务未停会拒绝操作。通过 [SQLCipher 的 `sqlcipher_export()`](https://www.zetetic.net/sqlcipher/sqlcipher-api/#sqlcipher_export) 将完整 schema 与数据直接复制到新密钥加密的临时库，不生成明文数据库、JSON 或 CSV 文件，SQL 临时存储限制在内存；显式保留 `user_version` 与 `application_id`。逐条解密并重加密所有 hidden/secrets 字段，重新生成 nonce，并按完整字段值重算 HMAC 身份索引。记录 ID、重复关联、过期状态、更新时间、数据集配置、导入模板和既有审计记录保留，新增轮换审计事件；应用凭据按上述规则撤销。
 
@@ -80,6 +80,10 @@ Unix 数据目录设为 0700，封装文件设为 0600。目录权限覆盖数�
 数据集逻辑 KEY 与列表格式使用 HTML 转义，服务端校验 schema 字段与列表格式枚举，CSP 提供额外保护。CSV 对可能触发电子表格公式的单元格和列名添加前导单引号；因此 CSV 下载可能对这些文本增加一个字符。JSON 保留原数据，XLSX 使用文本单元格。
 
 封印清除列表与已展示敏感信息的 DOM，弹窗关闭清除敏感值。30 秒临时查看是界面时限，无法撤回客户端已经复制、截图、下载或接收的内容。JavaScript 对象、解析结果和导出响应不保证全部物理清零；系统交换空间、崩溃转储、备份与已登录设备的保护仍由部署环境负责。
+
+## 全量逻辑备份
+
+离线 `backup` / `restore` 使用独立密码保护的标准 age + gzip + JSONL，包含全部受保护业务内容，不包含原主密码、数据库密钥或应用凭据哈希。可以由标准工具独立解密；解密后的文件须按机密材料管理。恢复生成新密钥，默认停用应用并撤销旧凭据，校验通过后只发布新目录。格式、版本兼容、安全边界与操作方法见 [备份恢复说明](BACKUP_FORMAT.md)。
 
 ## 验证
 

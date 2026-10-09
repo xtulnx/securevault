@@ -34,6 +34,7 @@ use zeroize::{Zeroize, Zeroizing};
 type HmacSha256 = Hmac<Sha256>;
 mod security;
 use security::*;
+mod backup;
 mod rotation;
 mod envelope;
 use envelope::*;
@@ -112,7 +113,7 @@ fn locked() -> ApiError {
     ApiError(StatusCode::LOCKED, "vault is sealed".into())
 }
 fn internal(_error: impl std::fmt::Display) -> ApiError {
-    ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal operation failed".into())
+    ApiError(StatusCode::INTERNAL_SERVER_ERROR, "内部操作失败".into())
 }
 
 fn app_key_hash(value: &str) -> String {
@@ -348,35 +349,55 @@ fn default_limit() -> usize {
     40
 }
 
+// Canonical names let short and long aliases share parsing and duplicate checks.
+fn cli_flag<'a>(argument: &'a str, command: &str) -> &'a str {
+    match argument {
+        "-d" => "--data-dir",
+        "-p" => "--port",
+        "-a" => "--addr",
+        "-P" => "--password",
+        "-s" if command == "server" => "--password-stdin",
+        "-s" => "--passwords-stdin",
+        "-i" => "--input",
+        "-o" if matches!(command, "restore" | "rotate-keys") => "--output-dir",
+        "-o" => "--output",
+        "-h" => "--help",
+        _ => argument,
+    }
+}
+
 fn parse_startup_options(root: &FsPath) -> Result<StartupOptions, Box<dyn std::error::Error>> {
     let mut data_dir = std::env::var_os("SECUREVAULT_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("data"));
     let mut address = std::env::var("SECUREVAULT_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:4173".into())
-        .parse::<SocketAddr>()?;
+        .parse::<SocketAddr>().map_err(|_| "SECUREVAULT_ADDR 格式无效，应为 IP地址:端口")?;
     let mut password = std::env::var("SECUREVAULT_PASSWORD").ok();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut index = 0;
+    let mut seen = std::collections::HashSet::new();
     while index < args.len() {
-        match args[index].as_str() {
+        let flag = cli_flag(&args[index], "server");
+        if !seen.insert(flag) { return Err(format!("参数 {flag} 重复，请只指定一次").into()); }
+        match flag {
             "--data-dir" => {
                 index += 1;
-                data_dir = PathBuf::from(args.get(index).ok_or("--data-dir requires a path")?);
+                data_dir = PathBuf::from(args.get(index).ok_or("--data-dir / -d 后需要提供目录路径")?);
             }
             "--port" => {
                 index += 1;
-                let port: u16 = args.get(index).ok_or("--port requires a number")?.parse()?;
+                let port: u16 = args.get(index).ok_or("--port / -p 后需要提供端口号")?.parse().map_err(|_| "端口号无效，请输入 0 至 65535 之间的整数")?;
                 address.set_port(port);
             }
             "--addr" => {
                 index += 1;
-                address = args.get(index).ok_or("--addr requires host:port")?.parse()?;
+                address = args.get(index).ok_or("--addr / -a 后需要提供监听地址，格式为 地址:端口")?.parse().map_err(|_| "监听地址无效，应为 IP地址:端口")?;
             }
             "--password" => {
                 index += 1;
-                password = Some(args.get(index).ok_or("--password requires a value")?.clone());
-                eprintln!("warning: --password may be visible in the process list; prefer SECUREVAULT_PASSWORD or --password-stdin");
+                password = Some(args.get(index).ok_or("--password / -P 后需要提供密码")?.clone());
+                eprintln!("警告：--password / -P 的密码可能显示在进程列表中；建议使用 -s / --password-stdin，或通过 SECUREVAULT_PASSWORD 提供");
             }
             "--password-stdin" => {
                 use std::io::Read;
@@ -385,10 +406,10 @@ fn parse_startup_options(root: &FsPath) -> Result<StartupOptions, Box<dyn std::e
                 password = Some(value.trim_end_matches(['\r', '\n']).to_owned());
             }
             "--help" | "-h" => {
-                println!("Offline rotation: securevault rotate-keys --data-dir SOURCE --output-dir NEW [--passwords-stdin]\nSecureVault options: --data-dir PATH --port PORT --addr HOST:PORT --password-stdin");
+                println!("用法：securevault [选项] | backup | restore | rotate-keys\n服务选项：\n  -d, --data-dir 路径        数据目录\n  -p, --port 端口           本机监听端口\n  -a, --addr 地址:端口      本机监听地址\n  -s, --password-stdin      从标准输入读取主密码\n  -P, --password 密码       直接传入主密码（可能显示在进程列表中，建议使用 -s）\n  -h, --help                显示帮助\n全量加密备份：securevault backup -d 源目录 -o backup.jsonl.gz.age\n全量恢复：securevault restore -i backup.jsonl.gz.age -o 新目录\n离线密钥轮换：securevault rotate-keys -d 源目录 -o 新目录 [-s]\n运行对应子命令并加上 -h / --help，可查看详细说明。");
                 std::process::exit(0);
             }
-            unknown => return Err(format!("unknown argument: {unknown}").into()),
+            unknown => return Err(format!("未知参数：{unknown}").into()),
         }
         index += 1;
     }
@@ -399,14 +420,46 @@ fn parse_startup_options(root: &FsPath) -> Result<StartupOptions, Box<dyn std::e
     })
 }
 
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    #[test]
+    fn short_options_use_the_same_canonical_names_as_long_options() {
+        for (short, long) in [("-d","--data-dir"),("-p","--port"),("-a","--addr"),("-P","--password"),("-h","--help")] {
+            assert_eq!(cli_flag(short,"server"),long);
+            assert_eq!(cli_flag(long,"server"),long);
+        }
+        assert_eq!(cli_flag("-s","server"),"--password-stdin");
+        for command in ["backup","restore","rotate-keys"] {
+            assert_eq!(cli_flag("-s",command),"--passwords-stdin");
+            assert_eq!(cli_flag("-d",command),"--data-dir");
+        }
+        assert_eq!(cli_flag("-o","backup"),"--output");
+        assert_eq!(cli_flag("-i","restore"),"--input");
+        assert_eq!(cli_flag("-o","restore"),"--output-dir");
+        assert_eq!(cli_flag("-o","rotate-keys"),"--output-dir");
+        assert_eq!(cli_flag("-unknown","backup"),"-unknown");
+    }
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
+    if let Err(error) = run().await {
+        eprintln!("错误：{error}");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    if matches!(std::env::args().nth(1).as_deref(), Some("backup" | "restore")) {
+        return backup::run_cli().map_err(|e| std::io::Error::other(e.1).into());
+    }
     if std::env::args().nth(1).as_deref() == Some("rotate-keys") {
         return rotation::run_cli().map_err(|e| std::io::Error::other(e.1).into());
     }
     // Release binaries are self-contained; debug builds read the project's web directory.
     let executable = std::env::current_exe()?;
-    let executable_dir = executable.parent().ok_or("executable has no parent directory")?;
+    let executable_dir = executable.parent().ok_or("无法确定可执行文件所在目录")?;
     let root = if !cfg!(debug_assertions) {
         executable_dir.to_path_buf()
     } else {
@@ -416,7 +469,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .to_path_buf()
     };
     let options = parse_startup_options(&root)?;
-    if !options.address.ip().is_loopback() { return Err("HTTP listener must use a loopback address; use an HTTPS reverse proxy for remote access".into()); }
+    if !options.address.ip().is_loopback() { return Err("HTTP 服务只能监听本机回环地址；远程访问请使用 HTTPS 反向代理".into()); }
     let data_dir = options.data_dir;
     fs::create_dir_all(&data_dir)?;
     #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700))?; }
@@ -435,7 +488,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         data_dir,
         public_origin: match std::env::var("SECUREVAULT_PUBLIC_ORIGIN").ok() {
             Some(origin) if origin.starts_with("https://") && origin[8..].parse::<axum::http::uri::Authority>().is_ok() => Some(origin),
-            Some(_) => return Err("SECUREVAULT_PUBLIC_ORIGIN must be an HTTPS origin without path".into()),
+            Some(_) => return Err("SECUREVAULT_PUBLIC_ORIGIN 必须是 HTTPS 源地址，不能包含路径".into()),
             None => None,
         },
         batches: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -443,12 +496,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _data_lock = lock_data_directory(&state.data_dir).map_err(|e| std::io::Error::other(e.1))?;
     if state.data_dir.join("vault.meta.json").exists() || state.data_dir.join("securevault.db").exists() {
-        return Err("old development data layout is unsupported; use a fresh data directory".into());
+        return Err("不支持旧开发数据布局，请使用新数据目录".into());
     }
     if let Some(password) = options.password {
         let keys = if meta_path(&state).exists() {
             let meta = read_meta(&state).map_err(|e| std::io::Error::other(e.1))?;
-            if !database_path(&state).is_file() { return Err("vault database is missing".into()); }
+            if !database_path(&state).is_file() { return Err("保险库数据库文件缺失".into()); }
             unwrap_keys(&password, &meta).map_err(|e| std::io::Error::other(e.1))?
         } else {
             initialize_vault(&state, &password).map_err(|e| std::io::Error::other(e.1))?.0
@@ -505,7 +558,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let address = options.address;
     let listener = tokio::net::TcpListener::bind(address).await?;
-    println!("SecureVault listening on http://{address}");
+    println!("SecureVault 已启动，访问地址：http://{address}");
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -746,7 +799,7 @@ fn normalize_category(value: &str) -> ApiResult<String> {
             .any(|part| part.is_empty() || *part == "." || *part == "..")
     {
         return Err(bad_request(
-            "category_path must be a valid slash-delimited path",
+            "category_path 必须是有效的分类路径，使用 / 分隔各级目录",
         ));
     }
     Ok(parts.join("/"))
@@ -877,7 +930,7 @@ fn open_field(
     nonce: &[u8],
     ciphertext: &[u8],
 ) -> ApiResult<Value> {
-    if nonce.len() != 12 { return Err(bad_request("invalid protected field nonce")); }
+    if nonce.len() != 12 { return Err(bad_request("受保护字段的随机数无效")); }
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
     let aad = format!("{record_id}\x1f{field}");
     let mut plaintext = cipher

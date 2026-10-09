@@ -15,12 +15,16 @@ pub(super) fn run_cli() -> ApiResult<()> {
     let mut output = None;
     let mut stdin = false;
     let mut i = 0;
+    let mut seen = std::collections::HashSet::new();
     while i < args.len() {
-        match args[i].as_str() {
+        let flag = cli_flag(&args[i], "rotate-keys");
+        if !seen.insert(flag) {
+            return Err(bad_request(format!("参数 {flag} 重复，请只指定一次")));
+        }
+        match flag {
             "--data-dir" | "--output-dir" => {
-                let flag = &args[i];
                 i += 1;
-                let path = PathBuf::from(args.get(i).ok_or_else(|| bad_request("missing path"))?);
+                let path = PathBuf::from(args.get(i).ok_or_else(|| bad_request("缺少路径参数"))?);
                 if flag == "--data-dir" {
                     source = Some(path);
                 } else {
@@ -30,16 +34,16 @@ pub(super) fn run_cli() -> ApiResult<()> {
             "--passwords-stdin" => stdin = true,
             "--help" | "-h" => {
                 println!(
-                    "securevault rotate-keys --data-dir SOURCE --output-dir NEW [--passwords-stdin]\nDefault: hidden terminal prompts. Optional stdin JSON current_password/new_password/confirm_password from stdin; NEW must not exist. Stop server first. All application credentials are revoked."
+                    "用法：securevault rotate-keys -d 源目录 -o 新目录 [-s]\n选项：\n  -d, --data-dir 路径       源数据目录\n  -o, --output-dir 路径     新数据目录（必须不存在，且位于源目录之外）\n  -s, --passwords-stdin     从标准输入读取密码 JSON\n  -h, --help                显示帮助\n默认通过终端输入密码，输入时不回显。\n使用 -s 时，JSON 必须包含 current_password、new_password、confirm_password 三个字段，分别填写当前主密码、新主密码、新主密码确认。\n操作前请停止服务；轮换后全部应用凭据撤销，需要重新签发。源目录保持原样，验证新库后请切换服务的数据目录。"
                 );
                 return Ok(());
             }
-            _ => return Err(bad_request("unknown rotation argument")),
+            _ => return Err(bad_request("未知的密钥轮换参数")),
         }
         i += 1;
     }
-    let source = source.ok_or_else(|| bad_request("--data-dir is required"))?;
-    let output = output.ok_or_else(|| bad_request("--output-dir is required"))?;
+    let source = source.ok_or_else(|| bad_request("必须指定源数据目录（-d / --data-dir）"))?;
+    let output = output.ok_or_else(|| bad_request("必须指定新数据目录（-o / --output-dir）"))?;
     let passwords: Passwords = if stdin {
         let mut bytes = Zeroizing::new(Vec::new());
         std::io::stdin()
@@ -47,9 +51,9 @@ pub(super) fn run_cli() -> ApiResult<()> {
             .read_to_end(&mut bytes)
             .map_err(internal)?;
         if bytes.len() > 32768 {
-            return Err(bad_request("password input is too large"));
+            return Err(bad_request("密码 JSON 输入超过 32 KiB 限制"));
         }
-        serde_json::from_slice(&bytes).map_err(|_| bad_request("invalid password JSON"))?
+        serde_json::from_slice(&bytes).map_err(|_| bad_request("密码 JSON 格式无效，请按帮助说明提供字段"))?
     } else {
         let mut passwords = Passwords {
             current_password: String::new(),
@@ -63,10 +67,10 @@ pub(super) fn run_cli() -> ApiResult<()> {
     };
     validate_new_password(&passwords.new_password)?;
     if passwords.new_password != passwords.confirm_password {
-        return Err(bad_request("password confirmation does not match"));
+        return Err(bad_request("两次输入的新主密码不一致"));
     }
     if passwords.new_password == passwords.current_password {
-        return Err(bad_request("use a different new master password"));
+        return Err(bad_request("新主密码必须与当前主密码不同"));
     }
     let warning = rotate(
         &source,
@@ -87,19 +91,19 @@ pub(super) fn run_cli() -> ApiResult<()> {
 // Configure the terminal before publishing the prompt, so even immediate pasted
 // input cannot race with echo suppression. Ctrl-C is handled as input for RAII cleanup.
 #[cfg(unix)]
-fn hidden_password(prompt: &str) -> ApiResult<String> {
+pub(super) fn hidden_password(prompt: &str) -> ApiResult<String> {
     use std::io::Write;
     use std::os::fd::AsRawFd;
     let mut tty = fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open("/dev/tty")
-        .map_err(|_| bad_request("no interactive terminal; use --passwords-stdin"))?;
+        .map_err(|_| bad_request("没有可交互的终端，请使用 -s / --passwords-stdin 从标准输入提供密码 JSON"))?;
     let fd = tty.as_raw_fd();
     let mut original = std::mem::MaybeUninit::<libc::termios>::uninit();
     // tcgetattr initializes the whole termios structure on success.
     if unsafe { libc::tcgetattr(fd, original.as_mut_ptr()) } != 0 {
-        return Err(internal("terminal configuration failed"));
+        return Err(internal("终端配置失败"));
     }
     let original = unsafe { original.assume_init() };
     let mut hidden = original;
@@ -107,7 +111,7 @@ fn hidden_password(prompt: &str) -> ApiResult<String> {
     hidden.c_cc[libc::VMIN] = 1;
     hidden.c_cc[libc::VTIME] = 0;
     if unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &hidden) } != 0 {
-        return Err(internal("terminal configuration failed"));
+        return Err(internal("终端配置失败"));
     }
     struct Restore {
         fd: std::os::fd::RawFd,
@@ -130,7 +134,7 @@ fn hidden_password(prompt: &str) -> ApiResult<String> {
             tty.read_exact(&mut *byte).map_err(internal)?;
             match byte[0] {
                 b'\n' | b'\r' => break,
-                3 | 4 => return Err(bad_request("password input cancelled")),
+                3 | 4 => return Err(bad_request("已取消密码输入")),
                 8 | 127 => {
                     bytes.pop();
                     while !bytes.is_empty() && std::str::from_utf8(&bytes).is_err() {
@@ -141,10 +145,10 @@ fn hidden_password(prompt: &str) -> ApiResult<String> {
                     bytes.zeroize();
                     bytes.clear();
                 }
-                0..=31 => return Err(bad_request("unsupported password control character")),
+                0..=31 => return Err(bad_request("密码中包含不支持的控制字符")),
                 value => {
                     if bytes.len() >= 1024 {
-                        return Err(bad_request("password exceeds 1024 UTF-8 bytes"));
+                        return Err(bad_request("密码超过 1024 个 UTF-8 字节限制"));
                     }
                     bytes.push(value);
                 }
@@ -152,17 +156,17 @@ fn hidden_password(prompt: &str) -> ApiResult<String> {
         }
         std::str::from_utf8(&bytes)
             .map(str::to_owned)
-            .map_err(|_| bad_request("password must be UTF-8"))
+            .map_err(|_| bad_request("密码必须使用 UTF-8 编码"))
     })();
     let _ = tty.write_all(b"\n");
     result
 }
 #[cfg(not(unix))]
-fn hidden_password(_prompt: &str) -> ApiResult<String> {
-    Err(bad_request("offline rotation requires macOS/Linux"))
+pub(super) fn hidden_password(_prompt: &str) -> ApiResult<String> {
+    Err(bad_request("交互式密码输入需要 macOS 或 Linux"))
 }
 
-fn state_for(data_dir: PathBuf) -> AppState {
+pub(super) fn state_for(data_dir: PathBuf) -> AppState {
     AppState {
         data_dir,
         public_origin: None,
@@ -188,7 +192,7 @@ fn rotate(
 ) -> ApiResult<bool> {
     #[cfg(not(unix))]
     return Err(bad_request(
-        "offline rotation currently requires a local macOS/Linux filesystem",
+        "离线密钥轮换目前需要 macOS 或 Linux 本地文件系统",
     ));
     validate_new_password(new_password)?;
     let source = fs::canonicalize(source).map_err(internal)?;
@@ -211,13 +215,13 @@ fn rotate(
     let output = parent.join(
         output
             .file_name()
-            .ok_or_else(|| bad_request("invalid output directory"))?,
+            .ok_or_else(|| bad_request("输出目录无效"))?,
     );
     if output.try_exists().map_err(internal)? || fs::symlink_metadata(&output).is_ok() {
-        return Err(bad_request("output directory must not exist"));
+        return Err(bad_request("输出目录已存在，请选择新目录，避免覆盖原有数据"));
     }
     if parent.starts_with(&source) {
-        return Err(bad_request("output must be outside the source directory"));
+        return Err(bad_request("输出目录必须位于源数据目录之外"));
     }
     let staging = parent.join(format!(".vault-rotation-{}", Uuid::new_v4().simple()));
     private_dir(&staging)?;
@@ -243,7 +247,7 @@ fn rotate(
                 "ATTACH DATABASE ?1 AS rotated KEY ?2",
                 params![
                     db.to_str()
-                        .ok_or_else(|| bad_request("output path must be UTF-8"))?,
+                        .ok_or_else(|| bad_request("输出路径必须使用 UTF-8 编码"))?,
                     key.as_str()
                 ],
             )
@@ -381,7 +385,7 @@ fn rotate(
         sync_directory(&staging).map_err(internal)?;
         // Atomic no-replace publication also closes the destination creation race.
         if output.try_exists().map_err(internal)? {
-            return Err(bad_request("output directory appeared during rotation"));
+            return Err(bad_request("轮换期间输出目录已被其他操作创建，请选择新目录"));
         }
         publish_directory(&staging, &output)?;
         Ok(sync_directory(&parent).is_err())
@@ -453,7 +457,7 @@ fn verify_records(
     Ok(())
 }
 
-fn publish_directory(source: &FsPath, destination: &FsPath) -> ApiResult<()> {
+pub(super) fn publish_directory(source: &FsPath, destination: &FsPath) -> ApiResult<()> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         use std::os::unix::ffi::OsStrExt;
@@ -484,12 +488,12 @@ fn publish_directory(source: &FsPath, destination: &FsPath) -> ApiResult<()> {
     {
         let _ = (source, destination);
         Err(bad_request(
-            "atomic offline publication requires macOS or Linux",
+            "离线原子发布需要 macOS 或 Linux",
         ))
     }
 }
 
-fn check_integrity(connection: &Connection) -> ApiResult<()> {
+pub(super) fn check_integrity(connection: &Connection) -> ApiResult<()> {
     let mut cipher = connection
         .prepare("PRAGMA cipher_integrity_check")
         .map_err(internal)?;

@@ -39,7 +39,7 @@ pub(super) fn random_keys() -> KeySet {
 pub(super) fn validate_new_password(password: &str) -> ApiResult<()> {
     if password.chars().count() < 12 || password.len() > 1024 {
         return Err(bad_request(
-            "master password must contain at least 12 characters and at most 1024 UTF-8 bytes",
+            "主密码至少需要 12 个字符，且不能超过 1024 个 UTF-8 字节",
         ));
     }
     Ok(())
@@ -55,12 +55,12 @@ fn wrapping_key(password: &str, header: &EnvelopeHeader) -> ApiResult<Zeroizing<
         || Uuid::parse_str(&header.vault_id).is_err()
     {
         return Err(bad_request(
-            "unsupported vault envelope format or KDF settings",
+            "不支持该密钥封装格式或密钥派生参数",
         ));
     }
-    let salt = hex::decode(&header.salt).map_err(|_| bad_request("invalid envelope salt"))?;
+    let salt = hex::decode(&header.salt).map_err(|_| bad_request("密钥封装的盐值无效"))?;
     if salt.len() != 16 || password.len() > 1024 {
-        return Err(bad_request("invalid password length or envelope salt"));
+        return Err(bad_request("密码长度或密钥封装的盐值无效"));
     }
     let params = argon2::Params::new(
         header.memory_kib,
@@ -98,7 +98,7 @@ pub(super) fn wrap_keys(
         generation: previous
             .map(|m| m.header.generation.checked_add(1))
             .unwrap_or(Some(1))
-            .ok_or_else(|| bad_request("envelope generation exhausted"))?,
+            .ok_or_else(|| bad_request("密钥封装版本号已达到上限"))?,
         kdf: "argon2id".into(),
         memory_kib: 65536,
         iterations: 3,
@@ -128,11 +128,11 @@ pub(super) fn wrap_keys(
 }
 
 pub(super) fn unwrap_keys(password: &str, meta: &VaultMeta) -> ApiResult<KeySet> {
-    let nonce = hex::decode(&meta.nonce).map_err(|_| bad_request("invalid envelope nonce"))?;
+    let nonce = hex::decode(&meta.nonce).map_err(|_| bad_request("密钥封装的随机数无效"))?;
     let ciphertext =
-        hex::decode(&meta.wrapped_keys).map_err(|_| bad_request("invalid envelope ciphertext"))?;
+        hex::decode(&meta.wrapped_keys).map_err(|_| bad_request("密钥封装的密文无效"))?;
     if nonce.len() != 12 || ciphertext.len() != 112 {
-        return Err(bad_request("invalid envelope length"));
+        return Err(bad_request("密钥封装长度无效"));
     }
     let key = wrapping_key(password, &meta.header)?;
     let aad = serde_json::to_vec(&meta.header).map_err(internal)?;
@@ -148,12 +148,12 @@ pub(super) fn unwrap_keys(password: &str, meta: &VaultMeta) -> ApiResult<KeySet>
             .map_err(|_| {
                 ApiError(
                     StatusCode::UNAUTHORIZED,
-                    "invalid master password or damaged key envelope".into(),
+                    "主密码错误或密钥封装已损坏".into(),
                 )
             })?,
     );
     if bundle.len() != 96 {
-        return Err(bad_request("invalid key bundle"));
+        return Err(bad_request("数据密钥包无效"));
     }
     let mut keys = KeySet {
         db: Zeroizing::new([0; 32]),
@@ -168,12 +168,12 @@ pub(super) fn unwrap_keys(password: &str, meta: &VaultMeta) -> ApiResult<KeySet>
 
 pub(super) fn read_meta(state: &AppState) -> ApiResult<VaultMeta> {
     let bytes = fs::read(meta_path(state))
-        .map_err(|_| ApiError(StatusCode::NOT_FOUND, "vault is not initialized".into()))?;
+        .map_err(|_| ApiError(StatusCode::NOT_FOUND, "保险库尚未初始化".into()))?;
     if bytes.len() > 4096 {
-        return Err(bad_request("invalid key envelope size"));
+        return Err(bad_request("密钥封装大小无效"));
     }
     serde_json::from_slice(&bytes)
-        .map_err(|_| bad_request("unsupported or damaged key envelope; use a fresh data directory"))
+        .map_err(|_| bad_request("密钥封装格式不受支持或已损坏，请使用新数据目录"))
 }
 
 pub(super) fn private_dir(path: &FsPath) -> ApiResult<()> {
@@ -252,7 +252,7 @@ pub(super) fn initialize_vault(state: &AppState, password: &str) -> ApiResult<(K
     if state.data_dir.join("vault").exists() {
         return Err(ApiError(
             StatusCode::CONFLICT,
-            "vault is already initialized".into(),
+            "保险库已经初始化".into(),
         ));
     }
     let staging = state
@@ -375,7 +375,7 @@ pub(super) fn lock_data_directory(path: &FsPath) -> ApiResult<File> {
     fs2::FileExt::try_lock_exclusive(&file).map_err(|_| {
         ApiError(
             StatusCode::CONFLICT,
-            "data directory is already in use by another server".into(),
+            "数据目录正在被其他服务使用，请先停止该服务".into(),
         )
     })?;
     Ok(file)
