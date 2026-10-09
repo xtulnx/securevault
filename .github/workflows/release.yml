@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add "${{ matrix.target }}"
+      - name: Verify release version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' server/Cargo.toml | head -n 1)
+          test "$RELEASE_TAG" = "v$version" || {
+            echo "Tag $RELEASE_TAG must match Cargo.toml version v$version"
+            exit 1
+          }
+      - name: Test
+        run: make test TARGET=${{ matrix.target }}
+      - name: Package
+        run: make package TARGET=${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: securevault-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: securevault-*
+          merge-multiple: true
+          path: dist
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" *.tar.gz SHA256SUMS --clobber
+          else
+            prerelease=()
+            if [[ "$RELEASE_TAG" == *-* ]]; then
+              prerelease=(--prerelease)
+            fi
+            gh release create "$RELEASE_TAG" *.tar.gz SHA256SUMS \
+              --verify-tag --generate-notes "${prerelease[@]}"
+          fi

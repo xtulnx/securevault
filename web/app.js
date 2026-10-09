@@ -23,6 +23,8 @@ const state = {
   lastActivity: 0,
   idleTimeout: 1800,
   maxSeconds: 14400
+  ,persistent: false,
+  theme: localStorage.getItem("securevault-theme") || "dark"
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -30,6 +32,28 @@ const $$ = (selector) => [...document.querySelectorAll(selector)];
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
+}
+
+function searchNeedles() {
+  return [...new Set(state.query.split(/\s+/).flatMap((token) => {
+    const value = token.includes(":") ? token.slice(token.indexOf(":") + 1) : token;
+    return [token, value].filter((item) => item.length > 0);
+  }))].sort((a, b) => b.length - a.length);
+}
+
+function highlightValue(value) {
+  const text = typeof value === "object" ? JSON.stringify(value) : String(value ?? "");
+  const needles = searchNeedles();
+  if (!needles.length) return escapeHtml(text);
+  const pattern = new RegExp(`(${needles.map((item) => item.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "ig");
+  let output = "";
+  let cursor = 0;
+  for (const match of text.matchAll(pattern)) {
+    output += escapeHtml(text.slice(cursor, match.index));
+    output += `<mark class="search-hit">${escapeHtml(match[0])}</mark>`;
+    cursor = match.index + match[0].length;
+  }
+  return output + escapeHtml(text.slice(cursor));
 }
 
 async function api(path, options = {}) {
@@ -59,10 +83,19 @@ function setSealedView() {
   $("#app").classList.add("is-sealed");
 }
 
+function applyTheme(theme = state.theme) {
+  state.theme = theme === "light" ? "light" : "dark";
+  document.documentElement.dataset.theme = state.theme;
+  localStorage.setItem("securevault-theme", state.theme);
+  const button = $("#theme-toggle");
+  if (button) { button.querySelector("span").textContent = state.theme === "light" ? "☾" : "☼"; button.querySelector("b").textContent = state.theme === "light" ? "暗色" : "浅色"; }
+}
+
 async function checkStatus() {
   try {
     const status = await api("/vault/status");
     state.initialized = status.initialized;
+    state.persistent = Boolean(status.persistent);
     $("#confirm-password-label").hidden = status.initialized;
     $("#confirm-password-wrap").hidden = status.initialized;
     $("#confirm-password").required = !status.initialized;
@@ -70,6 +103,15 @@ async function checkStatus() {
     $("#master-password").minLength = status.initialized ? 1 : 12;
     $("#vault-mode-note").textContent = status.initialized ? "主密码只用于本机解锁，不会保存明文。" : "首次使用请设置至少 12 个字符的主密码。";
     $(".unlock-button").lastChild.textContent = status.initialized ? " 解锁数据空间" : " 创建安全数据空间";
+    if (!status.sealed && status.persistent && !state.unlocked) {
+      state.unlocked = true;
+      state.unlockAt = Date.now();
+      state.lastActivity = state.unlockAt;
+      $("#app").classList.remove("is-sealed");
+      $("#app").classList.add("is-unsealed");
+      await loadWorkspace();
+      startWatchdog();
+    }
   } catch (error) {
     showToast(error.message, "error");
   }
@@ -106,6 +148,7 @@ async function unlockVault(event) {
 async function sealVault(message = "数据空间已手动封印", callServer = true) {
   clearInterval(state.timer);
   state.unlocked = false;
+  state.persistent = false;
   state.reveal = null;
   state.pendingReveal = null;
   state.pendingBatchId = null;
@@ -131,12 +174,12 @@ function startWatchdog() {
     const idleLeft = state.idleTimeout - Math.floor((now - state.lastActivity) / 1000);
     const maxLeft = state.maxSeconds - Math.floor((now - state.unlockAt) / 1000);
     const remaining = Math.min(idleLeft, maxLeft);
-    $("#idle-countdown").textContent = formatCountdown(Math.max(0, remaining));
+    $("#idle-countdown").textContent = state.persistent ? "持续" : formatCountdown(Math.max(0, remaining));
     if (state.reveal && state.reveal.expiresAt <= Date.now()) {
       state.reveal = null;
       if (state.secretModalRecordId) renderSecretFields();
     }
-    if (remaining <= 0) sealVault("会话已超时并自动封印");
+    if (!state.persistent && remaining <= 0) sealVault("会话已超时并自动封印");
   }, 1000);
 }
 
@@ -157,6 +200,7 @@ async function loadWorkspace() {
   await fetchRecords();
   renderCategoryTree();
   renderFilters();
+  renderIndexReference();
   renderStats();
 }
 
@@ -207,6 +251,31 @@ function renderFilters() {
   }));
 }
 
+function datasetsInCurrentDirectory() {
+  return state.datasets.filter((dataset) => state.category === "all" || dataset.category_path === state.category || dataset.category_path.startsWith(`${state.category}/`));
+}
+
+function insertSearchField(field) {
+  const input = $("#search-input");
+  const prefix = input.value.trim();
+  input.value = `${prefix}${prefix ? " " : ""}${field}:`;
+  state.query = input.value;
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+}
+
+function renderIndexReference() {
+  const datasets = datasetsInCurrentDirectory();
+  const groups = datasets.map((dataset) => {
+    const fields = (dataset.fields || []).filter((field) => field.zone === "indexes");
+    if (!fields.length) return "";
+    const buttons = fields.map((field) => `<button type="button" class="index-field-token" data-query-field="${escapeHtml(field.source_key)}" title="插入 ${escapeHtml(field.source_key)}:"><code>${escapeHtml(field.source_key)}</code>${field.display_name && field.display_name !== field.source_key ? `<span>${escapeHtml(field.display_name)}</span>` : ""}</button>`).join("");
+    return `<div class="index-reference-group"><div><strong>${escapeHtml(dataset.category_path)}</strong><span>${dataset.environment ? escapeHtml(dataset.environment) : "无环境"}</span></div><div class="index-field-list">${buttons}</div></div>`;
+  }).filter(Boolean);
+  $("#index-reference-content").innerHTML = groups.join("") || '<p class="detail-empty">当前目录下没有已定义的索引字段。</p>';
+  $$("[data-query-field]").forEach((button) => button.addEventListener("click", () => insertSearchField(button.dataset.queryField)));
+}
+
 async function selectCategory(category) {
   state.category = category;
   if (!environments().includes(state.environment)) state.environment = "all";
@@ -214,19 +283,38 @@ async function selectCategory(category) {
   await fetchRecords();
   renderCategoryTree();
   renderFilters();
+  renderIndexReference();
 }
 
 function allDisplay(record) {
+  const dataset = state.datasets.find((item) => item.id === record.dataset_id);
   const display = record.display || {};
-  if (Object.keys(display).length) return display;
-  return { 分类: record.category, ...(record.environment ? { 环境: record.environment } : {}), ...record.indexes };
+  const values = { ...record.indexes, ...display };
+  const configured = (dataset?.list_fields || []).filter((field) => field.visible !== false).sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+  if (configured.length) {
+    return configured.reduce((result, field) => {
+      if (!(field.source_key in values)) return result;
+      const value = values[field.source_key];
+      result[field.source_key] = field.format === "json" && typeof value === "object" ? JSON.stringify(value) : value;
+      return result;
+    }, {});
+  }
+  if (!Object.keys(display).length) return { 分类: record.category, ...(record.environment ? { 环境: record.environment } : {}), ...record.indexes };
+  const result = { ...display };
+  const matched = new Set(record.matched_fields || []);
+  for (const [key, value] of Object.entries(record.indexes || {})) if (matched.has(key)) result[key] = value;
+  return result;
 }
 
 function recordCard(record) {
-  const displayMarkup = Object.entries(allDisplay(record)).slice(0, 5).map(([key, value]) => `<div class="data-point"><label>${escapeHtml(record.fieldLabels[key] || key)}</label><span title="${escapeHtml(typeof value === "object" ? JSON.stringify(value) : value)}">${escapeHtml(typeof value === "object" ? JSON.stringify(value) : value)}</span></div>`).join("");
+  const dataset = state.datasets.find((item) => item.id === record.dataset_id);
+  const displayEntries = Object.entries(allDisplay(record));
+  const matched = new Set(record.matched_fields || []);
+  const visibleEntries = [...displayEntries.filter(([key]) => matched.has(key)), ...displayEntries.filter(([key]) => !matched.has(key))].filter((entry, index, all) => all.findIndex((item) => item[0] === entry[0]) === index);
+  const displayMarkup = visibleEntries.map(([key, value]) => { const format = dataset?.list_fields?.find((field) => field.source_key === key)?.format || "single_line"; return `<div class="data-point ${matched.has(key) ? "is-match" : ""}"><label>${highlightValue(record.fieldLabels[key] || key)}</label><span class="display-format-${format}" title="${escapeHtml(typeof value === "object" ? JSON.stringify(value) : value)}">${highlightValue(value)}</span></div>`; }).join("");
   const environmentTag = record.environment ? `<span class="tag environment">${escapeHtml(record.environment)}</span>` : `<span class="tag optional-tag">无环境</span>`;
-  const title = record.indexes.alias || record.indexes.merchant_id || Object.values(record.indexes)[0] || record.id;
-  return `<article class="record-card ${record.expired ? "is-expired" : ""}"><div class="record-head"><div class="record-title"><div class="record-tags"><span class="tag">${escapeHtml(record.category)}</span>${environmentTag}${record.expired ? '<span class="tag expired-tag">已过期</span>' : ""}</div><h4>${escapeHtml(title)}</h4><span class="record-id">${escapeHtml(record.id)}</span></div></div><div class="record-display">${displayMarkup}</div><div class="record-secrets"><span class="secret-count">${record.secret_count} 个敏感字段</span>${record.secret_count ? `<button class="reveal-secrets-button" data-action="open-secrets" data-record="${escapeHtml(record.id)}">按需查看 <span>→</span></button>` : ""}</div><div class="card-footer"><span>最近更新 ${escapeHtml(record.updated)}</span><button class="expired-toggle" data-expired-record="${escapeHtml(record.id)}" data-expired="${record.expired}">${record.expired ? "恢复有效" : "标记过期"}</button></div></article>`;
+  const title = record.indexes.alias || record.indexes.merchant_id || Object.values(record.indexes)[0] || "未命名记录";
+  return `<article class="record-card ${record.expired ? "is-expired" : ""}"><div class="record-head"><div class="record-title"><div class="record-tags"><span class="tag">${highlightValue(record.category)}</span>${environmentTag}${record.expired ? '<span class="tag expired-tag">已过期</span>' : ""}</div><h4>${highlightValue(title)}</h4><button class="detail-button" data-action="open-detail" data-record="${escapeHtml(record.id)}">查看全部详情</button></div></div><div class="record-display">${displayMarkup}</div><div class="record-secrets"><span class="secret-count">${record.secret_count} 个敏感字段</span>${record.secret_count ? `<button class="reveal-secrets-button" data-action="open-secrets" data-record="${escapeHtml(record.id)}">按需查看 <span>→</span></button>` : ""}</div><div class="card-footer"><span>最近更新 ${escapeHtml(record.updated)}</span><button class="expired-toggle" data-expired-record="${escapeHtml(record.id)}" data-expired="${record.expired}">${record.expired ? "恢复有效" : "标记过期"}</button></div></article>`;
 }
 
 function renderRecords() {
@@ -239,6 +327,7 @@ function renderRecords() {
   $("#next-page").disabled = state.page >= pages;
   $("#result-summary").textContent = `${state.total} 条记录`;
   $$('[data-action="open-secrets"]').forEach((button) => button.addEventListener("click", () => openSecrets(button.dataset.record)));
+  $$('[data-action="open-detail"]').forEach((button) => button.addEventListener("click", () => openRecordDetail(button.dataset.record)));
   $$('[data-expired-record]').forEach((button) => button.addEventListener("click", async () => {
     try { const expired = button.dataset.expired !== "true"; await api(`/records/${encodeURIComponent(button.dataset.expiredRecord)}/expired`, { method: "POST", body: JSON.stringify({ expired }) }); await refreshAfterWrite(); }
     catch (error) { showToast(error.message, "error"); }
@@ -269,9 +358,73 @@ async function showSecret(recordId, fieldName) {
 function openSecrets(recordId) {
   state.secretModalRecordId = recordId;
   const record = state.records.find((item) => item.id === recordId);
-  $("#secrets-record-meta").textContent = `${record.category}${record.environment ? ` · ${record.environment}` : ""} · ${record.id}`;
+  $("#secrets-record-meta").textContent = `${record.category}${record.environment ? ` · ${record.environment}` : ""}`;
   renderSecretFields();
   $("#secrets-modal").hidden = false;
+}
+
+function detailRows(values, labels = {}) {
+  return Object.entries(values || {}).map(([key, value]) => `<div class="detail-row"><span>${escapeHtml(labels[key] || key)}</span><strong>${highlightValue(value)}</strong></div>`).join("") || '<p class="detail-empty">无字段</p>';
+}
+
+async function openRecordDetail(recordId) {
+  try {
+    const detail = await api(`/records/${encodeURIComponent(recordId)}`);
+    const dataset = state.datasets.find((item) => item.id === detail.dataset_id);
+    const labels = Object.fromEntries((dataset?.fields || []).map((field) => [field.source_key, field.display_name || field.source_key]));
+    $("#record-detail-title").textContent = labels.alias ? `${labels.alias} · 记录详情` : "记录详情";
+    $("#record-detail-meta").textContent = `${detail.category}${detail.environment ? ` · ${detail.environment}` : ""}${detail.expired ? " · 已过期" : ""}`;
+    const protectedFields = (detail.protected_fields || []).map((field) => `<div class="detail-row protected"><span>${escapeHtml(labels[field.field_name] || field.field_name)}<small>${escapeHtml(field.zone)}</small></span><strong>${escapeHtml(field.masked)} <button class="detail-secret-button" data-record="${escapeHtml(detail.id)}">按需查看</button></strong></div>`).join("");
+    $("#record-detail-content").innerHTML = `<section class="detail-section"><h4>索引字段</h4>${detailRows(detail.indexes, labels)}</section><section class="detail-section"><h4>展示字段</h4>${detailRows(detail.display, labels)}</section><section class="detail-section"><h4>受保护字段</h4>${protectedFields || '<p class="detail-empty">无受保护字段</p>'}</section>`;
+    $$('[data-record].detail-secret-button').forEach((button) => button.addEventListener("click", () => { $("#record-detail-modal").hidden = true; openSecrets(button.dataset.record); }));
+    $("#record-detail-modal").hidden = false;
+  } catch (error) { showToast(error.message, "error"); }
+}
+
+function renderDatasetManager() {
+  $("#dataset-manager-list").innerHTML = state.datasets.map((dataset) => `<div class="dataset-manager-row"><div><strong>${escapeHtml(dataset.category_path)}</strong><span>${dataset.environment ? `环境：${escapeHtml(dataset.environment)}` : "无环境标签"} · ${dataset.record_count} 条记录 · ${dataset.fields.length} 个字段 · KEY ${dataset.identity_fields.length ? dataset.identity_fields.join(" + ") : "未设置"}</span></div><div class="row-actions"><button class="secondary-button dataset-export-button" data-format="json" data-dataset-id="${escapeHtml(dataset.id)}">JSON</button><button class="secondary-button dataset-export-button" data-format="csv" data-dataset-id="${escapeHtml(dataset.id)}">CSV</button><button class="secondary-button dataset-edit-button" data-dataset-id="${escapeHtml(dataset.id)}">编辑</button></div></div>`).join("") || '<p class="detail-empty">暂无数据集</p>';
+  $$(".dataset-edit-button").forEach((button) => button.addEventListener("click", () => {
+    const dataset = state.datasets.find((item) => item.id === button.dataset.datasetId);
+    if (!dataset) return;
+    state.editDatasetId = dataset.id;
+    $("#dataset-title").textContent = "编辑数据集属性";
+    $("#dataset-help").textContent = "修改目录路径或环境标签。Schema 可在导入时继续演进。";
+    $("#dataset-category").value = dataset.category_path;
+    $("#dataset-environment").value = dataset.environment || "";
+    renderSchemaFields(dataset.fields || []);
+    renderListConfig(dataset.fields || [], dataset.list_fields || []);
+    $("#save-dataset").innerHTML = "保存修改";
+    $("#dataset-manager-modal").hidden = true;
+    $("#dataset-modal").hidden = false;
+  }));
+  $$(".dataset-export-button").forEach((button) => button.addEventListener("click", () => exportDataset(button.dataset.datasetId, button.dataset.format, $("#export-with-secrets").checked)));
+}
+
+async function exportDataset(datasetId, format = "json", includeSecrets = false) {
+  try {
+    const response = await fetch(`/api/datasets/${encodeURIComponent(datasetId)}/export?format=${format}&include_secrets=${includeSecrets}`, { headers: { Accept: format === "csv" ? "text/csv" : "application/json" } });
+    if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error || `导出失败 (${response.status})`); }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a"); anchor.href = url; anchor.download = `securevault-${datasetId}.${format}`; anchor.click(); URL.revokeObjectURL(url);
+    showToast(`数据集已导出为 ${format.toUpperCase()}（${includeSecrets ? "包含机密" : "不含机密"}）`, "success");
+  } catch (error) { showToast(error.message, "error"); }
+}
+
+async function loadApps() {
+  const result = await api("/apps");
+  $("#app-manager-list").innerHTML = result.apps.map((app) => {
+    const selected = new Set(app.datasets || []);
+    const expired = app.access_expires_at && app.access_expires_at * 1000 <= Date.now();
+    const expiryText = app.access_expires_at ? (expired ? "授权已到期" : `授权至 ${new Date(app.access_expires_at * 1000).toLocaleString()}`) : "授权长期有效";
+    const ttlSelection = !app.access_expires_at ? 0 : Math.max(0, app.access_expires_at - Math.floor(Date.now() / 1000)) <= 1800 ? 1800 : Math.max(0, app.access_expires_at - Math.floor(Date.now() / 1000)) <= 7200 ? 7200 : 28800;
+    const choices = state.datasets.map((dataset) => `<label class="app-dataset-option"><input type="checkbox" value="${escapeHtml(dataset.id)}" ${selected.has(dataset.id) ? "checked" : ""}/><span><strong>${escapeHtml(dataset.category_path)}</strong><small>${dataset.environment ? escapeHtml(dataset.environment) : "无环境"}</small></span></label>`).join("") || '<p class="detail-empty">暂无可授权的数据集</p>';
+    return `<div class="dataset-manager-row app-manager-row" data-app-row="${escapeHtml(app.id)}"><div><strong>${escapeHtml(app.name)}</strong><span>${escapeHtml(app.id)} · ${app.permission === "secrets" ? "可获取敏感信息" : "只搜索"} · 可见 ${selected.size} 个数据集 · ${app.disabled ? "已禁用" : "启用"} · ${escapeHtml(expiryText)}</span></div><div class="row-actions"><button class="secondary-button app-configure" data-id="${escapeHtml(app.id)}">配置权限</button><button class="secondary-button app-toggle" data-id="${escapeHtml(app.id)}" data-disabled="${app.disabled}">${app.disabled ? "启用" : "禁用"}</button><button class="secondary-button app-rotate" data-id="${escapeHtml(app.id)}">轮换 Key</button></div><div class="app-dataset-editor" hidden><label>访问级别<select class="app-permission-edit"><option value="search" ${app.permission === "search" ? "selected" : ""}>只搜索</option><option value="secrets" ${app.permission === "secrets" ? "selected" : ""}>可获取敏感信息</option></select></label><label>授权时效<select class="app-ttl-edit"><option value="1800" ${ttlSelection === 1800 ? "selected" : ""}>30 分钟</option><option value="7200" ${ttlSelection === 7200 ? "selected" : ""}>2 小时</option><option value="28800" ${ttlSelection === 28800 ? "selected" : ""}>8 小时</option><option value="0" ${ttlSelection === 0 ? "selected" : ""}>长期有效</option></select></label><div class="app-dataset-heading"><strong>可见数据集</strong><span>未勾选的数据集不可搜索、查看、解密或导出</span></div><div class="app-dataset-options">${choices}</div><div class="dialog-actions"><button class="primary-button app-save-scope" data-id="${escapeHtml(app.id)}">保存授权并重新开启</button></div></div></div>`;
+  }).join("") || '<p class="detail-empty">暂无接入应用</p>';
+  $$(".app-configure").forEach((button) => button.addEventListener("click", () => { const editor = button.closest(".app-manager-row").querySelector(".app-dataset-editor"); editor.hidden = !editor.hidden; button.textContent = editor.hidden ? "配置权限" : "收起配置"; }));
+  $$(".app-save-scope").forEach((button) => button.addEventListener("click", async () => { try { const row = button.closest(".app-manager-row"); const datasets = [...row.querySelectorAll(".app-dataset-option input")].filter((input) => input.checked).map((input) => input.value); const permission = row.querySelector(".app-permission-edit").value; const access_ttl_seconds = Number(row.querySelector(".app-ttl-edit").value); await api(`/apps/${encodeURIComponent(button.dataset.id)}`, { method: "PATCH", body: JSON.stringify({ datasets, permission, access_ttl_seconds }) }); await loadApps(); showToast("应用授权已保存并重新开启", "success"); } catch (error) { showToast(error.message, "error"); } }));
+  $$(".app-toggle").forEach((button) => button.addEventListener("click", async () => { try { await api(`/apps/${encodeURIComponent(button.dataset.id)}`, { method: "PATCH", body: JSON.stringify({ disabled: button.dataset.disabled !== "true" }) }); await loadApps(); } catch (error) { showToast(error.message, "error"); } }));
+  $$(".app-rotate").forEach((button) => button.addEventListener("click", async () => { try { const result = await api(`/apps/${encodeURIComponent(button.dataset.id)}/rotate`, { method: "POST" }); window.prompt("请立即保存新的 API Key（只显示这一次）", result.key); } catch (error) { showToast(error.message, "error"); } }));
 }
 
 function renderSecretFields() {
@@ -308,9 +461,51 @@ async function handleSecretAction(action, field) {
   } catch (error) { showToast(error.message, "error"); }
 }
 
+function moveRowToPosition(row, rowSelector, value, refresh) {
+  const container = row.parentElement;
+  const rows = [...container.querySelectorAll(rowSelector)];
+  if (!rows.length) return;
+  const target = Math.max(0, Math.min(rows.length - 1, Number(value) - 1 || 0));
+  const current = rows.indexOf(row);
+  if (current < 0 || current === target) { refresh(); return; }
+  if (target >= rows.length - 1) container.append(row);
+  else container.insertBefore(row, rows[target + (target < current ? 0 : 1)]);
+  refresh();
+}
+
 function renderSchemaFields(fields) {
-  $("#schema-fields").innerHTML = fields.map((field) => `<div class="schema-field"><code class="schema-source-key">${escapeHtml(field.source_key)}</code><input class="schema-field-label" value="${escapeHtml(field.display_name)}" aria-label="字段显示名称" /><select class="schema-field-zone" aria-label="字段区域"><option value="indexes" ${field.zone === "indexes" ? "selected" : ""}>索引字段</option><option value="display" ${field.zone === "display" ? "selected" : ""}>展示字段</option><option value="hidden" ${field.zone === "hidden" ? "selected" : ""}>隐藏加密字段</option><option value="secrets" ${field.zone === "secrets" ? "selected" : ""}>敏感字段</option></select><label class="schema-unique"><input class="schema-field-unique" type="checkbox" ${field.unique ? "checked" : ""} />唯一 KEY</label></div>`).join("");
+  $("#schema-fields").innerHTML = fields.map((field, index) => `<div class="schema-field" data-original-source="${escapeHtml(field.source_key)}"><input class="schema-source-key-input" value="${escapeHtml(field.source_key)}" aria-label="字段名称" /><input class="schema-field-label" value="${escapeHtml(field.display_name || field.source_key)}" aria-label="字段显示名称" /><select class="schema-field-zone" aria-label="字段区域"><option value="indexes" ${field.zone === "indexes" ? "selected" : ""}>索引字段</option><option value="display" ${field.zone === "display" ? "selected" : ""}>展示字段</option><option value="hidden" ${field.zone === "hidden" ? "selected" : ""}>隐藏加密字段</option><option value="secrets" ${field.zone === "secrets" ? "selected" : ""}>敏感字段</option></select><label class="schema-unique"><input class="schema-field-unique" type="checkbox" ${field.unique ? "checked" : ""} />唯一 KEY</label><span class="schema-order"><input class="schema-position" type="number" min="1" max="${fields.length}" value="${index + 1}" aria-label="字段顺序" title="输入目标位置，可直接跳转" /><button type="button" data-schema-move="up" ${index === 0 ? "disabled" : ""} title="上移一行">↑</button><button type="button" data-schema-move="down" ${index === fields.length - 1 ? "disabled" : ""} title="下移一行">↓</button></span></div>`).join("");
   $("#schema-preview").hidden = false;
+  $("#schema-preview .schema-column-head").hidden = !fields.length;
+  $$('[data-schema-move]').forEach((button) => button.addEventListener("click", () => { const row = button.closest(".schema-field"); const sibling = button.dataset.schemaMove === "up" ? row.previousElementSibling : row.nextElementSibling; if (!sibling) return; if (button.dataset.schemaMove === "up") row.parentElement.insertBefore(row, sibling); else row.parentElement.insertBefore(sibling, row); renderSchemaOrderButtons(); }));
+  $$("#schema-fields .schema-position").forEach((input) => input.addEventListener("change", () => moveRowToPosition(input.closest(".schema-field"), ".schema-field", input.value, renderSchemaOrderButtons)));
+  renderSchemaOrderButtons();
+}
+
+function renderSchemaOrderButtons() {
+  const rows = $$("#schema-fields .schema-field");
+  rows.forEach((row, index) => { const buttons = row.querySelectorAll("[data-schema-move]"); buttons[0].disabled = index === 0; buttons[1].disabled = index === rows.length - 1; const input = row.querySelector(".schema-position"); if (input) { input.value = index + 1; input.max = rows.length; } });
+}
+
+function renderListConfig(fields, configured = []) {
+  const eligible = fields.filter((field) => ["indexes", "display"].includes(field.zone));
+  if (!eligible.length) { $("#list-config").hidden = true; return; }
+  const saved = new Map(configured.map((field, index) => [field.source_key, { ...field, position: field.position ?? index }]));
+  const rows = eligible.map((field, index) => saved.has(field.source_key) ? { ...field, ...saved.get(field.source_key) } : { ...field, position: configured.length + index, visible: true, format: "single_line" }).sort((a, b) => a.position - b.position);
+  $("#list-config").hidden = false;
+  $("#list-config-fields").innerHTML = rows.map((field, index) => `<div class="list-config-row" data-list-source="${escapeHtml(field.source_key)}"><label class="list-config-visible"><input type="checkbox" class="list-field-visible" ${field.visible !== false ? "checked" : ""} />显示</label><span class="list-config-name"><strong>${escapeHtml(field.display_name || field.source_key)}</strong><code>${escapeHtml(field.source_key)}</code></span><select class="list-field-format" aria-label="展示形式"><option value="single_line" ${field.format === "single_line" ? "selected" : ""}>单行截断</option><option value="multiline" ${field.format === "multiline" ? "selected" : ""}>多行换行</option><option value="json" ${field.format === "json" ? "selected" : ""}>JSON</option></select><span class="schema-order"><input class="schema-position" type="number" min="1" max="${rows.length}" value="${index + 1}" aria-label="列表字段顺序" title="输入目标位置，可直接跳转" /><button type="button" data-list-move="up" ${index === 0 ? "disabled" : ""} title="上移一行">↑</button><button type="button" data-list-move="down" ${index === rows.length - 1 ? "disabled" : ""} title="下移一行">↓</button></span></div>`).join("");
+  $$('[data-list-move]').forEach((button) => button.addEventListener("click", () => { const row = button.closest(".list-config-row"); const sibling = button.dataset.listMove === "up" ? row.previousElementSibling : row.nextElementSibling; if (!sibling) return; if (button.dataset.listMove === "up") row.parentElement.insertBefore(row, sibling); else row.parentElement.insertBefore(sibling, row); renderListOrderButtons(); }));
+  $$("#list-config-fields .schema-position").forEach((input) => input.addEventListener("change", () => moveRowToPosition(input.closest(".list-config-row"), ".list-config-row", input.value, renderListOrderButtons)));
+  renderListOrderButtons();
+}
+
+function renderListOrderButtons() {
+  const rows = $$("#list-config-fields .list-config-row");
+  rows.forEach((row, index) => { const buttons = row.querySelectorAll("[data-list-move]"); buttons[0].disabled = index === 0; buttons[1].disabled = index === rows.length - 1; const input = row.querySelector(".schema-position"); if (input) { input.value = index + 1; input.max = rows.length; } });
+}
+
+function readListConfig() {
+  return $$("#list-config-fields .list-config-row").map((row, position) => ({ source_key: row.dataset.listSource, display_name: row.querySelector(".list-config-name strong").textContent, position, format: row.querySelector(".list-field-format").value, visible: row.querySelector(".list-field-visible").checked }));
 }
 
 async function detectSchema() {
@@ -324,7 +519,9 @@ async function createDataset() {
     const categoryPath = $("#dataset-category").value.trim();
     if (!categoryPath) throw new Error("请填写分类目录路径");
     if (state.editDatasetId) {
-      await api(`/datasets/${encodeURIComponent(state.editDatasetId)}`, { method: "PATCH", body: JSON.stringify({ category_path: categoryPath, environment: $("#dataset-environment").value.trim() || null, clear_environment: !$("#dataset-environment").value.trim() }) });
+      const fields = $$("#schema-fields .schema-field").map((row, position) => { const sourceKey = row.querySelector(".schema-source-key-input").value.trim(); const original = row.dataset.originalSource; return { source_key: sourceKey, previous_source_key: original !== sourceKey ? original : null, display_name: row.querySelector(".schema-field-label").value.trim(), zone: row.querySelector(".schema-field-zone").value, unique: row.querySelector(".schema-field-unique").checked, position }; });
+      const identityFields = fields.filter((field) => field.unique).map((field) => field.source_key);
+      await api(`/datasets/${encodeURIComponent(state.editDatasetId)}`, { method: "PATCH", body: JSON.stringify({ category_path: categoryPath, environment: $("#dataset-environment").value.trim() || null, clear_environment: !$("#dataset-environment").value.trim(), fields, identity_fields: identityFields, list_fields: readListConfig() }) });
       state.editDatasetId = null;
       $("#dataset-modal").hidden = true;
       await refreshAfterWrite();
@@ -457,6 +654,7 @@ async function commitImport() {
 $("#unlock-form").addEventListener("submit", unlockVault);
 $("#toggle-password").addEventListener("click", () => { const input = $("#master-password"); input.type = input.type === "password" ? "text" : "password"; });
 $("#lock-button").addEventListener("click", () => sealVault());
+$("#theme-toggle").addEventListener("click", () => applyTheme(state.theme === "light" ? "dark" : "light"));
 $("#all-categories").addEventListener("click", () => selectCategory("all"));
 $("#search-input").addEventListener("input", (event) => {
   state.query = event.target.value;
@@ -471,17 +669,12 @@ $("#clear-filters").addEventListener("click", async () => {
 });
 $("#previous-page").addEventListener("click", async () => { if (state.page > 1) { state.page--; await fetchRecords(); window.scrollTo({ top: 0, behavior: "smooth" }); } });
 $("#next-page").addEventListener("click", async () => { if (state.page * state.pageSize < state.total) { state.page++; await fetchRecords(); window.scrollTo({ top: 0, behavior: "smooth" }); } });
-$("#new-dataset-button").addEventListener("click", () => { $("#dataset-modal").hidden = false; $("#dataset-category").focus(); });
+$("#dataset-manager-button").addEventListener("click", () => { $("#export-with-secrets").checked = false; renderDatasetManager(); $("#dataset-manager-modal").hidden = false; });
+$("#app-manager-button").addEventListener("click", async () => { try { await loadApps(); $("#app-manager-modal").hidden = false; } catch (error) { showToast(error.message, "error"); } });
+$("#create-app").addEventListener("click", async () => { try { const name = $("#app-name").value.trim(); if (!name) throw new Error("请填写应用名称"); const result = await api("/apps", { method: "POST", body: JSON.stringify({ name, permission: $("#app-permission").value, datasets: [] }) }); $("#app-name").value = ""; await loadApps(); window.prompt("请立即保存新的 API Key（只显示这一次）", result.key); } catch (error) { showToast(error.message, "error"); } });
+$("#new-dataset-button").addEventListener("click", () => { state.editDatasetId = null; state.evolvedFields = []; state.currentBatchSources = []; $("#dataset-title").textContent = "定义数据集"; $("#dataset-help").textContent = "可先创建空数据集，首次导入时再定义 Schema。"; $("#dataset-category").value = ""; $("#dataset-environment").value = ""; renderSchemaFields([]); $("#list-config").hidden = true; $("#list-config-fields").replaceChildren(); $("#first-schema-fields").replaceChildren(); $("#first-schema").hidden = true; $("#save-dataset").innerHTML = "创建数据集 <span>↗</span>"; $("#dataset-modal").hidden = false; $("#dataset-category").focus(); });
 $("#edit-dataset-button").addEventListener("click", () => {
-  const dataset = state.datasets.find((item) => item.category_path === state.category);
-  if (!dataset) { showToast("请先选择具体分类下的数据集", "info"); return; }
-  state.editDatasetId = dataset.id;
-  $("#dataset-title").textContent = "编辑数据集属性";
-  $("#dataset-help").textContent = "修改目录路径或环境标签。";
-  $("#dataset-category").value = dataset.category_path;
-  $("#dataset-environment").value = dataset.environment || "";
-  $("#save-dataset").innerHTML = "保存修改";
-  $("#dataset-modal").hidden = false;
+  renderDatasetManager(); $("#dataset-manager-modal").hidden = false;
 });
 $("#import-button").addEventListener("click", () => { datasetOptions(); $("#import-modal").hidden = false; });
 $("#choose-file").addEventListener("click", () => $("#import-file").click());
@@ -491,6 +684,9 @@ $("#include-expired").addEventListener("change", async (event) => { state.includ
 $("#close-import").addEventListener("click", () => { $("#import-modal").hidden = true; });
 $("#close-reveal").addEventListener("click", () => { $("#reveal-modal").hidden = true; state.pendingReveal = null; });
 $("#close-secrets").addEventListener("click", () => { $("#secrets-modal").hidden = true; state.secretModalRecordId = null; state.reveal = null; });
+$("#close-record-detail").addEventListener("click", () => { $("#record-detail-modal").hidden = true; });
+$("#close-dataset-manager").addEventListener("click", () => { $("#dataset-manager-modal").hidden = true; });
+$("#close-app-manager").addEventListener("click", () => { $("#app-manager-modal").hidden = true; });
 $("#cancel-reveal").addEventListener("click", () => { $("#reveal-modal").hidden = true; state.pendingReveal = null; });
 $("#confirm-reveal").addEventListener("click", () => { if (state.pendingReveal) handleSecretAction("reveal", state.pendingReveal.field); $("#reveal-modal").hidden = true; });
 $("#detect-schema")?.addEventListener("click", detectSchema);
@@ -500,7 +696,7 @@ $("#cancel-dataset").addEventListener("click", () => { $("#dataset-modal").hidde
 $("#load-dataset-file")?.addEventListener("click", () => $("#dataset-file")?.click());
 document.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); $("#search-input").focus(); }
-  if (event.key === "Escape") { ["#reveal-modal", "#import-modal", "#dataset-modal", "#secrets-modal"].forEach((selector) => { $(selector).hidden = true; }); }
+  if (event.key === "Escape") { ["#reveal-modal", "#import-modal", "#dataset-modal", "#secrets-modal", "#record-detail-modal", "#dataset-manager-modal", "#app-manager-modal"].forEach((selector) => { $(selector).hidden = true; }); }
 });
 document.addEventListener("pointerdown", touch, { passive: true });
 
@@ -508,5 +704,6 @@ const toastStyle = document.createElement("style");
 toastStyle.textContent = ".toast-region{position:fixed;z-index:20;right:20px;bottom:20px;display:grid;gap:8px}.toast{padding:11px 14px;border:1px solid var(--line-strong);border-radius:7px;background:#102c3d;color:#c8dbe3;font-size:11px;box-shadow:0 10px 30px rgba(0,0,0,.3);opacity:0;transform:translateY(8px);transition:opacity .25s,transform .25s}.toast.show{opacity:1;transform:none}.toast.success{border-color:rgba(103,216,223,.45)}.toast.error{border-color:rgba(239,126,135,.45);color:#ffc5c9}";
 document.head.appendChild(toastStyle);
 
+applyTheme();
 setSealedView();
 checkStatus();
