@@ -1,0 +1,1302 @@
+[
+  {
+    "key": "games_prod",
+    "file": "games_prod.json",
+    "mappings": [],
+    "category_path": "游戏业务/SDK/产品",
+    "environment": "正式",
+    "fields": [
+      {
+        "source_key": "alias",
+        "display_name": "产品名称",
+        "zone": "indexes",
+        "unique": false,
+        "position": 0
+      },
+      {
+        "source_key": "gid",
+        "display_name": "游戏 ID",
+        "zone": "indexes",
+        "unique": true,
+        "position": 1
+      },
+      {
+        "source_key": "platform",
+        "display_name": "平台",
+        "zone": "indexes",
+        "unique": true,
+        "position": 2
+      },
+      {
+        "source_key": "product_id",
+        "display_name": "产品编号",
+        "zone": "indexes",
+        "unique": false,
+        "position": 3
+      },
+      {
+        "source_key": "owner",
+        "display_name": "负责团队",
+        "zone": "indexes",
+        "unique": false,
+        "position": 4
+      },
+      {
+        "source_key": "region",
+        "display_name": "发行区域",
+        "zone": "indexes",
+        "unique": false,
+        "position": 5
+      },
+      {
+        "source_key": "version",
+        "display_name": "SDK 版本",
+        "zone": "display",
+        "unique": false,
+        "position": 6
+      },
+      {
+        "source_key": "status",
+        "display_name": "接入状态",
+        "zone": "display",
+        "unique": false,
+        "position": 7
+      },
+      {
+        "source_key": "pay_callback",
+        "display_name": "支付回调",
+        "zone": "display",
+        "unique": false,
+        "position": 8
+      },
+      {
+        "source_key": "refund_callback",
+        "display_name": "退款回调",
+        "zone": "display",
+        "unique": false,
+        "position": 9
+      },
+      {
+        "source_key": "description",
+        "display_name": "接入说明",
+        "zone": "display",
+        "unique": false,
+        "position": 10
+      },
+      {
+        "source_key": "tags",
+        "display_name": "标签",
+        "zone": "display",
+        "unique": false,
+        "position": 11
+      },
+      {
+        "source_key": "internal_note",
+        "display_name": "内部备注（列表隐藏）",
+        "zone": "display",
+        "unique": false,
+        "position": 12
+      },
+      {
+        "source_key": "app_secret",
+        "display_name": "应用密钥",
+        "zone": "secrets",
+        "unique": false,
+        "position": 13
+      },
+      {
+        "source_key": "product_key",
+        "display_name": "产品密钥",
+        "zone": "secrets",
+        "unique": false,
+        "position": 14
+      },
+      {
+        "source_key": "sign_key",
+        "display_name": "签名密钥",
+        "zone": "secrets",
+        "unique": false,
+        "position": 15
+      },
+      {
+        "source_key": "private_config",
+        "display_name": "私有配置",
+        "zone": "hidden",
+        "unique": false,
+        "position": 16
+      }
+    ],
+    "identity_fields": [
+      "gid",
+      "platform"
+    ],
+    "list_fields": [
+      {
+        "source_key": "alias",
+        "display_name": "产品名称",
+        "position": 0,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "gid",
+        "display_name": "游戏 ID",
+        "position": 1,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "platform",
+        "display_name": "平台",
+        "position": 2,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "product_id",
+        "display_name": "产品编号",
+        "position": 3,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "owner",
+        "display_name": "负责团队",
+        "position": 4,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "region",
+        "display_name": "发行区域",
+        "position": 5,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "version",
+        "display_name": "SDK 版本",
+        "position": 6,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "status",
+        "display_name": "接入状态",
+        "position": 7,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "pay_callback",
+        "display_name": "支付回调",
+        "position": 8,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "refund_callback",
+        "display_name": "退款回调",
+        "position": 9,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "description",
+        "display_name": "接入说明",
+        "position": 10,
+        "visible": true,
+        "format": "multiline"
+      },
+      {
+        "source_key": "tags",
+        "display_name": "标签",
+        "position": 11,
+        "visible": true,
+        "format": "json"
+      },
+      {
+        "source_key": "internal_note",
+        "display_name": "内部备注（列表隐藏）",
+        "position": 12,
+        "visible": false,
+        "format": "single_line"
+      }
+    ]
+  },
+  {
+    "key": "games_test",
+    "file": "games_test.json",
+    "mappings": [],
+    "category_path": "游戏业务/SDK/产品",
+    "environment": "测试",
+    "fields": [
+      {
+        "source_key": "alias",
+        "display_name": "产品名称",
+        "zone": "indexes",
+        "unique": false,
+        "position": 0
+      },
+      {
+        "source_key": "gid",
+        "display_name": "游戏 ID",
+        "zone": "indexes",
+        "unique": true,
+        "position": 1
+      },
+      {
+        "source_key": "platform",
+        "display_name": "平台",
+        "zone": "indexes",
+        "unique": true,
+        "position": 2
+      },
+      {
+        "source_key": "product_id",
+        "display_name": "产品编号",
+        "zone": "indexes",
+        "unique": false,
+        "position": 3
+      },
+      {
+        "source_key": "owner",
+        "display_name": "负责团队",
+        "zone": "indexes",
+        "unique": false,
+        "position": 4
+      },
+      {
+        "source_key": "region",
+        "display_name": "发行区域",
+        "zone": "indexes",
+        "unique": false,
+        "position": 5
+      },
+      {
+        "source_key": "version",
+        "display_name": "SDK 版本",
+        "zone": "display",
+        "unique": false,
+        "position": 6
+      },
+      {
+        "source_key": "status",
+        "display_name": "接入状态",
+        "zone": "display",
+        "unique": false,
+        "position": 7
+      },
+      {
+        "source_key": "pay_callback",
+        "display_name": "支付回调",
+        "zone": "display",
+        "unique": false,
+        "position": 8
+      },
+      {
+        "source_key": "refund_callback",
+        "display_name": "退款回调",
+        "zone": "display",
+        "unique": false,
+        "position": 9
+      },
+      {
+        "source_key": "description",
+        "display_name": "接入说明",
+        "zone": "display",
+        "unique": false,
+        "position": 10
+      },
+      {
+        "source_key": "tags",
+        "display_name": "标签",
+        "zone": "display",
+        "unique": false,
+        "position": 11
+      },
+      {
+        "source_key": "internal_note",
+        "display_name": "内部备注（列表隐藏）",
+        "zone": "display",
+        "unique": false,
+        "position": 12
+      },
+      {
+        "source_key": "app_secret",
+        "display_name": "应用密钥",
+        "zone": "secrets",
+        "unique": false,
+        "position": 13
+      },
+      {
+        "source_key": "product_key",
+        "display_name": "产品密钥",
+        "zone": "secrets",
+        "unique": false,
+        "position": 14
+      },
+      {
+        "source_key": "sign_key",
+        "display_name": "签名密钥",
+        "zone": "secrets",
+        "unique": false,
+        "position": 15
+      },
+      {
+        "source_key": "private_config",
+        "display_name": "私有配置",
+        "zone": "hidden",
+        "unique": false,
+        "position": 16
+      }
+    ],
+    "identity_fields": [
+      "gid",
+      "platform"
+    ],
+    "list_fields": [
+      {
+        "source_key": "alias",
+        "display_name": "产品名称",
+        "position": 0,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "gid",
+        "display_name": "游戏 ID",
+        "position": 1,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "platform",
+        "display_name": "平台",
+        "position": 2,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "product_id",
+        "display_name": "产品编号",
+        "position": 3,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "owner",
+        "display_name": "负责团队",
+        "position": 4,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "region",
+        "display_name": "发行区域",
+        "position": 5,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "version",
+        "display_name": "SDK 版本",
+        "position": 6,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "status",
+        "display_name": "接入状态",
+        "position": 7,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "pay_callback",
+        "display_name": "支付回调",
+        "position": 8,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "refund_callback",
+        "display_name": "退款回调",
+        "position": 9,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "description",
+        "display_name": "接入说明",
+        "position": 10,
+        "visible": true,
+        "format": "multiline"
+      },
+      {
+        "source_key": "tags",
+        "display_name": "标签",
+        "position": 11,
+        "visible": true,
+        "format": "json"
+      },
+      {
+        "source_key": "internal_note",
+        "display_name": "内部备注（列表隐藏）",
+        "position": 12,
+        "visible": false,
+        "format": "single_line"
+      }
+    ]
+  },
+  {
+    "key": "games_staging",
+    "file": "games_staging.json",
+    "mappings": [],
+    "category_path": "游戏业务/SDK/产品",
+    "environment": "预发布",
+    "fields": [
+      {
+        "source_key": "alias",
+        "display_name": "产品名称",
+        "zone": "indexes",
+        "unique": false,
+        "position": 0
+      },
+      {
+        "source_key": "gid",
+        "display_name": "游戏 ID",
+        "zone": "indexes",
+        "unique": true,
+        "position": 1
+      },
+      {
+        "source_key": "platform",
+        "display_name": "平台",
+        "zone": "indexes",
+        "unique": true,
+        "position": 2
+      },
+      {
+        "source_key": "product_id",
+        "display_name": "产品编号",
+        "zone": "indexes",
+        "unique": false,
+        "position": 3
+      },
+      {
+        "source_key": "owner",
+        "display_name": "负责团队",
+        "zone": "indexes",
+        "unique": false,
+        "position": 4
+      },
+      {
+        "source_key": "region",
+        "display_name": "发行区域",
+        "zone": "indexes",
+        "unique": false,
+        "position": 5
+      },
+      {
+        "source_key": "version",
+        "display_name": "SDK 版本",
+        "zone": "display",
+        "unique": false,
+        "position": 6
+      },
+      {
+        "source_key": "status",
+        "display_name": "接入状态",
+        "zone": "display",
+        "unique": false,
+        "position": 7
+      },
+      {
+        "source_key": "pay_callback",
+        "display_name": "支付回调",
+        "zone": "display",
+        "unique": false,
+        "position": 8
+      },
+      {
+        "source_key": "refund_callback",
+        "display_name": "退款回调",
+        "zone": "display",
+        "unique": false,
+        "position": 9
+      },
+      {
+        "source_key": "description",
+        "display_name": "接入说明",
+        "zone": "display",
+        "unique": false,
+        "position": 10
+      },
+      {
+        "source_key": "tags",
+        "display_name": "标签",
+        "zone": "display",
+        "unique": false,
+        "position": 11
+      },
+      {
+        "source_key": "internal_note",
+        "display_name": "内部备注（列表隐藏）",
+        "zone": "display",
+        "unique": false,
+        "position": 12
+      },
+      {
+        "source_key": "app_secret",
+        "display_name": "应用密钥",
+        "zone": "secrets",
+        "unique": false,
+        "position": 13
+      },
+      {
+        "source_key": "product_key",
+        "display_name": "产品密钥",
+        "zone": "secrets",
+        "unique": false,
+        "position": 14
+      },
+      {
+        "source_key": "sign_key",
+        "display_name": "签名密钥",
+        "zone": "secrets",
+        "unique": false,
+        "position": 15
+      },
+      {
+        "source_key": "private_config",
+        "display_name": "私有配置",
+        "zone": "hidden",
+        "unique": false,
+        "position": 16
+      }
+    ],
+    "identity_fields": [
+      "gid",
+      "platform"
+    ],
+    "list_fields": [
+      {
+        "source_key": "alias",
+        "display_name": "产品名称",
+        "position": 0,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "gid",
+        "display_name": "游戏 ID",
+        "position": 1,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "platform",
+        "display_name": "平台",
+        "position": 2,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "product_id",
+        "display_name": "产品编号",
+        "position": 3,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "owner",
+        "display_name": "负责团队",
+        "position": 4,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "region",
+        "display_name": "发行区域",
+        "position": 5,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "version",
+        "display_name": "SDK 版本",
+        "position": 6,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "status",
+        "display_name": "接入状态",
+        "position": 7,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "pay_callback",
+        "display_name": "支付回调",
+        "position": 8,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "refund_callback",
+        "display_name": "退款回调",
+        "position": 9,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "description",
+        "display_name": "接入说明",
+        "position": 10,
+        "visible": true,
+        "format": "multiline"
+      },
+      {
+        "source_key": "tags",
+        "display_name": "标签",
+        "position": 11,
+        "visible": true,
+        "format": "json"
+      },
+      {
+        "source_key": "internal_note",
+        "display_name": "内部备注（列表隐藏）",
+        "position": 12,
+        "visible": false,
+        "format": "single_line"
+      }
+    ]
+  },
+  {
+    "key": "payments",
+    "file": "merchants.csv",
+    "mappings": [
+      {
+        "source_key": "商户名称",
+        "target_key": "alias"
+      },
+      {
+        "source_key": "商户编号",
+        "target_key": "merchant_id"
+      },
+      {
+        "source_key": "支付渠道",
+        "target_key": "channel"
+      },
+      {
+        "source_key": "区域",
+        "target_key": "region"
+      },
+      {
+        "source_key": "通知地址",
+        "target_key": "callback"
+      },
+      {
+        "source_key": "币种",
+        "target_key": "currency"
+      },
+      {
+        "source_key": "结算周期",
+        "target_key": "settlement"
+      },
+      {
+        "source_key": "接入备注",
+        "target_key": "description"
+      },
+      {
+        "source_key": "API密钥",
+        "target_key": "api_key"
+      },
+      {
+        "source_key": "私有证书",
+        "target_key": "certificate"
+      }
+    ],
+    "category_path": "支付业务/商户",
+    "environment": "正式",
+    "fields": [
+      {
+        "source_key": "alias",
+        "display_name": "商户名称",
+        "zone": "indexes",
+        "unique": false,
+        "position": 0
+      },
+      {
+        "source_key": "merchant_id",
+        "display_name": "商户编号",
+        "zone": "indexes",
+        "unique": true,
+        "position": 1
+      },
+      {
+        "source_key": "channel",
+        "display_name": "支付渠道",
+        "zone": "indexes",
+        "unique": false,
+        "position": 2
+      },
+      {
+        "source_key": "region",
+        "display_name": "区域",
+        "zone": "indexes",
+        "unique": false,
+        "position": 3
+      },
+      {
+        "source_key": "callback",
+        "display_name": "通知地址",
+        "zone": "display",
+        "unique": false,
+        "position": 4
+      },
+      {
+        "source_key": "currency",
+        "display_name": "币种",
+        "zone": "display",
+        "unique": false,
+        "position": 5
+      },
+      {
+        "source_key": "settlement",
+        "display_name": "结算周期",
+        "zone": "display",
+        "unique": false,
+        "position": 6
+      },
+      {
+        "source_key": "description",
+        "display_name": "接入备注",
+        "zone": "display",
+        "unique": false,
+        "position": 7
+      },
+      {
+        "source_key": "api_key",
+        "display_name": "API 密钥",
+        "zone": "secrets",
+        "unique": false,
+        "position": 8
+      },
+      {
+        "source_key": "certificate",
+        "display_name": "私有证书",
+        "zone": "hidden",
+        "unique": false,
+        "position": 9
+      }
+    ],
+    "identity_fields": [
+      "merchant_id"
+    ],
+    "list_fields": [
+      {
+        "source_key": "alias",
+        "display_name": "商户名称",
+        "position": 0,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "merchant_id",
+        "display_name": "商户编号",
+        "position": 1,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "channel",
+        "display_name": "支付渠道",
+        "position": 2,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "region",
+        "display_name": "区域",
+        "position": 3,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "callback",
+        "display_name": "通知地址",
+        "position": 4,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "currency",
+        "display_name": "币种",
+        "position": 5,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "settlement",
+        "display_name": "结算周期",
+        "position": 6,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "description",
+        "display_name": "接入备注",
+        "position": 7,
+        "visible": true,
+        "format": "multiline"
+      }
+    ]
+  },
+  {
+    "key": "cloud",
+    "file": "cloud_services.xlsx",
+    "mappings": [],
+    "category_path": "基础设施/云服务",
+    "environment": "正式",
+    "fields": [
+      {
+        "source_key": "alias",
+        "display_name": "服务名称",
+        "zone": "indexes",
+        "unique": false,
+        "position": 0
+      },
+      {
+        "source_key": "service_id",
+        "display_name": "服务编号",
+        "zone": "indexes",
+        "unique": true,
+        "position": 1
+      },
+      {
+        "source_key": "region",
+        "display_name": "部署区域",
+        "zone": "indexes",
+        "unique": true,
+        "position": 2
+      },
+      {
+        "source_key": "provider",
+        "display_name": "云服务商",
+        "zone": "indexes",
+        "unique": false,
+        "position": 3
+      },
+      {
+        "source_key": "endpoint",
+        "display_name": "访问地址",
+        "zone": "display",
+        "unique": false,
+        "position": 4
+      },
+      {
+        "source_key": "replicas",
+        "display_name": "副本数",
+        "zone": "display",
+        "unique": false,
+        "position": 5
+      },
+      {
+        "source_key": "runbook",
+        "display_name": "维护说明",
+        "zone": "display",
+        "unique": false,
+        "position": 6
+      },
+      {
+        "source_key": "access_key",
+        "display_name": "访问密钥",
+        "zone": "secrets",
+        "unique": false,
+        "position": 7
+      },
+      {
+        "source_key": "secret_key",
+        "display_name": "签名密钥",
+        "zone": "secrets",
+        "unique": false,
+        "position": 8
+      }
+    ],
+    "identity_fields": [
+      "service_id",
+      "region"
+    ],
+    "list_fields": [
+      {
+        "source_key": "alias",
+        "display_name": "服务名称",
+        "position": 0,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "service_id",
+        "display_name": "服务编号",
+        "position": 1,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "region",
+        "display_name": "部署区域",
+        "position": 2,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "provider",
+        "display_name": "云服务商",
+        "position": 3,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "endpoint",
+        "display_name": "访问地址",
+        "position": 4,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "replicas",
+        "display_name": "副本数",
+        "position": 5,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "runbook",
+        "display_name": "维护说明",
+        "position": 6,
+        "visible": true,
+        "format": "multiline"
+      }
+    ]
+  },
+  {
+    "key": "hooks",
+    "file": "webhooks.json",
+    "mappings": [
+      {
+        "source_key": "name",
+        "target_key": "alias"
+      },
+      {
+        "source_key": "id",
+        "target_key": "hook_id"
+      },
+      {
+        "source_key": "event",
+        "target_key": "event"
+      },
+      {
+        "source_key": "notes",
+        "target_key": "description"
+      },
+      {
+        "source_key": "config",
+        "target_key": "endpoint",
+        "json_path": "endpoint"
+      },
+      {
+        "source_key": "config",
+        "target_key": "retry_limit",
+        "json_path": "retry.limit"
+      },
+      {
+        "source_key": "config",
+        "target_key": "signing_secret",
+        "json_path": "signing_secret"
+      },
+      {
+        "source_key": "config",
+        "target_key": "headers",
+        "json_path": "headers"
+      }
+    ],
+    "category_path": "系统集成/Webhook",
+    "environment": "测试",
+    "fields": [
+      {
+        "source_key": "alias",
+        "display_name": "集成名称",
+        "zone": "indexes",
+        "unique": false,
+        "position": 0
+      },
+      {
+        "source_key": "hook_id",
+        "display_name": "Webhook 编号",
+        "zone": "indexes",
+        "unique": true,
+        "position": 1
+      },
+      {
+        "source_key": "event",
+        "display_name": "订阅事件",
+        "zone": "indexes",
+        "unique": false,
+        "position": 2
+      },
+      {
+        "source_key": "endpoint",
+        "display_name": "回调地址",
+        "zone": "display",
+        "unique": false,
+        "position": 3
+      },
+      {
+        "source_key": "retry_limit",
+        "display_name": "最大重试",
+        "zone": "display",
+        "unique": false,
+        "position": 4
+      },
+      {
+        "source_key": "description",
+        "display_name": "使用说明",
+        "zone": "display",
+        "unique": false,
+        "position": 5
+      },
+      {
+        "source_key": "signing_secret",
+        "display_name": "验签密钥",
+        "zone": "secrets",
+        "unique": false,
+        "position": 6
+      },
+      {
+        "source_key": "headers.Authorization",
+        "display_name": "私有请求头",
+        "zone": "hidden",
+        "unique": false,
+        "position": 7
+      }
+    ],
+    "identity_fields": [
+      "hook_id"
+    ],
+    "list_fields": [
+      {
+        "source_key": "alias",
+        "display_name": "集成名称",
+        "position": 0,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "hook_id",
+        "display_name": "Webhook 编号",
+        "position": 1,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "event",
+        "display_name": "订阅事件",
+        "position": 2,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "endpoint",
+        "display_name": "回调地址",
+        "position": 3,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "retry_limit",
+        "display_name": "最大重试",
+        "position": 4,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "description",
+        "display_name": "使用说明",
+        "position": 5,
+        "visible": true,
+        "format": "multiline"
+      }
+    ]
+  },
+  {
+    "key": "knowledge",
+    "file": "knowledge.json",
+    "mappings": [],
+    "category_path": "团队协作/运行手册",
+    "environment": null,
+    "fields": [
+      {
+        "source_key": "alias",
+        "display_name": "文档标题",
+        "zone": "indexes",
+        "unique": false,
+        "position": 0
+      },
+      {
+        "source_key": "doc_id",
+        "display_name": "文档编号",
+        "zone": "indexes",
+        "unique": true,
+        "position": 1
+      },
+      {
+        "source_key": "owner",
+        "display_name": "负责团队",
+        "zone": "indexes",
+        "unique": false,
+        "position": 2
+      },
+      {
+        "source_key": "description",
+        "display_name": "正文",
+        "zone": "display",
+        "unique": false,
+        "position": 3
+      },
+      {
+        "source_key": "url",
+        "display_name": "文档地址",
+        "zone": "display",
+        "unique": false,
+        "position": 4
+      },
+      {
+        "source_key": "tags",
+        "display_name": "标签",
+        "zone": "display",
+        "unique": false,
+        "position": 5
+      }
+    ],
+    "identity_fields": [
+      "doc_id"
+    ],
+    "list_fields": [
+      {
+        "source_key": "alias",
+        "display_name": "文档标题",
+        "position": 0,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "doc_id",
+        "display_name": "文档编号",
+        "position": 1,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "owner",
+        "display_name": "负责团队",
+        "position": 2,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "description",
+        "display_name": "正文",
+        "position": 3,
+        "visible": true,
+        "format": "multiline"
+      },
+      {
+        "source_key": "url",
+        "display_name": "文档地址",
+        "position": 4,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "tags",
+        "display_name": "标签",
+        "position": 5,
+        "visible": true,
+        "format": "json"
+      }
+    ]
+  },
+  {
+    "key": "inventory",
+    "file": "inventory_initial.json",
+    "mappings": [],
+    "category_path": "平台配置/同步示例",
+    "environment": "测试",
+    "fields": [
+      {
+        "source_key": "alias",
+        "display_name": "配置名称",
+        "zone": "indexes",
+        "unique": false,
+        "position": 0
+      },
+      {
+        "source_key": "config_id",
+        "display_name": "配置编号",
+        "zone": "indexes",
+        "unique": true,
+        "position": 1
+      },
+      {
+        "source_key": "enabled",
+        "display_name": "启用",
+        "zone": "display",
+        "unique": false,
+        "position": 2
+      },
+      {
+        "source_key": "description",
+        "display_name": "用途",
+        "zone": "display",
+        "unique": false,
+        "position": 3
+      }
+    ],
+    "identity_fields": [
+      "config_id"
+    ],
+    "list_fields": [
+      {
+        "source_key": "alias",
+        "display_name": "配置名称",
+        "position": 0,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "config_id",
+        "display_name": "配置编号",
+        "position": 1,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "enabled",
+        "display_name": "启用",
+        "position": 2,
+        "visible": true,
+        "format": "single_line"
+      },
+      {
+        "source_key": "description",
+        "display_name": "用途",
+        "position": 3,
+        "visible": true,
+        "format": "multiline"
+      }
+    ]
+  }
+]

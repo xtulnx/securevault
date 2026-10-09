@@ -1,0 +1,25 @@
+[
+  {
+    "alias": "星海远征（Android）",
+    "gid": 2001,
+    "platform": "Android",
+    "product_id": "GAME-2001-ANDROID",
+    "owner": "极光工作室",
+    "region": "中国大陆",
+    "version": "3.3.1",
+    "status": "已上线",
+    "pay_callback": "https://gateway.example.test/games_prod/pay/2001/android",
+    "refund_callback": "https://gateway.example.test/games_prod/refund/2001/android",
+    "description": "已通过唯一 KEY 更新到 SDK 3.3.1。\n重导入不会新增重复记录。",
+    "tags": [
+      "休闲",
+      "跨平台",
+      "正式"
+    ],
+    "internal_note": "演示列表可隐藏普通展示字段，详情仍可见。",
+    "app_secret": "DEMO_ONLY_APP_games_prod_2001_Android",
+    "product_key": "DEMO_ONLY_PRODUCT_2001_Android",
+    "sign_key": "DEMO_ONLY_SIGN_games_prod_2001_Android",
+    "private_config": "{\"debug\": true, \"allow_hosts\": [\"127.0.0.1\"]}"
+  }
+]

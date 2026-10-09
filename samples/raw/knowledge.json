@@ -1,0 +1,68 @@
+[
+  {
+    "alias": "支付回调排查",
+    "doc_id": "DOC-001",
+    "owner": "平台运营组",
+    "description": "检查请求签名、重试次数与返回码。\n跨团队协作时复制完整回调地址。",
+    "url": "https://docs.example.test/1",
+    "tags": [
+      "运行手册",
+      "演示"
+    ]
+  },
+  {
+    "alias": "SDK 接入流程",
+    "doc_id": "DOC-002",
+    "owner": "平台运营组",
+    "description": "先在测试环境联调，再切到预发布，验收后上线。",
+    "url": "https://docs.example.test/2",
+    "tags": [
+      "运行手册",
+      "演示"
+    ]
+  },
+  {
+    "alias": "密钥轮换清单",
+    "doc_id": "DOC-003",
+    "owner": "平台运营组",
+    "description": "生成新密钥、双写过渡、确认调用、禁用旧密钥。",
+    "url": "https://docs.example.test/3",
+    "tags": [
+      "运行手册",
+      "演示"
+    ]
+  },
+  {
+    "alias": "数据导入规范",
+    "doc_id": "DOC-004",
+    "owner": "平台运营组",
+    "description": "定义索引、展示、隐藏和敏感字段，设置逻辑唯一 KEY。",
+    "url": "https://docs.example.test/4",
+    "tags": [
+      "运行手册",
+      "演示"
+    ]
+  },
+  {
+    "alias": "故障通知模板",
+    "doc_id": "DOC-005",
+    "owner": "平台运营组",
+    "description": "影响范围：待填写。\n负责人：待填写。\n预计恢复：待填写。",
+    "url": "https://docs.example.test/5",
+    "tags": [
+      "运行手册",
+      "演示"
+    ]
+  },
+  {
+    "alias": "零值与空字段",
+    "doc_id": "DOC-006",
+    "owner": "平台运营组",
+    "description": "副本数为 0 是有效信息；没有环境标签和敏感字段也能展示。",
+    "url": "https://docs.example.test/6",
+    "tags": [
+      "运行手册",
+      "演示"
+    ]
+  }
+]

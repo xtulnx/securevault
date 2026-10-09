@@ -1,0 +1,44 @@
+[
+  {
+    "name": "订单同步",
+    "id": "HOOK-001",
+    "event": "order.created",
+    "config": "{\"endpoint\": \"https://hooks.example.test/1\", \"retry\": {\"limit\": 3}, \"signing_secret\": \"DEMO_ONLY_HOOK_1\", \"headers\": {\"Authorization\": \"DEMO_ONLY_BEARER_1\"}}",
+    "notes": "源字段 config 是 JSON 字符串，导入时按路径抽取配置。"
+  },
+  {
+    "name": "退款通知",
+    "id": "HOOK-002",
+    "event": "refund.completed",
+    "config": "{\"endpoint\": \"https://hooks.example.test/2\", \"retry\": {\"limit\": 3}, \"signing_secret\": \"DEMO_ONLY_HOOK_2\", \"headers\": {\"Authorization\": \"DEMO_ONLY_BEARER_2\"}}",
+    "notes": "源字段 config 是 JSON 字符串，导入时按路径抽取配置。"
+  },
+  {
+    "name": "玩家注册",
+    "id": "HOOK-003",
+    "event": "player.created",
+    "config": "{\"endpoint\": \"https://hooks.example.test/3\", \"retry\": {\"limit\": 3}, \"signing_secret\": \"DEMO_ONLY_HOOK_3\", \"headers\": {\"Authorization\": \"DEMO_ONLY_BEARER_3\"}}",
+    "notes": "源字段 config 是 JSON 字符串，导入时按路径抽取配置。"
+  },
+  {
+    "name": "支付成功",
+    "id": "HOOK-004",
+    "event": "payment.completed",
+    "config": "{\"endpoint\": \"https://hooks.example.test/4\", \"retry\": {\"limit\": 3}, \"signing_secret\": \"DEMO_ONLY_HOOK_4\", \"headers\": {\"Authorization\": \"DEMO_ONLY_BEARER_4\"}}",
+    "notes": "源字段 config 是 JSON 字符串，导入时按路径抽取配置。"
+  },
+  {
+    "name": "运维告警",
+    "id": "HOOK-005",
+    "event": "alert.created",
+    "config": "{\"endpoint\": \"https://hooks.example.test/5\", \"retry\": {\"limit\": 3}, \"signing_secret\": \"DEMO_ONLY_HOOK_5\", \"headers\": {\"Authorization\": \"DEMO_ONLY_BEARER_5\"}}",
+    "notes": "源字段 config 是 JSON 字符串，导入时按路径抽取配置。"
+  },
+  {
+    "name": "发布通知",
+    "id": "HOOK-006",
+    "event": "release.completed",
+    "config": "{\"endpoint\": \"https://hooks.example.test/6\", \"retry\": {\"limit\": 3}, \"signing_secret\": \"DEMO_ONLY_HOOK_6\", \"headers\": {\"Authorization\": \"DEMO_ONLY_BEARER_6\"}}",
+    "notes": "源字段 config 是 JSON 字符串，导入时按路径抽取配置。"
+  }
+]

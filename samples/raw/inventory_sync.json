@@ -1,0 +1,16 @@
+[
+  {
+    "alias": "支付限流",
+    "config_id": "CFG-001",
+    "enabled": true,
+    "description": "演示全量同步与 Schema 演进。",
+    "region": "cn-shanghai"
+  },
+  {
+    "alias": "登录频控",
+    "config_id": "CFG-002",
+    "enabled": true,
+    "description": "演示全量同步与 Schema 演进。",
+    "region": "cn-shanghai"
+  }
+]

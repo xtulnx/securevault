@@ -1,0 +1,90 @@
+[
+  {
+    "alias": "订单数据库",
+    "service_id": "SVC-4001",
+    "region": "cn-shanghai",
+    "provider": "阿里云",
+    "endpoint": "https://orders-db.infra.example.test",
+    "replicas": 0,
+    "runbook": "每周检查容量。\n变更前先做快照，保留最近 7 天。",
+    "access_key": "DEMO_ONLY_AK_4001",
+    "secret_key": "DEMO_ONLY_SK_4001"
+  },
+  {
+    "alias": "账单对象存储",
+    "service_id": "SVC-4002",
+    "region": "cn-hangzhou",
+    "provider": "腾讯云",
+    "endpoint": "https://billing-oss.infra.example.test",
+    "replicas": 2,
+    "runbook": "每周检查容量。\n变更前先做快照，保留最近 7 天。",
+    "access_key": "DEMO_ONLY_AK_4002",
+    "secret_key": "DEMO_ONLY_SK_4002"
+  },
+  {
+    "alias": "消息队列",
+    "service_id": "SVC-4003",
+    "region": "ap-singapore",
+    "provider": "阿里云",
+    "endpoint": "https://event-mq.infra.example.test",
+    "replicas": 3,
+    "runbook": "每周检查容量。\n变更前先做快照，保留最近 7 天。",
+    "access_key": "DEMO_ONLY_AK_4003",
+    "secret_key": "DEMO_ONLY_SK_4003"
+  },
+  {
+    "alias": "日志检索",
+    "service_id": "SVC-4004",
+    "region": "cn-shanghai",
+    "provider": "腾讯云",
+    "endpoint": "https://logs.infra.example.test",
+    "replicas": 0,
+    "runbook": "每周检查容量。\n变更前先做快照，保留最近 7 天。",
+    "access_key": "DEMO_ONLY_AK_4004",
+    "secret_key": "DEMO_ONLY_SK_4004"
+  },
+  {
+    "alias": "CDN 分发",
+    "service_id": "SVC-4005",
+    "region": "cn-hangzhou",
+    "provider": "阿里云",
+    "endpoint": "https://cdn.infra.example.test",
+    "replicas": 2,
+    "runbook": "每周检查容量。\n变更前先做快照，保留最近 7 天。",
+    "access_key": "DEMO_ONLY_AK_4005",
+    "secret_key": "DEMO_ONLY_SK_4005"
+  },
+  {
+    "alias": "监控中心",
+    "service_id": "SVC-4006",
+    "region": "ap-singapore",
+    "provider": "腾讯云",
+    "endpoint": "https://monitor.infra.example.test",
+    "replicas": 3,
+    "runbook": "每周检查容量。\n变更前先做快照，保留最近 7 天。",
+    "access_key": "DEMO_ONLY_AK_4006",
+    "secret_key": "DEMO_ONLY_SK_4006"
+  },
+  {
+    "alias": "缓存服务",
+    "service_id": "SVC-4007",
+    "region": "cn-shanghai",
+    "provider": "阿里云",
+    "endpoint": "https://redis.infra.example.test",
+    "replicas": 0,
+    "runbook": "每周检查容量。\n变更前先做快照，保留最近 7 天。",
+    "access_key": "DEMO_ONLY_AK_4007",
+    "secret_key": "DEMO_ONLY_SK_4007"
+  },
+  {
+    "alias": "容器集群",
+    "service_id": "SVC-4008",
+    "region": "cn-hangzhou",
+    "provider": "腾讯云",
+    "endpoint": "https://k8s.infra.example.test",
+    "replicas": 2,
+    "runbook": "每周检查容量。\n变更前先做快照，保留最近 7 天。",
+    "access_key": "DEMO_ONLY_AK_4008",
+    "secret_key": "DEMO_ONLY_SK_4008"
+  }
+]

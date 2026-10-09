@@ -1,0 +1,20 @@
+[
+  {
+    "alias": "支付限流",
+    "config_id": "CFG-001",
+    "enabled": true,
+    "description": "演示全量同步与 Schema 演进。"
+  },
+  {
+    "alias": "登录频控",
+    "config_id": "CFG-002",
+    "enabled": true,
+    "description": "演示全量同步与 Schema 演进。"
+  },
+  {
+    "alias": "旧渠道开关",
+    "config_id": "CFG-003",
+    "enabled": false,
+    "description": "演示全量同步与 Schema 演进。"
+  }
+]

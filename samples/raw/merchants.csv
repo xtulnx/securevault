@@ -1,0 +1,13 @@
+商户名称,商户编号,支付渠道,区域,通知地址,币种,结算周期,接入备注,API密钥,私有证书
+星海远征旗舰店,MCH-3001,微信支付,上海,https://pay.example.test/notify/MCH-3001,CNY,T+1,支持退款、对账；CSV 字段名映射演示,DEMO_ONLY_PAY_3001,DEMO_ONLY_CERT_3001
+风之旅团旗舰店,MCH-3002,支付宝,杭州,https://pay.example.test/notify/MCH-3002,CNY,T+1,支持退款、对账；CSV 字段名映射演示,DEMO_ONLY_PAY_3002,DEMO_ONLY_CERT_3002
+雾境侦探旗舰店,MCH-3003,银联,深圳,https://pay.example.test/notify/MCH-3003,CNY,T+1,支持退款、对账；CSV 字段名映射演示,DEMO_ONLY_PAY_3003,DEMO_ONLY_CERT_3003
+像素农场旗舰店,MCH-3004,微信支付,上海,https://pay.example.test/notify/MCH-3004,CNY,T+1,支持退款、对账；CSV 字段名映射演示,DEMO_ONLY_PAY_3004,DEMO_ONLY_CERT_3004
+机甲黎明旗舰店,MCH-3005,支付宝,杭州,https://pay.example.test/notify/MCH-3005,CNY,T+1,支持退款、对账；CSV 字段名映射演示,DEMO_ONLY_PAY_3005,DEMO_ONLY_CERT_3005
+云端棋局旗舰店,MCH-3006,银联,深圳,https://pay.example.test/notify/MCH-3006,CNY,T+1,支持退款、对账；CSV 字段名映射演示,DEMO_ONLY_PAY_3006,DEMO_ONLY_CERT_3006
+深蓝航线旗舰店,MCH-3007,微信支付,上海,https://pay.example.test/notify/MCH-3007,CNY,T+1,支持退款、对账；CSV 字段名映射演示,DEMO_ONLY_PAY_3007,DEMO_ONLY_CERT_3007
+山海纪行旗舰店,MCH-3008,支付宝,杭州,https://pay.example.test/notify/MCH-3008,CNY,T+1,支持退款、对账；CSV 字段名映射演示,DEMO_ONLY_PAY_3008,DEMO_ONLY_CERT_3008
+纸飞机计划旗舰店,MCH-3009,银联,深圳,https://pay.example.test/notify/MCH-3009,CNY,T+1,支持退款、对账；CSV 字段名映射演示,DEMO_ONLY_PAY_3009,DEMO_ONLY_CERT_3009
+月光小镇旗舰店,MCH-3010,微信支付,上海,https://pay.example.test/notify/MCH-3010,CNY,T+1,支持退款、对账；CSV 字段名映射演示,DEMO_ONLY_PAY_3010,DEMO_ONLY_CERT_3010
+北境回响旗舰店,MCH-3011,支付宝,杭州,https://pay.example.test/notify/MCH-3011,CNY,T+1,支持退款、对账；CSV 字段名映射演示,DEMO_ONLY_PAY_3011,DEMO_ONLY_CERT_3011
+轨道先锋旗舰店,MCH-3012,银联,深圳,https://pay.example.test/notify/MCH-3012,CNY,T+1,支持退款、对账；CSV 字段名映射演示,DEMO_ONLY_PAY_3012,DEMO_ONLY_CERT_3012
