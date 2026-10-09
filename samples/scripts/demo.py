@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Initialize or serve an isolated demo vault using the public HTTP API."""
+import http.cookiejar
 import argparse
 import json
 import os
@@ -28,6 +29,7 @@ def private_json(path, value):
 class Client:
     def __init__(self, port):
         self.base = f'http://127.0.0.1:{port}/api'
+        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
     def request(self, path, data=None, method=None, headers=None, expected=200):
         request = urllib.request.Request(self.base + path,
@@ -35,7 +37,7 @@ class Client:
             headers={'Content-Type': 'application/json', **(headers or {})},
             method=method or ('POST' if data is not None else 'GET'))
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with self.opener.open(request, timeout=30) as response:
                 status, body = response.status, response.read()
         except urllib.error.HTTPError as error:
             status, body = error.code, error.read()
@@ -53,7 +55,7 @@ class Client:
         content += (RAW / filename).read_bytes() + f'\r\n--{boundary}--\r\n'.encode()
         request = urllib.request.Request(self.base+'/imports/upload', data=content,
             headers={'Content-Type': f'multipart/form-data; boundary={boundary}'})
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with self.opener.open(request, timeout=30) as response:
             return json.load(response)
 
     def import_file(self, dataset_id, filename, **options):
@@ -144,12 +146,13 @@ def initialize(client, password):
     for key in ('games_prod','payments','cloud'):
         for format_name in ('json','csv'):
             url=client.base+'/datasets/'+datasets[key]+'/export?format='+format_name
-            with urllib.request.urlopen(url,timeout=30) as response:
+            with client.opener.open(url,timeout=30) as response:
                 body=response.read()
                 assert body and b'DEMO_ONLY_' not in body
     client.request('/vault/seal',{})
     client.request('/records/search',expected=423)
     client.request('/vault/unlock',{'password':'incorrect-demo-password'},expected=401)
+    time.sleep(2.1)
     client.request('/vault/unlock',{'password':password})
     assert not client.request('/vault/status')['persistent']
     checks += ['公开JSON/CSV导出不泄露密钥', '封印拒绝读取与正确密码解锁']

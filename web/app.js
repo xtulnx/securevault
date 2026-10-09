@@ -69,7 +69,7 @@ async function api(path, options = {}) {
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    if (response.status === 423) sealVault("数据空间已封印，请重新解锁");
+    if (response.status === 423 || (response.status === 401 && state.unlocked)) sealVault("会话已失效，请重新解锁", false);
     throw new Error(body.error || `请求失败 (${response.status})`);
   }
   return body;
@@ -164,6 +164,8 @@ async function sealVault(message = "数据空间已手动封印", callServer = t
   state.pendingReveal = null;
   state.pendingBatchId = null;
   state.currentBatchSources = [];
+  $("#records-grid").replaceChildren();
+  $("#secret-fields-list").replaceChildren();
   state.records = [];
   state.datasets = [];
   state.directories = [];
@@ -327,7 +329,7 @@ function recordCard(record) {
   const displayEntries = Object.entries(allDisplay(record));
   const matched = new Set(record.matched_fields || []);
   const visibleEntries = [...displayEntries.filter(([key]) => matched.has(key)), ...displayEntries.filter(([key]) => !matched.has(key))].filter((entry, index, all) => all.findIndex((item) => item[0] === entry[0]) === index);
-  const displayMarkup = visibleEntries.map(([key, value]) => { const format = dataset?.list_fields?.find((field) => field.source_key === key)?.format || "single_line"; return `<div class="data-point ${matched.has(key) ? "is-match" : ""}"><label>${highlightValue(record.fieldLabels[key] || key)}</label><span class="display-format-${format}" title="${escapeHtml(typeof value === "object" ? JSON.stringify(value) : value)}">${highlightValue(value)}</span></div>`; }).join("");
+  const displayMarkup = visibleEntries.map(([key, value]) => { const format = dataset?.list_fields?.find((field) => field.source_key === key)?.format || "single_line"; return `<div class="data-point ${matched.has(key) ? "is-match" : ""}"><label>${highlightValue(record.fieldLabels[key] || key)}</label><span class="display-format-${escapeHtml(format)}" title="${escapeHtml(typeof value === "object" ? JSON.stringify(value) : value)}">${highlightValue(value)}</span></div>`; }).join("");
   const environmentTag = record.environment ? `<span class="tag environment">${escapeHtml(record.environment)}</span>` : `<span class="tag optional-tag">无环境</span>`;
   const title = record.indexes.alias || record.indexes.merchant_id || Object.values(record.indexes)[0] || "未命名记录";
   return `<article class="record-card ${record.expired ? "is-expired" : ""}"><div class="record-head"><div class="record-title"><div class="record-tags"><span class="tag">${highlightValue(record.category)}</span>${environmentTag}${record.expired ? '<span class="tag expired-tag">已过期</span>' : ""}</div><h4>${highlightValue(title)}</h4><button class="detail-button" data-action="open-detail" data-record="${escapeHtml(record.id)}">查看全部详情</button></div></div><div class="record-display">${displayMarkup}</div><div class="record-secrets"><span class="secret-count">${record.secret_count} 个敏感字段</span>${record.secret_count ? `<button class="reveal-secrets-button" data-action="open-secrets" data-record="${escapeHtml(record.id)}">按需查看 <span>→</span></button>` : ""}</div><div class="card-footer"><span>最近更新 ${escapeHtml(record.updated)}</span><button class="expired-toggle" data-expired-record="${escapeHtml(record.id)}" data-expired="${record.expired}">${record.expired ? "恢复有效" : "标记过期"}</button></div></article>`;
@@ -482,7 +484,7 @@ document.addEventListener("keydown", (event) => {
 });
 
 function renderDatasetManager() {
-  $("#dataset-manager-list").innerHTML = state.datasets.map((dataset) => `<div class="dataset-manager-row"><div><strong>${escapeHtml(dataset.category_path)}</strong><span>${dataset.environment ? `环境：${escapeHtml(dataset.environment)}` : "无环境标签"} · ${dataset.record_count} 条记录 · ${dataset.fields.length} 个字段 · KEY ${dataset.identity_fields.length ? dataset.identity_fields.join(" + ") : "未设置"}</span></div><div class="row-actions"><div class="dataset-download"><button class="secondary-button dataset-download-toggle" aria-expanded="false" aria-controls="download-${escapeHtml(dataset.id)}"><span aria-hidden="true">⤓</span> 下载 <span aria-hidden="true">▾</span></button><div id="download-${escapeHtml(dataset.id)}" class="dataset-download-menu" hidden><span class="download-menu-label">选择下载格式</span>${["json", "csv", "xlsx"].map((format) => `<button class="dataset-export-button" data-format="${format}" data-dataset-id="${escapeHtml(dataset.id)}">${format.toUpperCase()}</button>`).join("")}</div></div><button class="secondary-button dataset-view-button" data-dataset-id="${escapeHtml(dataset.id)}">查看</button><button class="secondary-button dataset-edit-button" data-dataset-id="${escapeHtml(dataset.id)}">编辑</button></div></div>`).join("") || '<p class="detail-empty">暂无数据集</p>';
+  $("#dataset-manager-list").innerHTML = state.datasets.map((dataset) => `<div class="dataset-manager-row"><div><strong>${escapeHtml(dataset.category_path)}</strong><span>${dataset.environment ? `环境：${escapeHtml(dataset.environment)}` : "无环境标签"} · ${dataset.record_count} 条记录 · ${dataset.fields.length} 个字段 · KEY ${dataset.identity_fields.length ? escapeHtml(dataset.identity_fields.join(" + ")) : "未设置"}</span></div><div class="row-actions"><div class="dataset-download"><button class="secondary-button dataset-download-toggle" aria-expanded="false" aria-controls="download-${escapeHtml(dataset.id)}"><span aria-hidden="true">⤓</span> 下载 <span aria-hidden="true">▾</span></button><div id="download-${escapeHtml(dataset.id)}" class="dataset-download-menu" hidden><span class="download-menu-label">选择下载格式</span>${["json", "csv", "xlsx"].map((format) => `<button class="dataset-export-button" data-format="${format}" data-dataset-id="${escapeHtml(dataset.id)}">${format.toUpperCase()}</button>`).join("")}</div></div><button class="secondary-button dataset-view-button" data-dataset-id="${escapeHtml(dataset.id)}">查看</button><button class="secondary-button dataset-edit-button" data-dataset-id="${escapeHtml(dataset.id)}">编辑</button></div></div>`).join("") || '<p class="detail-empty">暂无数据集</p>';
   $$(".dataset-view-button").forEach((button) => button.addEventListener("click", () => openDatasetInfo(button.dataset.datasetId)));
   $$(".dataset-edit-button").forEach((button) => button.addEventListener("click", () => {
     const dataset = state.datasets.find((item) => item.id === button.dataset.datasetId);
@@ -810,7 +812,7 @@ $("#commit-import").addEventListener("click", commitImport);
 $("#include-expired").addEventListener("change", async (event) => { state.includeExpired = event.target.checked; state.page = 1; await fetchRecords(); });
 $("#close-import").addEventListener("click", () => showWorkspace(state.importReturn));
 $("#close-reveal").addEventListener("click", () => { $("#reveal-modal").hidden = true; state.pendingReveal = null; });
-$("#close-secrets").addEventListener("click", () => { $("#secrets-modal").hidden = true; state.secretModalRecordId = null; state.reveal = null; });
+$("#close-secrets").addEventListener("click", () => { $("#secret-fields-list").replaceChildren(); $("#secrets-modal").hidden = true; state.secretModalRecordId = null; state.reveal = null; });
 $("#close-record-detail").addEventListener("click", closeRecordDetail);
 $("#close-dataset-info").addEventListener("click", () => $("#dataset-info-modal").close());
 $("#dataset-info-modal").addEventListener("click", (event) => {
@@ -830,7 +832,7 @@ $("#cancel-dataset").addEventListener("click", returnFromDatasetEditor);
 $("#load-dataset-file")?.addEventListener("click", () => $("#dataset-file")?.click());
 document.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); $("#search-input").focus(); }
-  if (event.key === "Escape") { closeRecordDetail(); state.reveal = null; state.secretModalRecordId = null; ["#reveal-modal", "#secrets-modal", "#app-manager-modal"].forEach((selector) => { $(selector).hidden = true; }); }
+  if (event.key === "Escape") { $("#secret-fields-list").replaceChildren(); closeRecordDetail(); state.reveal = null; state.secretModalRecordId = null; ["#reveal-modal", "#secrets-modal", "#app-manager-modal"].forEach((selector) => { $(selector).hidden = true; }); }
 });
 document.addEventListener("pointerdown", touch, { passive: true });
 

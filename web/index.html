@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#071522" />
     <title>SecureVault · 动态敏感数据安全管理</title>
-    <link rel="stylesheet" href="styles.css?v=20261009-workspace-10" />
+    <link rel="stylesheet" href="styles.css?v=20261009-security-11" />
   </head>
   <body>
     <div class="ambient ambient-one"></div>
@@ -15,9 +15,9 @@
 
       <section id="sealed-screen" class="sealed-screen" aria-label="封印状态">
         <div class="sealed-mark" aria-hidden="true"><span class="lock-shackle"></span><span class="lock-body"></span></div>
-        <div class="eyebrow">SECUREVAULT / ZERO-TRUST SEALED</div>
+        <div class="eyebrow">SECUREVAULT / SEALED</div>
         <h1>开启你的安全数据空间</h1>
-        <p class="sealed-copy">敏感字段始终加密驻留。解锁后，所有访问会被记录，并在空闲超时后自动封印。</p>
+        <p class="sealed-copy">敏感字段加密存储。解锁后，敏感查看与导出会被记录，并在空闲超时后自动封印。</p>
         <form id="unlock-form" class="unlock-form">
           <label for="master-password">主密码</label>
           <div class="password-wrap">
@@ -81,6 +81,6 @@
       <dialog id="dataset-info-modal" class="dataset-info-dialog" aria-labelledby="dataset-info-title"><header class="dataset-info-header"><div><div class="eyebrow">DATASET INFORMATION</div><h3 id="dataset-info-title">数据集信息</h3></div><button id="close-dataset-info" class="secondary-button" aria-label="关闭数据集信息">×</button></header><div id="dataset-info-content" class="dataset-info-body"></div></dialog>
       <div id="app-manager-modal" class="reveal-modal" hidden><div class="modal-backdrop"></div><section class="reveal-dialog app-manager-dialog wide-dialog" role="dialog" aria-modal="true" aria-labelledby="app-manager-title"><button id="close-app-manager" class="modal-close" aria-label="关闭">×</button><div class="dialog-icon">⌁</div><div class="eyebrow">API APPLICATIONS</div><h3 id="app-manager-title">接入应用</h3><p>新应用默认不可查询数据集。授权可设置为临时有效，到期后需要重新开启。</p><div class="app-create-row"><input id="app-name" placeholder="应用名称，例如：夜间同步脚本" /><select id="app-permission"><option value="search">只搜索</option><option value="secrets">可获取敏感信息</option></select><button id="create-app" class="primary-button">创建</button></div><div id="app-manager-list" class="dataset-manager-list"></div></section></div>
     </div>
-    <script src="app.js?v=20261009-workspace-10"></script>
+    <script src="app.js?v=20261009-security-11"></script>
   </body>
 </html>

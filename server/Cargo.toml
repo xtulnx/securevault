@@ -23,3 +23,4 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync",
 tower-http = { version = "0.6", features = ["fs", "trace"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = { version = "1", features = ["derive"] }
+zip = { version = "2.4", default-features = false, features = ["deflate"] }

@@ -109,6 +109,14 @@ make clean       # 清理构建产物和 dist
 
 发布包仅包含 `securevault` 单个二进制，HTML、CSS、JavaScript 及其他 `web/` 资源在构建时自动嵌入，无需额外分发前端目录。解压后执行 `./securevault`，访问 `http://127.0.0.1:4173`，默认将数据写入二进制同目录的 `data/`。`make run` / debug 构建仍直接读取项目的 `web/`，便于修改前端后刷新调试；release 构建始终使用嵌入资源，更新前端后需要重新构建并替换二进制。构建脚本会监测 `web/` 的文件变化及新增、删除，自动重新生成嵌入资源。可用 `--data-dir PATH`、`--port PORT`、`--addr HOST:PORT` 覆盖默认设置，或使用 `SECUREVAULT_DATA_DIR`、`SECUREVAULT_ADDR` 环境变量。
 
+## 安全与访问控制
+
+浏览器解锁后通过 HttpOnly 会话访问管理功能；应用密钥仅允许授权数据集的检索、查看与导出，不能管理数据集或应用。HTTP 服务仅允许监听回环地址，远程使用须配置 HTTPS 反向代理及 `SECUREVAULT_PUBLIC_ORIGIN`。新数据库使用更强的 Argon2id 参数，旧数据库保持兼容。完整安全边界、部署要求与回归方法见 [安全说明](docs/SECURITY.md)。
+
+```sh
+python3 samples/scripts/security_check.py  # 先构建 release；临时数据库验证，不影响已有数据
+```
+
 ## 自动发布
 
 将 `server/Cargo.toml` 的版本号更新为目标版本；如果依赖或包版本有变化，运行 `cargo check --manifest-path server/Cargo.toml` 更新锁文件，并一并提交。

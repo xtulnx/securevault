@@ -2,7 +2,8 @@ use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce, aead::Aead};
 use argon2::Argon2;
 use axum::{
     Json, Router,
-    extract::{Multipart, Path, Query, State},
+    middleware::{self, Next},
+    extract::{Multipart, Path, Query, State, Request},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -31,6 +32,8 @@ use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
 type HmacSha256 = Hmac<Sha256>;
+mod security;
+use security::*;
 
 #[cfg(any(not(debug_assertions), test))]
 use axum::http::Uri;
@@ -54,6 +57,7 @@ async fn serve_embedded_web(uri: Uri) -> Response {
 struct AppState {
     runtime: Arc<Mutex<Runtime>>,
     data_dir: PathBuf,
+    public_origin: Option<String>,
     batches: Arc<Mutex<std::collections::HashMap<String, (Instant, Vec<Value>)>>>,
 }
 
@@ -68,6 +72,9 @@ struct Runtime {
     unlocked_at: Option<Instant>,
     last_activity: Option<Instant>,
     persistent: bool,
+    session_hash: Option<String>,
+    unlock_failures: u32,
+    unlock_after: Option<Instant>,
 }
 
 struct KeySet {
@@ -88,6 +95,8 @@ impl Drop for KeySet {
 struct VaultMeta {
     salt: String,
     verifier: String,
+    #[serde(default = "legacy_kdf")]
+    kdf_version: u32,
 }
 
 #[derive(Debug)]
@@ -107,8 +116,8 @@ fn bad_request(message: impl Into<String>) -> ApiError {
 fn locked() -> ApiError {
     ApiError(StatusCode::LOCKED, "vault is sealed".into())
 }
-fn internal(error: impl std::fmt::Display) -> ApiError {
-    ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+fn internal(_error: impl std::fmt::Display) -> ApiError {
+    ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal operation failed".into())
 }
 
 fn app_key_hash(value: &str) -> String {
@@ -122,7 +131,7 @@ fn validate_permission(permission: &str) -> bool {
 fn authorize_app(connection: &Connection, headers: &HeaderMap, required: &str) -> ApiResult<()> {
     let app_id = headers.get("x-app-id").and_then(|v| v.to_str().ok());
     let app_key = headers.get("x-app-key").and_then(|v| v.to_str().ok());
-    if app_id.is_none() && app_key.is_none() { return Ok(()); }
+    if headers.get("x-vault-owner").is_some() { return Ok(()); }
     let (Some(app_id), Some(app_key)) = (app_id, app_key) else { return Err(ApiError(StatusCode::UNAUTHORIZED, "both X-App-Id and X-App-Key are required".into())); };
     let row: Option<(String, bool, String, Option<i64>)> = connection.query_row("SELECT permission,disabled,datasets_json,access_expires_at FROM api_apps WHERE id=?1 AND key_hash=?2", params![app_id, app_key_hash(app_key)], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).optional().map_err(internal)?;
     let Some((permission, disabled, _, access_expires_at)) = row else { return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid app credentials".into())); };
@@ -169,7 +178,7 @@ fn normalized_app_datasets(connection: &Connection, datasets: &[String]) -> ApiR
     Ok(normalized)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 struct PasswordRequest {
     password: String,
 }
@@ -409,8 +418,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .to_path_buf()
     };
     let options = parse_startup_options(&root)?;
+    if !options.address.ip().is_loopback() { return Err("HTTP listener must use a loopback address; use an HTTPS reverse proxy for remote access".into()); }
     let data_dir = options.data_dir;
     fs::create_dir_all(&data_dir)?;
+    #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700))?; }
     #[cfg(debug_assertions)]
     let web_dir = root.join("web");
     let state = AppState {
@@ -419,8 +430,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             unlocked_at: None,
             last_activity: None,
             persistent: false,
+            session_hash: None,
+            unlock_failures: 0,
+            unlock_after: None,
         })),
         data_dir,
+        public_origin: match std::env::var("SECUREVAULT_PUBLIC_ORIGIN").ok() {
+            Some(origin) if origin.starts_with("https://") && origin[8..].parse::<axum::http::uri::Authority>().is_ok() => Some(origin),
+            Some(_) => return Err("SECUREVAULT_PUBLIC_ORIGIN must be an HTTPS origin without path".into()),
+            None => None,
+        },
         batches: Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
 
@@ -429,8 +448,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if meta_path(&state).exists() {
             let meta: VaultMeta = serde_json::from_slice(&fs::read(meta_path(&state))?)?;
             let salt = hex::decode(meta.salt)?;
-            let keys = derive_keys(password, &salt).map_err(|e| std::io::Error::other(e.1))?;
-            if verifier(&keys.db) != meta.verifier {
+            let keys = derive_keys(password, &salt, meta.kdf_version).map_err(|e| std::io::Error::other(e.1))?;
+            if !valid_verifier(&keys.db, &meta.verifier) {
                 return Err("startup password does not match the vault".into());
             }
             let connection = open_database(&database_path(&state), &keys.db).map_err(|e| std::io::Error::other(e.1))?;
@@ -438,14 +457,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             drop(connection);
             activate(&state, keys, true).await;
         } else {
-            if password.len() < 12 {
-                return Err("startup password must be at least 12 bytes".into());
+            if password.chars().count() < 12 {
+                return Err("startup password must be at least 12 characters".into());
             }
             let mut salt = [0u8; 16];
             OsRng.fill_bytes(&mut salt);
-            let keys = derive_keys(password, &salt).map_err(|e| std::io::Error::other(e.1))?;
-            let meta = VaultMeta { salt: hex::encode(salt), verifier: verifier(&keys.db) };
+            let keys = derive_keys(password, &salt, 2).map_err(|e| std::io::Error::other(e.1))?;
+            let meta = VaultMeta { salt: hex::encode(salt), verifier: verifier(&keys.db), kdf_version: 2 };
             fs::write(meta_path(&state), serde_json::to_vec(&meta)?)?;
+            #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; fs::set_permissions(meta_path(&state), fs::Permissions::from_mode(0o600))?; }
             let connection = open_database(&database_path(&state), &keys.db).map_err(|e| std::io::Error::other(e.1))?;
             initialize_schema(&connection).map_err(|e| std::io::Error::other(e.1))?;
             drop(connection);
@@ -474,15 +494,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/apps", get(list_apps).post(create_app))
         .route("/apps/{id}", axum::routing::patch(update_app).delete(delete_app))
         .route("/apps/{id}/rotate", post(rotate_app))
+        .layer(middleware::from_fn_with_state(state.clone(), protect_api))
         .with_state(state.clone());
 
     let app = Router::new()
         .nest("/api", api)
-        .with_state(state);
+        .with_state(state.clone());
     #[cfg(debug_assertions)]
     let app = app.fallback_service(ServeDir::new(web_dir).append_index_html_on_directories(true));
     #[cfg(not(debug_assertions))]
     let app = app.fallback(get(serve_embedded_web));
+    let app = app.layer(middleware::from_fn(security_headers));
+    let cleanup = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let mut runtime = cleanup.runtime.lock().await;
+            expire_runtime(&mut runtime);
+            let sealed = runtime.keys.is_none();
+            let mut batches = cleanup.batches.lock().await;
+            batches.retain(|_, (created, _)| !sealed && created.elapsed() < Duration::from_secs(3600));
+        }
+    });
     let address = options.address;
     let listener = tokio::net::TcpListener::bind(address).await?;
     println!("SecureVault listening on http://{address}");
@@ -497,9 +530,15 @@ fn database_path(state: &AppState) -> PathBuf {
     state.data_dir.join("securevault.db")
 }
 
-fn derive_keys(password: &str, salt: &[u8]) -> ApiResult<KeySet> {
+fn legacy_kdf() -> u32 { 1 }
+fn derive_keys(password: &str, salt: &[u8], version: u32) -> ApiResult<KeySet> {
     let mut root = Zeroizing::new([0u8; 32]);
-    Argon2::default()
+    let params = match version {
+        1 => argon2::Params::new(19 * 1024, 2, 1, Some(32)),
+        2 => argon2::Params::new(64 * 1024, 3, 1, Some(32)),
+        _ => return Err(bad_request("unsupported KDF version")),
+    }.map_err(internal)?;
+    Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
         .hash_password_into(password.as_bytes(), salt, &mut *root)
         .map_err(|e| internal(format!("key derivation failed: {e}")))?;
     let hk = Hkdf::<Sha256>::new(Some(salt), &*root);
@@ -534,10 +573,10 @@ fn unix_now() -> i64 {
 
 fn open_database(path: &FsPath, key: &[u8; 32]) -> ApiResult<Connection> {
     let connection = Connection::open(path).map_err(internal)?;
-    let key_hex = hex::encode(key);
+    let key_hex = Zeroizing::new(hex::encode(key));
     connection
         .execute_batch(&format!(
-            "PRAGMA key = \"x'{key_hex}'\"; PRAGMA cipher_memory_security = ON;"
+            "PRAGMA key = \"x'{}'\"; PRAGMA cipher_memory_security = ON;", key_hex.as_str()
         ))
         .map_err(internal)?;
     connection
@@ -605,7 +644,7 @@ fn initialize_schema(connection: &Connection) -> ApiResult<()> {
     Ok(())
 }
 
-async fn vault_status(State(state): State<AppState>) -> Json<Value> {
+async fn vault_status(State(state): State<AppState>, headers: HeaderMap) -> Json<Value> {
     let runtime = state.runtime.lock().await;
     let now = Instant::now();
     let idle = runtime
@@ -614,15 +653,16 @@ async fn vault_status(State(state): State<AppState>) -> Json<Value> {
     let ttl = runtime
         .unlocked_at
         .map(|t| 14400u64.saturating_sub(now.duration_since(t).as_secs()));
-    Json(json!({ "initialized": meta_path(&state).exists(), "sealed": runtime.keys.is_none(), "persistent": runtime.persistent, "idle_seconds_remaining": idle, "ttl_seconds_remaining": ttl }))
+    Json(json!({ "initialized": meta_path(&state).exists(), "sealed": !owner_cookie(&headers, &runtime), "persistent": runtime.persistent, "idle_seconds_remaining": idle, "ttl_seconds_remaining": ttl }))
 }
 
 async fn vault_setup(
     State(state): State<AppState>,
     Json(request): Json<PasswordRequest>,
-) -> ApiResult<Json<Value>> {
-    if request.password.len() < 12 {
-        return Err(bad_request("master password must be at least 12 bytes"));
+) -> ApiResult<Response> {
+    let guard = state.runtime.lock().await;
+    if request.password.chars().count() < 12 {
+        return Err(bad_request("master password must be at least 12 characters"));
     }
     if meta_path(&state).exists() {
         return Err(ApiError(
@@ -632,10 +672,11 @@ async fn vault_setup(
     }
     let mut salt = [0u8; 16];
     OsRng.fill_bytes(&mut salt);
-    let keys = derive_keys(&request.password, &salt)?;
+    let keys = derive_keys(&request.password, &salt, 2)?;
     let meta = VaultMeta {
         salt: hex::encode(salt),
         verifier: verifier(&keys.db),
+        kdf_version: 2,
     };
     fs::write(
         meta_path(&state),
@@ -651,22 +692,30 @@ async fn vault_setup(
     let connection = open_database(&database_path(&state), &keys.db)?;
     initialize_schema(&connection)?;
     drop(connection);
+    drop(guard);
     activate(&state, keys, false).await;
-    Ok(Json(json!({ "sealed": false })))
+    owner_session(&state).await
 }
 
 async fn vault_unlock(
     State(state): State<AppState>,
     Json(request): Json<PasswordRequest>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Response> {
+    let mut guard = state.runtime.lock().await;
+    if guard.unlock_after.is_some_and(|after| Instant::now() < after) {
+        return Err(ApiError(StatusCode::TOO_MANY_REQUESTS, "unlock rate limited; retry later".into()));
+    }
     let meta: VaultMeta = serde_json::from_slice(
         &fs::read(meta_path(&state))
             .map_err(|_| ApiError(StatusCode::NOT_FOUND, "vault is not initialized".into()))?,
     )
     .map_err(internal)?;
     let salt = hex::decode(meta.salt).map_err(internal)?;
-    let keys = derive_keys(&request.password, &salt)?;
-    if verifier(&keys.db) != meta.verifier {
+    let keys = derive_keys(&request.password, &salt, meta.kdf_version)?;
+    if !valid_verifier(&keys.db, &meta.verifier) {
+        guard.unlock_failures = guard.unlock_failures.saturating_add(1);
+        let delay = 1u64 << guard.unlock_failures.min(6);
+        guard.unlock_after = Some(Instant::now() + Duration::from_secs(delay));
         return Err(ApiError(
             StatusCode::UNAUTHORIZED,
             "invalid master password".into(),
@@ -675,12 +724,16 @@ async fn vault_unlock(
     let connection = open_database(&database_path(&state), &keys.db)?;
     initialize_schema(&connection)?;
     drop(connection);
+    guard.unlock_failures = 0;
+    guard.unlock_after = None;
+    drop(guard);
     activate(&state, keys, false).await;
-    Ok(Json(json!({ "sealed": false })))
+    owner_session(&state).await
 }
 
 async fn activate(state: &AppState, keys: KeySet, persistent: bool) {
     let mut runtime = state.runtime.lock().await;
+    runtime.session_hash = None;
     runtime.keys = Some(keys);
     runtime.unlocked_at = Some(Instant::now());
     runtime.last_activity = runtime.unlocked_at;
@@ -689,6 +742,7 @@ async fn activate(state: &AppState, keys: KeySet, persistent: bool) {
 
 async fn vault_seal(State(state): State<AppState>) -> Json<Value> {
     let mut runtime = state.runtime.lock().await;
+    runtime.session_hash = None;
     runtime.keys = None;
     runtime.unlocked_at = None;
     runtime.last_activity = None;
@@ -706,23 +760,13 @@ async fn with_connection<T>(
     if runtime.keys.is_none() {
         return Err(locked());
     }
-    if !runtime.persistent && (runtime
-        .unlocked_at
-        .is_some_and(|start| start.elapsed() >= Duration::from_secs(4 * 60 * 60))
-        || runtime
-            .last_activity
-            .is_some_and(|last| last.elapsed() >= Duration::from_secs(30 * 60)))
-    {
-        runtime.keys = None;
-        runtime.unlocked_at = None;
-        runtime.last_activity = None;
-        runtime.persistent = false;
-        return Err(locked());
-    }
-    runtime.last_activity = Some(Instant::now());
+    expire_runtime(&mut runtime);
+    if runtime.keys.is_none() { return Err(locked()); }
     let keys = runtime.keys.as_ref().ok_or_else(locked)?;
     let connection = open_database(&database_path(state), &keys.db)?;
-    operation(&connection, keys)
+    let result = operation(&connection, keys);
+    if result.is_ok() { runtime.last_activity = Some(Instant::now()); }
+    result
 }
 
 fn flatten_sample(value: &Value) -> Vec<Value> {
@@ -1178,6 +1222,7 @@ async fn create_dataset(
     State(state): State<AppState>,
     Json(request): Json<DatasetCreateRequest>,
 ) -> ApiResult<Json<Value>> {
+    validate_schema(&request.fields, &request.identity_fields, &request.list_fields)?;
     let category = normalize_category(&request.category_path)?;
     let environment = request.environment.filter(|value| !value.trim().is_empty());
     let records = request
@@ -1230,6 +1275,7 @@ async fn update_dataset(
         let identity_fields: Vec<String> = request.identity_fields.clone().unwrap_or_else(|| serde_json::from_str(&old_identity).unwrap_or_default());
         let identity = serde_json::to_string(&identity_fields).map_err(internal)?;
         let list_fields = request.list_fields.unwrap_or_else(|| serde_json::from_str(&old_list_fields).unwrap_or_default());
+        validate_schema(&normalized_definitions, &identity_fields, &list_fields)?;
         let list_fields_json = serde_json::to_string(&list_fields).map_err(internal)?;
         connection.execute("UPDATE datasets SET category_path=?2,environment=?3,fields_json=?4,identity_fields_json=?5,list_fields_json=?6 WHERE id=?1", params![dataset_id, category, environment, fields, identity, list_fields_json]).map_err(internal)?;
         connection.execute("UPDATE records SET category_path=?2,environment=?3 WHERE dataset_id=?1", params![dataset_id, category, environment]).map_err(internal)?;
@@ -1316,8 +1362,8 @@ async fn export_dataset(
             if let Some(map) = indexes.as_object() { for (field, value) in map { record.insert(field.clone(), value.clone()); } }
             if let Some(map) = display.as_object() { for (field, value) in map { record.insert(field.clone(), value.clone()); } }
             if query.include_secrets {
-                let mut secret_statement = connection.prepare("SELECT source_key,nonce,ciphertext FROM protected_fields WHERE record_id=?1 ORDER BY source_key").map_err(internal)?;
-                let encrypted = secret_statement.query_map([&id], |row| Ok((row.get::<_,String>(0)?, row.get::<_,Vec<u8>>(1)?, row.get::<_,Vec<u8>>(2)?))).map_err(internal)?.collect::<Result<Vec<_>, _>>().map_err(internal)?;
+                let mut secret_statement = connection.prepare("SELECT source_key,nonce,ciphertext FROM protected_fields WHERE record_id=?1 AND (zone='secrets' OR ?2) ORDER BY source_key").map_err(internal)?;
+                let encrypted = secret_statement.query_map(params![id, headers.contains_key("x-vault-owner")], |row| Ok((row.get::<_,String>(0)?, row.get::<_,Vec<u8>>(1)?, row.get::<_,Vec<u8>>(2)?))).map_err(internal)?.collect::<Result<Vec<_>, _>>().map_err(internal)?;
                 for (field, nonce, ciphertext) in encrypted { record.insert(field.clone(), open_field(&keys.field, &id, &field, &nonce, &ciphertext)?); }
             }
             records.push(Value::Object(record));
@@ -1327,8 +1373,8 @@ async fn export_dataset(
             let mut writer = csv::Writer::from_writer(Vec::new());
             let mut columns = Vec::new();
             for record in &records { if let Some(map) = record.as_object() { for field in map.keys() { if !columns.contains(field) { columns.push(field.clone()); } } } }
-            writer.write_record(&columns).map_err(internal)?;
-            for record in &records { let row = columns.iter().map(|field| record.get(field).map(|value| if value.is_string() { value.as_str().unwrap_or_default().to_owned() } else { value.to_string() }).unwrap_or_default()).collect::<Vec<_>>(); writer.write_record(row).map_err(internal)?; }
+            writer.write_record(columns.iter().map(|v| csv_safe(v))).map_err(internal)?;
+            for record in &records { let row = columns.iter().map(|field| record.get(field).map(|value| if value.is_string() { value.as_str().unwrap_or_default().to_owned() } else { value.to_string() }).unwrap_or_default()).collect::<Vec<_>>(); writer.write_record(row.iter().map(|v| csv_safe(v))).map_err(internal)?; }
             ("text/csv; charset=utf-8", writer.into_inner().map_err(internal)?)
         } else if format == "xlsx" {
             ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", export_xlsx(&records)?)
@@ -1447,6 +1493,15 @@ fn parse_tabular(bytes: &[u8], filename: &str) -> ApiResult<Vec<Value>> {
             })
             .collect());
     }
+    if bytes.starts_with(b"PK\x03\x04") {
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| bad_request("invalid XLSX archive"))?;
+        if archive.len() > 1024 { return Err(bad_request("XLSX archive has too many entries")); }
+        let mut expanded = 0u64;
+        for i in 0..archive.len() {
+            expanded = expanded.saturating_add(archive.by_index(i).map_err(|_| bad_request("invalid XLSX entry"))?.size());
+            if expanded > 64 * 1024 * 1024 { return Err(bad_request("XLSX expanded size exceeds 64 MiB")); }
+        }
+    }
     let (headers, rows): (Vec<String>, Vec<Vec<String>>) = if extension == "csv" {
         let mut reader = csv::ReaderBuilder::new().flexible(true).from_reader(bytes);
         let headers = reader
@@ -1536,18 +1591,8 @@ async fn upload_import(
     if runtime.keys.is_none() {
         return Err(locked());
     }
-    if runtime
-        .unlocked_at
-        .is_some_and(|start| start.elapsed() >= Duration::from_secs(4 * 60 * 60))
-        || runtime
-            .last_activity
-            .is_some_and(|last| last.elapsed() >= Duration::from_secs(30 * 60))
-    {
-        runtime.keys = None;
-        runtime.unlocked_at = None;
-        runtime.last_activity = None;
-        return Err(locked());
-    }
+    expire_runtime(&mut runtime);
+    if runtime.keys.is_none() { return Err(locked()); }
     runtime.last_activity = Some(Instant::now());
     let records = parse_tabular(&bytes, &filename)?;
     let id = Uuid::new_v4().simple().to_string();
@@ -1559,6 +1604,10 @@ async fn upload_import(
         .unwrap_or_default();
     let mut batches = state.batches.lock().await;
     batches.retain(|_, (created, _)| created.elapsed() < Duration::from_secs(3600));
+    if count > 10000 { return Err(bad_request("import capacity exceeded (10000 rows per batch)")); }
+    if batches.len() >= 8 {
+        if let Some(oldest) = batches.iter().min_by_key(|(_, (created, _))| *created).map(|(id, _)| id.clone()) { batches.remove(&oldest); }
+    }
     batches.insert(id.clone(), (Instant::now(), records));
     drop(runtime);
     Ok(Json(
@@ -1627,6 +1676,7 @@ async fn import_records(
             }
             fields = merged;
             identity = request.evolved_identity_fields.clone();
+            validate_schema(&fields, &identity, &[])?;
             connection.execute("UPDATE datasets SET fields_json=?2,identity_fields_json=?3 WHERE id=?1", params![request.dataset_id, serde_json::to_string(&fields).map_err(internal)?, serde_json::to_string(&request.evolved_identity_fields).map_err(internal)?]).map_err(internal)?;
         }
         let result = insert_records(connection, keys, &request.dataset_id, &category, environment.as_deref(), &fields, &identity, &inputs, request.skip_existing)?;
