@@ -8,7 +8,7 @@ VERSION := $(shell sed -n 's/^version = "\([^"]*\)"/\1/p' $(MANIFEST) | head -n 
 TARGET ?= $(shell rustc -vV | sed -n 's/^host: //p')
 PACKAGE := securevault-$(VERSION)-$(TARGET)
 
-.PHONY: build debug run check test package demo demo-serve clean help
+.PHONY: build debug run check test test-web package demo demo-serve clean help
 
 build:
 	$(CARGO) build --locked --release --manifest-path $(MANIFEST) --target $(TARGET)
@@ -24,6 +24,9 @@ check:
 
 test:
 	$(CARGO) test --locked --manifest-path $(MANIFEST) --target $(TARGET)
+
+test-web:
+	npm test
 
 package: build
 	mkdir -p "dist/$(PACKAGE)"

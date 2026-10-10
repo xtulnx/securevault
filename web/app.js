@@ -1,5 +1,7 @@
 const state = {
   initialized: false,
+  canManage: false,
+  selectedDatasetId: null,
   unlocked: false,
   datasets: [],
   records: [],
@@ -65,10 +67,17 @@ function highlightValue(value) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(`/api${path}`, {
-    ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) }
-  });
+  let response;
+  try {
+    response = await fetch(`/api${path}`, {
+      ...options,
+      headers: { "Content-Type": "application/json", ...(options.headers || {}) }
+    });
+  } catch (error) {
+    await handleServiceOffline();
+    throw error;
+  }
+  if (response.status === 503) await handleServiceOffline();
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (response.status === 423 || (response.status === 401 && state.unlocked)) sealVault("会话已失效，请重新解锁", false);
@@ -99,9 +108,43 @@ function applyTheme(theme = state.theme) {
   if (button) { button.querySelector("span").textContent = state.theme === "light" ? "☾" : "☼"; button.querySelector("b").textContent = state.theme === "light" ? "暗色" : "浅色"; }
 }
 
+let statusCheckPending = false;
+
+function setServiceStatus(status) {
+  const label = { checking: "正在检测服务…", online: "服务在线", offline: "服务离线" }[status];
+  $$('[data-service-status]').forEach((element) => {
+    element.dataset.serviceStatus = status;
+    element.querySelector('[data-service-status-label]').textContent = label;
+  });
+  $(".unlock-button").disabled = status !== "online";
+}
+
+async function handleServiceOffline() {
+  setServiceStatus("offline");
+  if (state.unlocked) await sealVault("服务连接已中断，数据空间已封印；服务恢复后请重新解锁", false);
+}
+
 async function checkStatus() {
+  if (statusCheckPending) return;
+  statusCheckPending = true;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3000);
+  let status;
   try {
-    const status = await api("/vault/status");
+    status = await api("/vault/status", { cache: "no-store", signal: controller.signal });
+    if (typeof status.initialized !== "boolean" || typeof status.sealed !== "boolean" || typeof status.persistent !== "boolean") {
+      throw new Error("无效的服务状态响应");
+    }
+    setServiceStatus("online");
+  } catch {
+    await handleServiceOffline();
+    return;
+  } finally {
+    clearTimeout(timeout);
+    statusCheckPending = false;
+  }
+  try {
+    state.canManage = Boolean(status.can_manage ?? !status.sealed);
     state.initialized = status.initialized;
     state.persistent = Boolean(status.persistent);
     $("#confirm-password-label").hidden = status.initialized;
@@ -111,6 +154,9 @@ async function checkStatus() {
     $("#master-password").minLength = status.initialized ? 1 : 12;
     $("#vault-mode-note").textContent = status.initialized ? "主密码用于解封数据密钥，不会保存明文。" : "首次使用请设置至少 12 个字符的主密码。";
     $(".unlock-button").lastChild.textContent = status.initialized ? " 解锁数据空间" : " 创建安全数据空间";
+    if (status.sealed && state.unlocked) {
+      await sealVault("服务端会话已失效，请重新解锁", false);
+    }
     if (!status.sealed && status.persistent && !state.unlocked) {
       state.unlocked = true;
       state.unlockAt = Date.now();
@@ -138,6 +184,7 @@ async function unlockVault(event) {
       await api("/vault/unlock", { method: "POST", body: JSON.stringify({ password }) });
     }
     state.unlocked = true;
+    state.canManage = true;
     state.unlockAt = Date.now();
     state.lastActivity = state.unlockAt;
     $("#app").classList.remove("is-sealed");
@@ -156,11 +203,14 @@ async function unlockVault(event) {
 async function sealVault(message = "数据空间已手动封印", callServer = true) {
   clearInterval(state.timer);
   state.unlocked = false;
+  state.canManage = false;
   state.persistent = false;
   state.reveal = null;
   closeRecordDetail();
   $("#dataset-info-modal").close();
   $("#secrets-modal").hidden = true;
+  $("#reveal-modal").hidden = true;
+  $("#app-manager-modal").hidden = true;
   state.secretModalRecordId = null;
   showWorkspace("search");
   state.pendingReveal = null;
@@ -171,8 +221,9 @@ async function sealVault(message = "数据空间已手动封印", callServer = t
   state.records = [];
   state.datasets = [];
   state.directories = [];
+  renderDatasetActions();
   setSealedView();
-  $("#batch-options").hidden = true;
+  $("#batch-options").hidden = true; $("#batch-summary").hidden = true;
   $("#mapping-list").replaceChildren();
   $("#first-schema-fields").replaceChildren();
   $("#master-password").value = "";
@@ -226,6 +277,8 @@ async function loadWorkspace() {
 
 async function fetchRecords() {
   const params = new URLSearchParams({ q: state.query, page: String(state.page), limit: String(state.pageSize) });
+  const dataset = currentDataset();
+  if (dataset) params.set("dataset_id", dataset.id);
   if (state.category !== "all") params.set("category", state.category);
   if (state.environment !== "all") params.set("environment", state.environment);
   if (state.includeExpired) params.set("include_expired", "true");
@@ -239,6 +292,7 @@ async function fetchRecords() {
   state.total = result.total;
   state.page = result.page;
   renderRecords();
+  renderDatasetActions();
 }
 
 function environments() {
@@ -265,14 +319,54 @@ function renderFilters() {
   $("#environment-filters").innerHTML = ["all", ...environments()].map((item) => `<button class="filter-chip ${state.environment === item ? "selected" : ""}" data-environment="${escapeHtml(item)}">${item === "all" ? "全部环境" : escapeHtml(item)}</button>`).join("");
   $$('[data-environment]').forEach((button) => button.addEventListener("click", async () => {
     state.environment = button.dataset.environment;
+    state.selectedDatasetId = null;
     state.page = 1;
     await fetchRecords();
     renderFilters();
+    renderIndexReference();
   }));
 }
 
 function datasetsInCurrentDirectory() {
+  const dataset = currentDataset();
+  if (dataset) return [dataset];
   return state.datasets.filter((dataset) => state.category === "all" || dataset.category_path === state.category || dataset.category_path.startsWith(`${state.category}/`));
+}
+
+function datasetCandidates() {
+  if (state.category === "all") return [];
+  return state.datasets.filter((dataset) => (dataset.category_path === state.category || dataset.category_path.startsWith(`${state.category}/`)) && (state.environment === "all" || dataset.environment === state.environment));
+}
+
+function currentDataset() {
+  const candidates = datasetCandidates();
+  return candidates.find((dataset) => dataset.id === state.selectedDatasetId) || (candidates.length === 1 && candidates[0].category_path === state.category ? candidates[0] : null);
+}
+
+function renderDatasetActions() {
+  const container = $("#dataset-context-actions");
+  const candidates = datasetCandidates();
+  const dataset = currentDataset();
+  container.hidden = !state.unlocked || !candidates.length;
+  if (container.hidden) { container.replaceChildren(); return; }
+  const icons = {
+    view: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>',
+    edit: '<path d="m16 3 5 5-12 12-6 1 1-6L16 3Z"/><path d="m14 5 5 5"/>',
+    import: '<path d="M12 16V3m-5 5 5-5 5 5M4 15v6h16v-6"/>',
+  };
+  const actions = [{ action: "view", label: "查看数据集" }, ...(state.canManage ? [{ action: "edit", label: "编辑数据集" }, { action: "import", label: "导入到此数据集" }] : [])];
+  const chooser = candidates.length > 1 || !dataset ? `<select id="search-dataset-select" aria-label="选择具体数据集"><option value="">当前目录全部数据集</option>${candidates.map((item) => `<option value="${escapeHtml(item.id)}" ${dataset?.id === item.id ? "selected" : ""}>${escapeHtml(item.category_path)} · ${escapeHtml(item.environment || "无环境")}</option>`).join("")}</select>` : "";
+  container.innerHTML = chooser + (dataset ? actions.map(({ action, label }) => `<button type="button" class="icon-button dataset-context-action" data-action="${action}" title="${label}" aria-label="${label}"><svg viewBox="0 0 24 24" aria-hidden="true">${icons[action]}</svg></button>`).join("") : "");
+  $("#search-dataset-select")?.addEventListener("change", async (event) => {
+    state.selectedDatasetId = event.target.value || null;
+    state.page = 1;
+    try { await fetchRecords(); renderIndexReference(); } catch (error) { showToast(error.message, "error"); }
+  });
+  container.querySelectorAll('[data-action]').forEach((button) => button.addEventListener("click", () => {
+    if (button.dataset.action === "view") openDatasetInfo(dataset.id);
+    else if (button.dataset.action === "edit") openDatasetEdit(dataset.id);
+    else openImport(dataset.id);
+  }));
 }
 
 function insertSearchField(field) {
@@ -298,6 +392,7 @@ function renderIndexReference() {
 
 async function selectCategory(category) {
   state.category = category;
+  state.selectedDatasetId = null;
   if (!environments().includes(state.environment)) state.environment = "all";
   state.page = 1;
   await fetchRecords();
@@ -396,7 +491,7 @@ async function openRecordDetail(recordId) {
     $("#record-detail-meta").textContent = `${detail.category}${detail.environment ? ` · ${detail.environment}` : ""}${detail.expired ? " · 已过期" : ""}`;
     state.reveal = null;
     state.recordDetail = { ...detail, labels };
-    $("#record-detail-content").innerHTML = `<section class="detail-section"><h4>索引字段</h4>${detailRows(detail.indexes, labels)}</section><section class="detail-section"><h4>展示字段</h4>${detailRows(detail.display, labels)}</section><section class="detail-section"><h4>受保护字段</h4><p>敏感字段可在此临时查看，30 秒后恢复掩码。</p><div id="detail-protected-fields"></div></section>`;
+    $("#record-detail-content").innerHTML = `<section class="detail-section"><h4>索引字段</h4>${detailRows(detail.indexes, labels)}</section><section class="detail-section"><h4>展示字段</h4>${detailRows(detail.display, labels)}</section><section class="detail-section"><h4>普通字段</h4>${detailRows(detail.normal, labels)}</section><section class="detail-section"><h4>受保护字段</h4><p>敏感字段可在此临时查看，30 秒后恢复掩码。</p><div id="detail-protected-fields"></div></section>`;
     renderDetailSecrets();
     $("#record-detail-modal").hidden = false;
   } catch (error) { showToast(error.message, "error"); }
@@ -509,9 +604,12 @@ function openDatasetManager() {
   showWorkspace("datasets");
 }
 
-function openImport() {
+function openImport(datasetId = null) {
+  if (!state.canManage) return;
+  const preferred = typeof datasetId === "string" ? datasetId : currentDataset()?.id;
   state.importReturn = state.workspace === "search" ? "search" : "datasets";
   datasetOptions();
+  if (preferred) $("#import-dataset-select").value = preferred;
   showWorkspace("import");
 }
 
@@ -529,22 +627,27 @@ document.addEventListener("keydown", (event) => {
   if (toggle) { closeDatasetDownloads(); toggle.focus(); }
 });
 
+function openDatasetEdit(datasetId) {
+  if (!state.canManage) return;
+  const dataset = state.datasets.find((item) => item.id === datasetId);
+  if (!dataset) return;
+  state.editDatasetId = dataset.id;
+  $("#dataset-title").textContent = "编辑数据集属性";
+  $("#dataset-help").textContent = "编辑目录、描述和字段性质。Schema 可在导入时继续演进。";
+  $("#dataset-category").value = dataset.category_path;
+  $("#dataset-environment").value = dataset.environment || "";
+  $("#dataset-description").value = dataset.description || "";
+  updateDatasetDescriptionPreview();
+  renderSchemaFields(dataset.fields || []);
+  renderListConfig(dataset.fields || [], dataset.list_fields || []);
+  $("#save-dataset").innerHTML = "保存修改";
+  openDatasetEditor();
+}
+
 function renderDatasetManager() {
   $("#dataset-manager-list").innerHTML = state.datasets.map((dataset) => `<div class="dataset-manager-row"><div><strong>${escapeHtml(dataset.category_path)}</strong><span>${dataset.environment ? `环境：${escapeHtml(dataset.environment)}` : "无环境标签"} · ${dataset.record_count} 条记录 · ${dataset.fields.length} 个字段 · KEY ${dataset.identity_fields.length ? escapeHtml(dataset.identity_fields.join(" + ")) : "未设置"}</span></div><div class="row-actions"><div class="dataset-download"><button class="secondary-button dataset-download-toggle" aria-expanded="false" aria-controls="download-${escapeHtml(dataset.id)}"><span aria-hidden="true">⤓</span> 下载 <span aria-hidden="true">▾</span></button><div id="download-${escapeHtml(dataset.id)}" class="dataset-download-menu" hidden><span class="download-menu-label">选择下载格式</span>${["json", "csv", "xlsx"].map((format) => `<button class="dataset-export-button" data-format="${format}" data-dataset-id="${escapeHtml(dataset.id)}">${format.toUpperCase()}</button>`).join("")}</div></div><button class="secondary-button dataset-view-button" data-dataset-id="${escapeHtml(dataset.id)}">查看</button><button class="secondary-button dataset-edit-button" data-dataset-id="${escapeHtml(dataset.id)}">编辑</button></div></div>`).join("") || '<p class="detail-empty">暂无数据集</p>';
   $$(".dataset-view-button").forEach((button) => button.addEventListener("click", () => openDatasetInfo(button.dataset.datasetId)));
-  $$(".dataset-edit-button").forEach((button) => button.addEventListener("click", () => {
-    const dataset = state.datasets.find((item) => item.id === button.dataset.datasetId);
-    if (!dataset) return;
-    state.editDatasetId = dataset.id;
-    $("#dataset-title").textContent = "编辑数据集属性";
-    $("#dataset-help").textContent = "修改目录路径或环境标签。Schema 可在导入时继续演进。";
-    $("#dataset-category").value = dataset.category_path;
-    $("#dataset-environment").value = dataset.environment || "";
-    renderSchemaFields(dataset.fields || []);
-    renderListConfig(dataset.fields || [], dataset.list_fields || []);
-    $("#save-dataset").innerHTML = "保存修改";
-    openDatasetEditor();
-  }));
+  $$(".dataset-edit-button").forEach((button) => button.addEventListener("click", () => openDatasetEdit(button.dataset.datasetId)));
   $$(".dataset-download-toggle").forEach((button) => button.addEventListener("click", () => {
     const menu = button.nextElementSibling;
     const open = menu.hidden;
@@ -559,15 +662,19 @@ function renderDatasetManager() {
   }));
 }
 
+function updateDatasetDescriptionPreview() {
+  $("#dataset-description-preview").innerHTML = renderMarkdown($("#dataset-description").value);
+}
+
 function openDatasetInfo(datasetId) {
   const dataset = state.datasets.find((item) => item.id === datasetId);
   if (!dataset) return;
-  const zones = { indexes: "索引字段", display: "展示字段", secrets: "敏感字段（按需查看）", hidden: "隐藏加密字段" };
+  const zones = { indexes: "索引字段", display: "展示字段", secrets: "敏感字段（按需查看）", hidden: "隐藏加密字段", normal: "普通字段（仅详情展示）", ignore: "忽略字段（不保存）" };
   const formats = { single_line: "单行截断", multiline: "多行换行", json: "JSON" };
   const identity = new Set(dataset.identity_fields || []);
   const fields = [...dataset.fields].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
   const visible = (dataset.list_fields?.length ? dataset.list_fields : fields.filter((field) => ["indexes", "display"].includes(field.zone))).filter((field) => field.visible !== false && fields.some((definition) => definition.source_key === field.source_key && ["indexes", "display"].includes(definition.zone))).sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
-  $("#dataset-info-content").innerHTML = `<dl class="dataset-info-summary"><div><dt>目录路径</dt><dd>${escapeHtml(dataset.category_path)}</dd></div><div><dt>环境标签</dt><dd>${escapeHtml(dataset.environment || "未设置")}</dd></div><div><dt>记录数量</dt><dd>${dataset.record_count} 条</dd></div><div><dt>字段数量</dt><dd>${fields.length} 个</dd></div><div><dt>逻辑唯一 KEY</dt><dd>${escapeHtml([...identity].join(" + ") || "未设置")}</dd></div><div><dt>重复处理</dt><dd>${dataset.conflict_strategy === "allow_mark" ? "允许导入并标记重复" : escapeHtml(dataset.conflict_strategy)}</dd></div></dl><h4>字段定义</h4><div class="dataset-info-table-wrap"><table class="dataset-info-table"><thead><tr><th>源字段</th><th>可读名称</th><th>数据区域</th><th>唯一 KEY</th></tr></thead><tbody>${fields.map((field) => `<tr><td>${escapeHtml(field.source_key)}</td><td>${escapeHtml(field.display_name || field.source_key)}</td><td>${escapeHtml(zones[field.zone] || field.zone)}</td><td>${identity.has(field.source_key) ? "是" : "—"}</td></tr>`).join("") || '<tr><td colspan="4">尚未定义字段</td></tr>'}</tbody></table></div><h4>检索列表展示</h4><p class="dataset-info-note">按展示顺序排列；敏感和隐藏字段不会直接显示在检索列表中。</p><div class="dataset-info-table-wrap"><table class="dataset-info-table"><thead><tr><th>字段</th><th>展示名称</th><th>展示形式</th></tr></thead><tbody>${visible.map((field) => `<tr><td>${escapeHtml(field.source_key)}</td><td>${escapeHtml(field.display_name || field.source_key)}</td><td>${escapeHtml(formats[field.format || "single_line"] || field.format)}</td></tr>`).join("") || '<tr><td colspan="3">未配置可见字段</td></tr>'}</tbody></table></div>`;
+  $("#dataset-info-content").innerHTML = `<dl class="dataset-info-summary"><div><dt>目录路径</dt><dd>${escapeHtml(dataset.category_path)}</dd></div><div><dt>环境标签</dt><dd>${escapeHtml(dataset.environment || "未设置")}</dd></div><div><dt>记录数量</dt><dd>${dataset.record_count} 条</dd></div><div><dt>字段数量</dt><dd>${fields.length} 个</dd></div><div><dt>逻辑唯一 KEY</dt><dd>${escapeHtml([...identity].join(" + ") || "未设置")}</dd></div><div><dt>重复处理</dt><dd>${dataset.conflict_strategy === "allow_mark" ? "允许导入并标记重复" : escapeHtml(dataset.conflict_strategy)}</dd></div></dl><section class="dataset-description-section"><h4>数据集描述</h4><div class="markdown-content">${dataset.description?.trim() ? renderMarkdown(dataset.description) : '<p class="dataset-info-note">暂无描述，可在编辑数据集中添加。</p>'}</div></section><h4>字段定义</h4><div class="dataset-info-table-wrap"><table class="dataset-info-table"><thead><tr><th>源字段</th><th>可读名称</th><th>数据区域</th><th>唯一 KEY</th></tr></thead><tbody>${fields.map((field) => `<tr><td>${escapeHtml(field.source_key)}</td><td>${escapeHtml(field.display_name || field.source_key)}</td><td>${escapeHtml(zones[field.zone] || field.zone)}</td><td>${identity.has(field.source_key) ? "是" : "—"}</td></tr>`).join("") || '<tr><td colspan="4">尚未定义字段</td></tr>'}</tbody></table></div><h4>检索列表展示</h4><p class="dataset-info-note">按展示顺序排列；普通、敏感、隐藏和忽略字段不会直接显示在检索列表中。</p><div class="dataset-info-table-wrap"><table class="dataset-info-table"><thead><tr><th>字段</th><th>展示名称</th><th>展示形式</th></tr></thead><tbody>${visible.map((field) => `<tr><td>${escapeHtml(field.source_key)}</td><td>${escapeHtml(field.display_name || field.source_key)}</td><td>${escapeHtml(formats[field.format || "single_line"] || field.format)}</td></tr>`).join("") || '<tr><td colspan="3">未配置可见字段</td></tr>'}</tbody></table></div>`;
   closeDatasetDownloads();
   $("#dataset-info-modal").showModal();
 }
@@ -646,12 +753,36 @@ function moveRowToPosition(row, rowSelector, value, refresh) {
 }
 
 function renderSchemaFields(fields) {
-  $("#schema-fields").innerHTML = fields.map((field, index) => `<div class="schema-field" data-original-source="${escapeHtml(field.source_key)}"><input class="schema-source-key-input" value="${escapeHtml(field.source_key)}" aria-label="字段名称" /><input class="schema-field-label" value="${escapeHtml(field.display_name || field.source_key)}" aria-label="字段显示名称" /><select class="schema-field-zone" aria-label="字段区域"><option value="indexes" ${field.zone === "indexes" ? "selected" : ""}>索引字段</option><option value="display" ${field.zone === "display" ? "selected" : ""}>展示字段</option><option value="hidden" ${field.zone === "hidden" ? "selected" : ""}>隐藏加密字段</option><option value="secrets" ${field.zone === "secrets" ? "selected" : ""}>敏感字段</option></select><label class="schema-unique"><input class="schema-field-unique" type="checkbox" ${field.unique ? "checked" : ""} />唯一 KEY</label><span class="schema-order"><input class="schema-position" type="number" min="1" max="${fields.length}" value="${index + 1}" aria-label="字段顺序" title="输入目标位置，可直接跳转" /><button type="button" data-schema-move="up" ${index === 0 ? "disabled" : ""} title="上移一行">↑</button><button type="button" data-schema-move="down" ${index === fields.length - 1 ? "disabled" : ""} title="下移一行">↓</button></span></div>`).join("");
+  $("#schema-fields").innerHTML = fields.map((field, index) => `<div class="schema-field" data-original-source="${escapeHtml(field.source_key)}"><input class="schema-source-key-input" value="${escapeHtml(field.source_key)}" aria-label="字段名称" /><input class="schema-field-label" value="${escapeHtml(field.display_name || field.source_key)}" aria-label="字段显示名称" /><select class="schema-field-zone" aria-label="字段区域">${fieldZoneOptions(field.zone)}</select><label class="schema-unique"><input class="schema-field-unique" type="checkbox" ${field.unique ? "checked" : ""} />唯一 KEY</label><span class="schema-order"><input class="schema-position" type="number" min="1" max="${fields.length}" value="${index + 1}" aria-label="字段顺序" title="输入目标位置，可直接跳转" /><button type="button" data-schema-move="up" ${index === 0 ? "disabled" : ""} title="上移一行">↑</button><button type="button" data-schema-move="down" ${index === fields.length - 1 ? "disabled" : ""} title="下移一行">↓</button></span></div>`).join("");
   $("#schema-preview").hidden = false;
   $("#schema-preview .schema-column-head").hidden = !fields.length;
   $$('[data-schema-move]').forEach((button) => button.addEventListener("click", () => { const row = button.closest(".schema-field"); const sibling = button.dataset.schemaMove === "up" ? row.previousElementSibling : row.nextElementSibling; if (!sibling) return; if (button.dataset.schemaMove === "up") row.parentElement.insertBefore(row, sibling); else row.parentElement.insertBefore(sibling, row); renderSchemaOrderButtons(); }));
   $$("#schema-fields .schema-position").forEach((input) => input.addEventListener("change", () => moveRowToPosition(input.closest(".schema-field"), ".schema-field", input.value, renderSchemaOrderButtons)));
+  bindSchemaZoneControls($("#schema-fields"), true);
   renderSchemaOrderButtons();
+}
+
+function fieldZoneOptions(zone) {
+  return Object.entries({ indexes: "索引字段", display: "展示字段", normal: "普通字段（仅详情）", secrets: "敏感字段", hidden: "隐藏加密字段", ignore: "忽略字段（不保存）" }).map(([value, label]) => `<option value="${value}" ${zone === value ? "selected" : ""}>${label}</option>`).join("");
+}
+
+function bindSchemaZoneControls(container, updateList = false) {
+  container.querySelectorAll('.schema-field').forEach((row) => {
+    const zone = row.querySelector('.schema-field-zone');
+    const unique = row.querySelector('.schema-field-unique');
+    const sync = () => {
+      unique.disabled = zone.value === "ignore";
+      if (unique.disabled) unique.checked = false;
+    };
+    sync();
+    zone.addEventListener('change', () => {
+      sync();
+      if (updateList) {
+        const fields = [...container.querySelectorAll('.schema-field')].map((field) => ({ source_key: field.querySelector('.schema-source-key-input').value.trim(), display_name: field.querySelector('.schema-field-label').value.trim(), zone: field.querySelector('.schema-field-zone').value }));
+        renderListConfig(fields, readListConfig());
+      }
+    });
+  });
 }
 
 function renderSchemaOrderButtons() {
@@ -677,7 +808,8 @@ function renderListOrderButtons() {
 }
 
 function readListConfig() {
-  return $$("#list-config-fields .list-config-row").map((row, position) => ({ source_key: row.dataset.listSource, display_name: row.querySelector(".list-config-name strong").textContent, position, format: row.querySelector(".list-field-format").value, visible: row.querySelector(".list-field-visible").checked }));
+  const eligible = new Set($$("#schema-fields .schema-field").filter((row) => ["indexes", "display"].includes(row.querySelector('.schema-field-zone').value)).map((row) => row.querySelector('.schema-source-key-input').value.trim()));
+  return $$("#list-config-fields .list-config-row").filter((row) => eligible.has(row.dataset.listSource)).map((row, position) => ({ source_key: row.dataset.listSource, display_name: row.querySelector(".list-config-name strong").textContent, position, format: row.querySelector(".list-field-format").value, visible: row.querySelector(".list-field-visible").checked }));
 }
 
 async function detectSchema() {
@@ -691,9 +823,16 @@ async function createDataset() {
     const categoryPath = $("#dataset-category").value.trim();
     if (!categoryPath) throw new Error("请填写分类目录路径");
     if (state.editDatasetId) {
+      const editedId = state.editDatasetId;
       const fields = $$("#schema-fields .schema-field").map((row, position) => { const sourceKey = row.querySelector(".schema-source-key-input").value.trim(); const original = row.dataset.originalSource; return { source_key: sourceKey, previous_source_key: original !== sourceKey ? original : null, display_name: row.querySelector(".schema-field-label").value.trim(), zone: row.querySelector(".schema-field-zone").value, unique: row.querySelector(".schema-field-unique").checked, position }; });
       const identityFields = fields.filter((field) => field.unique).map((field) => field.source_key);
-      await api(`/datasets/${encodeURIComponent(state.editDatasetId)}`, { method: "PATCH", body: JSON.stringify({ category_path: categoryPath, environment: $("#dataset-environment").value.trim() || null, clear_environment: !$("#dataset-environment").value.trim(), fields, identity_fields: identityFields, list_fields: readListConfig() }) });
+      await api(`/datasets/${encodeURIComponent(state.editDatasetId)}`, { method: "PATCH", body: JSON.stringify({ category_path: categoryPath, description: $("#dataset-description").value, environment: $("#dataset-environment").value.trim() || null, clear_environment: !$("#dataset-environment").value.trim(), fields, identity_fields: identityFields, list_fields: readListConfig() }) });
+      if (state.editorReturn === "search") {
+        state.category = categoryPath;
+        state.environment = $("#dataset-environment").value.trim() || "all";
+        state.selectedDatasetId = editedId;
+        state.page = 1;
+      }
       state.editDatasetId = null;
       await refreshAfterWrite();
       returnFromDatasetEditor();
@@ -702,6 +841,7 @@ async function createDataset() {
     }
     const result = await api("/datasets", { method: "POST", body: JSON.stringify({
       category_path: categoryPath,
+      description: $("#dataset-description").value,
       environment: $("#dataset-environment").value.trim() || null,
       fields: [],
       identity_fields: [],
@@ -739,15 +879,16 @@ async function importFile(file) {
       $("#first-schema").hidden = false;
       $("#first-schema-fields").innerHTML = batch.source_fields.map((source) => {
         const suggestedZone = /key|secret|token|password|private/i.test(source) ? "secrets" : "indexes";
-        return `<div class="schema-field"><code class="schema-source-key">${escapeHtml(source)}</code><input class="schema-field-label" value="${escapeHtml(source.replace(/[_.-]/g, " "))}" aria-label="字段显示名称" /><select class="schema-field-zone"><option value="indexes" ${suggestedZone === "indexes" ? "selected" : ""}>索引字段</option><option value="display">展示字段</option><option value="hidden">隐藏加密字段</option><option value="secrets" ${suggestedZone === "secrets" ? "selected" : ""}>敏感字段</option></select><label class="schema-unique"><input class="schema-field-unique" type="checkbox" />唯一 KEY</label></div>`;
+        return `<div class="schema-field"><code class="schema-source-key">${escapeHtml(source)}</code><input class="schema-field-label" value="${escapeHtml(source.replace(/[_.-]/g, " "))}" aria-label="字段显示名称" /><select class="schema-field-zone">${fieldZoneOptions(suggestedZone)}</select><label class="schema-unique"><input class="schema-field-unique" type="checkbox" />唯一 KEY</label></div>`;
       }).join("");
+      bindSchemaZoneControls($("#first-schema-fields"));
       renderMappings(batch.source_fields, batch.source_fields.map((source) => ({ source_key: source, display_name: source })), true);
     } else {
       $("#first-schema").hidden = true;
       renderMappings(batch.source_fields, knownFields, true);
     }
     $$('[data-map-source]').forEach((select) => select.addEventListener("change", () => { $(`[data-map-new="${CSS.escape(select.dataset.mapSource)}"]`).hidden = select.value !== "__new"; }));
-    $("#batch-options").hidden = false;
+    $("#batch-options").hidden = false; $("#batch-summary").hidden = false;
     $("#import-file").value = "";
   } catch (error) { showToast(error.message || "文件无法解析", "error"); }
 }
@@ -756,8 +897,8 @@ function renderMappings(sourceFields, targetFields, autoSelect = false, template
   $("#mapping-list").innerHTML = sourceFields.map((source) => {
     const template = templateMappings.find((mapping) => mapping.source_key === source);
     const selected = targetFields.find((field) => field.source_key === (template?.target_key || source));
-    const opts = targetFields.map((field) => `<option value="${escapeHtml(field.source_key)}" ${selected?.source_key === field.source_key ? "selected" : ""}>${escapeHtml(field.display_name || field.source_key)} · ${escapeHtml(field.source_key)}</option>`).join("");
-    return `<div class="mapping-row"><code>${escapeHtml(source)}</code><select data-map-source="${escapeHtml(source)}"><option value="">忽略</option>${opts}<option value="__new">新增字段…</option></select><input data-map-new="${escapeHtml(source)}" placeholder="新字段名称" hidden /><input data-map-path="${escapeHtml(source)}" value="${escapeHtml(template?.json_path || "")}" placeholder="JSON 路径，如 account.id" /></div>`;
+    const opts = targetFields.map((field) => `<option value="${escapeHtml(field.source_key)}" ${selected?.source_key === field.source_key ? "selected" : ""}>${escapeHtml(field.display_name || field.source_key)} · ${escapeHtml(field.source_key)}${field.zone === "ignore" ? "（忽略，不保存）" : ""}</option>`).join("");
+    return `<div class="mapping-row"><code>${escapeHtml(source)}</code><select data-map-source="${escapeHtml(source)}"><option value="">忽略本次导入</option>${opts}<option value="__new">新增字段…</option></select><input data-map-new="${escapeHtml(source)}" placeholder="新字段名称" hidden /><input data-map-path="${escapeHtml(source)}" value="${escapeHtml(template?.json_path || "")}" placeholder="JSON 路径，如 account.id" /></div>`;
   }).join("");
   $$('[data-map-source]').forEach((select) => select.addEventListener("change", () => { $(`[data-map-new="${CSS.escape(select.dataset.mapSource)}"]`).hidden = select.value !== "__new"; }));
 }
@@ -816,7 +957,7 @@ async function commitImport() {
     $("#mapping-template-select").value = "";
     $("#skip-existing").checked = false;
     $("#delete-missing").checked = false;
-    showWorkspace(state.importReturn); $("#batch-options").hidden = true; state.pendingBatchId = null;
+    showWorkspace(state.importReturn); $("#batch-options").hidden = true; $("#batch-summary").hidden = true; state.pendingBatchId = null;
     await refreshAfterWrite();
     if (state.importReturn === "datasets") renderDatasetManager();
     const stats = result.import || result;
@@ -836,7 +977,7 @@ $("#search-input").addEventListener("input", (event) => {
   state.searchTimer = setTimeout(() => fetchRecords().catch((error) => showToast(error.message, "error")), 180);
 });
 $("#clear-filters").addEventListener("click", async () => {
-  state.query = ""; state.category = "all"; state.environment = "all"; state.page = 1;
+  state.query = ""; state.selectedDatasetId = null; state.category = "all"; state.environment = "all"; state.page = 1;
   $("#search-input").value = "";
   await fetchRecords(); renderCategoryTree(); renderFilters();
 });
@@ -850,9 +991,11 @@ $("#manager-new-dataset").addEventListener("click", () => $("#new-dataset-button
 $("#manager-import").addEventListener("click", openImport);
 $("#app-manager-button").addEventListener("click", async () => { try { await loadApps(); $("#app-manager-modal").hidden = false; } catch (error) { showToast(error.message, "error"); } });
 $("#create-app").addEventListener("click", async () => { try { const name = $("#app-name").value.trim(); if (!name) throw new Error("请填写应用名称"); const result = await api("/apps", { method: "POST", body: JSON.stringify({ name, permission: $("#app-permission").value, datasets: [] }) }); $("#app-name").value = ""; await loadApps(); window.prompt("请立即保存新的 API Key（只显示这一次）", result.key); } catch (error) { showToast(error.message, "error"); } });
-$("#new-dataset-button").addEventListener("click", () => { state.editDatasetId = null; state.evolvedFields = []; state.currentBatchSources = []; $("#dataset-title").textContent = "定义数据集"; $("#dataset-help").textContent = "可先创建空数据集，首次导入时再定义 Schema。"; $("#dataset-category").value = ""; $("#dataset-environment").value = ""; renderSchemaFields([]); $("#list-config").hidden = true; $("#list-config-fields").replaceChildren(); $("#first-schema-fields").replaceChildren(); $("#first-schema").hidden = true; $("#save-dataset").innerHTML = "创建数据集 <span>↗</span>"; openDatasetEditor(); $("#dataset-category").focus(); });
+$("#new-dataset-button").addEventListener("click", () => { state.editDatasetId = null; state.evolvedFields = []; state.currentBatchSources = []; $("#dataset-title").textContent = "定义数据集"; $("#dataset-help").textContent = "可先创建空数据集，首次导入时再定义 Schema。"; $("#dataset-category").value = ""; $("#dataset-environment").value = ""; $("#dataset-description").value = ""; updateDatasetDescriptionPreview(); renderSchemaFields([]); $("#list-config").hidden = true; $("#list-config-fields").replaceChildren(); $("#first-schema-fields").replaceChildren(); $("#first-schema").hidden = true; $("#save-dataset").innerHTML = "创建数据集 <span>↗</span>"; openDatasetEditor(); $("#dataset-category").focus(); });
 $("#edit-dataset-button").addEventListener("click", () => {
-  openDatasetManager();
+  const dataset = currentDataset();
+  if (dataset) openDatasetEdit(dataset.id);
+  else openDatasetManager();
 });
 $("#import-button").addEventListener("click", openImport);
 $("#choose-file").addEventListener("click", () => $("#import-file").click());
@@ -875,6 +1018,12 @@ $("#close-app-manager").addEventListener("click", () => { $("#app-manager-modal"
 $("#cancel-reveal").addEventListener("click", () => { $("#reveal-modal").hidden = true; state.pendingReveal = null; });
 $("#confirm-reveal").addEventListener("click", () => { if (state.pendingReveal) handleSecretAction("reveal", state.pendingReveal.field); $("#reveal-modal").hidden = true; });
 $("#detect-schema")?.addEventListener("click", detectSchema);
+$("#dataset-description").addEventListener("input", () => {
+  if ($("#dataset-description-preview-panel").open) updateDatasetDescriptionPreview();
+});
+$("#dataset-description-preview-panel").addEventListener("toggle", () => {
+  if ($("#dataset-description-preview-panel").open) updateDatasetDescriptionPreview();
+});
 $("#save-dataset").addEventListener("click", createDataset);
 $("#close-dataset").addEventListener("click", returnFromDatasetEditor);
 $("#cancel-dataset").addEventListener("click", returnFromDatasetEditor);
@@ -892,3 +1041,10 @@ document.head.appendChild(toastStyle);
 applyTheme();
 setSealedView();
 checkStatus();
+setInterval(checkStatus, 5000);
+window.addEventListener("focus", checkStatus);
+window.addEventListener("online", checkStatus);
+window.addEventListener("offline", handleServiceOffline);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) checkStatus();
+});

@@ -40,7 +40,7 @@ body { margin: 0; min-width: 320px; background: var(--bg); color: var(--ink); tr
 :root[data-theme="light"] .ambient { opacity: .08; }
 :root[data-theme="light"] .topbar { background: rgba(255,255,255,.82); }
 :root[data-theme="light"] .search-panel, :root[data-theme="light"] .record-card, :root[data-theme="light"] .reveal-dialog { background: rgba(255,255,255,.92); }
-:root[data-theme="light"] .search-input-wrap input, :root[data-theme="light"] .password-wrap input, :root[data-theme="light"] .dataset-dialog input, :root[data-theme="light"] .dataset-dialog select, :root[data-theme="light"] .app-create-row input, :root[data-theme="light"] .app-create-row select, :root[data-theme="light"] .app-dataset-editor select, :root[data-theme="light"] .mapping-row select, :root[data-theme="light"] .mapping-row input, :root[data-theme="light"] .import-dialog input:not([type=checkbox]) { background: #f8fbfb; color: var(--ink); }
+:root[data-theme="light"] .search-input-wrap input, :root[data-theme="light"] .password-wrap input, :root[data-theme="light"] .dataset-dialog input, :root[data-theme="light"] .dataset-dialog select, :root[data-theme="light"] .dataset-dialog textarea, :root[data-theme="light"] .app-create-row input, :root[data-theme="light"] .app-create-row select, :root[data-theme="light"] .app-dataset-editor select, :root[data-theme="light"] .mapping-row select, :root[data-theme="light"] .mapping-row input, :root[data-theme="light"] .import-dialog input:not([type=checkbox]) { background: #f8fbfb; color: var(--ink); }
 :root[data-theme="light"] .index-reference-group, :root[data-theme="light"] .index-field-token { background: #f3f8f8; }
 :root[data-theme="light"] .index-reference-group strong, :root[data-theme="light"] .schema-preview-head { color: #244a57; }
 :root[data-theme="light"] .index-field-token { color: #3c626d; border-color: rgba(23,73,91,.28); }
@@ -83,6 +83,9 @@ button { cursor: pointer; }
 .button-icon { margin-right: 4px; }
 .sealed-meta { color: var(--muted-2); display: flex; justify-content: space-between; font-size: 10px; margin-top: 18px; }
 .status-dot { width: 6px; height: 6px; display: inline-block; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 8px var(--cyan); margin-right: 6px; }
+[data-service-status="checking"] .status-dot { background: var(--amber); box-shadow: none; }
+[data-service-status="offline"] .status-dot { background: var(--red); box-shadow: none; }
+[data-service-status="offline"] { color: var(--red); }
 .demo-note { text-align: center; color: #4f697b; font-size: 10px; margin-top: 28px; }
 code { color: var(--cyan-bright); font-family: "SFMono-Regular", Consolas, monospace; font-size: .9em; }
 .vault-screen { min-height: 100vh; position: relative; z-index: 1; }
@@ -385,7 +388,36 @@ code { color: var(--cyan-bright); font-family: "SFMono-Regular", Consolas, monos
 .workspace-tools { display: flex; flex-wrap: wrap; gap: 10px; margin: 20px 0; }
 .workspace-panel .dataset-manager-list, .workspace-panel .schema-fields, .workspace-panel .list-config-fields, .workspace-panel .mapping-list { max-height: none; overflow: visible; }
 .workspace-panel .dialog-actions { position: static; margin: 24px 0 0; padding: 16px 0 0; border-top: 1px solid var(--line); background: transparent; }
-.workspace-panel.import-workbench { width: auto; max-height: none; }
+.workspace-panel.import-workbench { width: auto; max-height: none; overflow: visible; overscroll-behavior: auto; }
+.workspace-panel.import-workbench #first-schema-fields { max-height: none; overflow: visible; }
+/* Import controls use the same visual language in both themes. */
+.import-workbench > label, .import-workbench #batch-options > label:not(.check-line) { display: grid; grid-template-columns: 100px minmax(0, 1fr); align-items: center; gap: 12px; margin: 20px 0 12px; color: var(--muted); font-size: 12px; font-weight: 600; }
+.import-workbench select, .import-workbench input:not([type=checkbox]):not([type=file]) { min-width: 0; width: 100%; min-height: 42px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 8px; background-color: var(--bg-2); color: var(--ink); font-family: inherit; font-size: 12px; line-height: 1.5; outline: none; transition: border-color .2s, box-shadow .2s; }
+.import-workbench select, :root[data-theme="light"] .import-workbench select { appearance: none; padding-right: 36px; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 18px) 50%, calc(100% - 13px) 50%; background-size: 5px 5px; background-repeat: no-repeat; cursor: pointer; }
+.import-workbench select:hover { border-color: var(--cyan); }
+.import-workbench select:focus-visible, .import-workbench input:not([type=checkbox]):focus-visible { border-color: var(--cyan); box-shadow: 0 0 0 3px color-mix(in srgb, var(--cyan) 16%, transparent); }
+.import-workbench input::placeholder { color: var(--muted-2); }
+.import-workbench .import-file-row { display: grid; grid-template-columns: minmax(220px, .8fr) minmax(0, 2fr); align-items: stretch; gap: 12px; margin: 14px 0 24px; }
+.import-workbench #choose-file { display: flex; align-items: center; justify-content: center; gap: 12px; min-height: 52px; width: 100%; margin: 0; padding: 16px 20px; border: 1px dashed color-mix(in srgb, var(--cyan) 55%, transparent); border-radius: 10px; background: color-mix(in srgb, var(--cyan) 8%, transparent); color: var(--cyan-bright); box-shadow: none; line-height: 1.6; }
+.import-workbench #choose-file:hover { border-color: var(--cyan); background: color-mix(in srgb, var(--cyan) 14%, transparent); }
+.import-workbench #choose-file span { font-size: 20px; flex-shrink: 0; }
+.import-workbench button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
+.import-workbench #batch-summary { display: flex; align-items: center; min-width: 0; margin: 0; padding: 14px 16px; border: 1px solid var(--line); border-left: 3px solid var(--cyan); border-radius: 8px; background: var(--dataset-row-bg); color: var(--ink); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.import-workbench #batch-summary[hidden] { display: none; }
+.import-workbench .mapping-column-head { padding: 0 12px; margin-top: 20px; font-size: 11px; }
+.import-workbench .mapping-list { gap: 8px; padding-right: 0; }
+.import-workbench .mapping-row { padding: 10px 12px; gap: 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--dataset-row-bg); }
+.import-workbench .mapping-row code { min-width: 0; font-size: 12px; }
+.import-workbench .check-line { gap: 9px; margin-top: 14px; font-size: 12px; line-height: 1.6; }
+.import-workbench .check-line input { width: 16px; height: 16px; flex-shrink: 0; margin: 0; }
+:root[data-theme="light"] .import-workbench #commit-import { color: #fff; }
+@media (max-width: 760px) {
+  .import-workbench .mapping-row { gap: 8px; padding: 10px; }
+  .import-workbench .import-file-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 8px; }
+  .import-workbench > label, .import-workbench #batch-options > label:not(.check-line) { grid-template-columns: 84px minmax(0, 1fr); gap: 8px; }
+  .import-workbench #choose-file { font-size: 12px; padding: 12px 10px; gap: 6px; }
+  .import-workbench #batch-summary { padding: 10px 12px; }
+}
 .workspace-panel .dataset-manager-row .row-actions { display: flex; flex-wrap: wrap; gap: 8px; flex-shrink: 0; }
 .workspace-panel .dataset-manager-row strong { white-space: normal; overflow-wrap: anywhere; }
 .workspace-panel .schema-preview { margin-top: 24px; }
@@ -428,6 +460,32 @@ code { color: var(--cyan-bright); font-family: "SFMono-Regular", Consolas, monos
 .dataset-info-header h3 { margin: 8px 0 0; font-size: 22px; }
 .dataset-info-header button { min-width: 36px; font-size: 20px; }
 .dataset-info-body { padding: 0 28px 28px; }
+.dataset-context-actions { display: flex; align-items: center; gap: 6px; }
+.dataset-context-actions[hidden] { display: none; }
+.dataset-context-action svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.dataset-context-actions select { max-width: 260px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--panel-strong); color: var(--ink); padding: 8px; font: inherit; font-size: 12px; }
+@media (max-width: 600px) { .results-header { flex-wrap: wrap; gap: 12px; } .results-header .view-tools { flex-wrap: wrap; } .dataset-context-actions { flex-wrap: wrap; } .dataset-context-actions select { max-width: min(260px, 60vw); } }
+.dataset-description-editor { margin: 22px 0; }
+.dataset-description-editor > label { color: var(--ink); font-size: 13px; }
+.dataset-description-editor textarea { min-height: 200px; line-height: 1.6; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.dataset-description-editor details { margin-top: 12px; border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
+.dataset-description-editor summary { color: var(--muted); cursor: pointer; font-size: 12px; }
+.dataset-description-section { margin: 24px 0; }
+.markdown-content { min-width: 0; color: var(--ink); font-size: 13px; line-height: 1.75; overflow-wrap: anywhere; }
+.markdown-content > :first-child { margin-top: 12px; }
+.markdown-content h1, .markdown-content h2, .markdown-content h3, .markdown-content h4, .markdown-content h5, .markdown-content h6 { line-height: 1.4; margin: 20px 0 10px; }
+.markdown-content h1 { font-size: 24px; }
+.markdown-content h2 { font-size: 21px; }
+.markdown-content h3 { font-size: 18px; }
+.markdown-content h4, .markdown-content h5, .markdown-content h6 { font-size: 15px; }
+.markdown-content pre { max-width: 100%; overflow-x: auto; padding: 16px; border: 1px solid var(--line); border-radius: 6px; background: var(--dataset-row-bg); white-space: pre; }
+.markdown-content code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+.markdown-content :not(pre) > code { padding: 2px 5px; background: var(--dataset-row-bg); border-radius: 3px; }
+.markdown-content blockquote { margin: 16px 0; padding-left: 16px; border-left: 3px solid var(--cyan); color: var(--muted); }
+.markdown-content a { color: var(--cyan); text-decoration: underline; }
+.markdown-content table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
+.markdown-content th, .markdown-content td { padding: 8px 12px; border: 1px solid var(--line); }
+.markdown-content hr { border: 0; border-top: 1px solid var(--line); }
 @media (max-width: 600px) { .dataset-info-header { padding: 18px; } .dataset-info-body { padding: 0 18px 18px; } }
 
 /* Keep lock and session controls available while the document scrolls. */

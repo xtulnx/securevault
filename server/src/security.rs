@@ -206,10 +206,13 @@ pub(super) fn validate_schema(
             || !seen.insert(&field.source_key)
             || !matches!(
                 field.zone.as_str(),
-                "indexes" | "display" | "secrets" | "hidden"
+                "indexes" | "display" | "normal" | "ignore" | "secrets" | "hidden"
             )
         {
             return Err(bad_request("字段定义无效或重复"));
+        }
+        if field.zone == "ignore" && (field.unique || identity.contains(&field.source_key)) {
+            return Err(bad_request("忽略字段不能作为逻辑唯一 KEY"));
         }
     }
     if identity.iter().any(|key| !seen.contains(key)) {
@@ -218,6 +221,7 @@ pub(super) fn validate_schema(
     for field in list {
         if !matches!(field.format.as_str(), "single_line" | "multiline" | "json")
             || !seen.contains(&field.source_key)
+            || (field.visible && !fields.iter().any(|definition| definition.source_key == field.source_key && matches!(definition.zone.as_str(), "indexes" | "display")))
         {
             return Err(bad_request("列表展示字段或格式无效"));
         }

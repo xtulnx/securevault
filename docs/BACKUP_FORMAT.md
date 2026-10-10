@@ -60,7 +60,7 @@ age --passphrase --output repacked.jsonl.gz.age backup.jsonl.gz
 
 | 类型 | data 字段 |
 | --- | --- |
-| datasets | id、category_path、environment、fields、identity_fields、conflict_strategy、list_fields、created_at |
+| datasets | id、category_path、environment、fields、identity_fields、conflict_strategy、list_fields、created_at；可选 description（Markdown 原文） |
 | records | id、dataset_id、category_path、environment、indexes、display、duplicate_of、expired、updated_at |
 | protected_fields | record_id、source_key、zone、value |
 | import_templates | name、dataset_id、mappings、updated_at |

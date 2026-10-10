@@ -16,6 +16,7 @@ const TABLES: &[(&str, &[&str])] = &[
             "conflict_strategy",
             "list_fields_json",
             "created_at",
+            "description",
         ],
     ),
     (
@@ -278,11 +279,15 @@ fn write_logical(connection: &Connection, keys: &KeySet, writer: &mut impl Write
         &json!({"type":"header","format":"securevault-logical","version":1,"producer":env!("CARGO_PKG_VERSION"),"created_at":unix_now()}),
     )?;
     let mut counts = serde_json::Map::new();
+    let has_description: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('datasets') WHERE name='description')", [], |row| row.get(0)).map_err(internal)?;
     for &(table, columns) in TABLES {
+        let selected = columns.iter().map(|column| {
+            if table == "datasets" && *column == "description" && !has_description { "'' AS description" } else { *column }
+        }).collect::<Vec<_>>().join(",");
         let mut statement = connection
             .prepare(&format!(
                 "SELECT {} FROM {table} ORDER BY {}",
-                columns.join(","),
+                selected,
                 columns[0]
             ))
             .map_err(internal)?;
@@ -291,6 +296,7 @@ fn write_logical(connection: &Connection, keys: &KeySet, writer: &mut impl Write
         while let Some(row) = rows.next().map_err(internal)? {
             let mut data = serde_json::Map::new();
             for (i, column) in columns.iter().enumerate() {
+                if table == "datasets" && *column == "description" && row.get::<_, String>(i).map_err(internal)?.is_empty() { continue; }
                 let value = match row.get_ref(i).map_err(internal)? {
                     rusqlite::types::ValueRef::Null => Value::Null,
                     rusqlite::types::ValueRef::Integer(n) => json!(n),
@@ -526,6 +532,13 @@ fn insert_row(
     columns: &[&str],
     data: &Value,
 ) -> ApiResult<()> {
+    // Description is an optional v1 extension; older backups default to empty.
+    let normalized = if table == "datasets" && data.get("description").is_none() {
+        let mut value = data.clone();
+        value.as_object_mut().ok_or_else(|| bad_request("备份的 data 字段必须是 JSON 对象"))?.insert("description".into(), json!(""));
+        Some(value)
+    } else { None };
+    let data = normalized.as_ref().unwrap_or(data);
     let map = data
         .as_object()
         .ok_or_else(|| bad_request("备份的 data 字段必须是 JSON 对象"))?;
@@ -619,12 +632,14 @@ fn insert_row(
     let mut columns = columns.to_vec();
     if table == "records" {
         columns.extend(["search_blob"]);
+        let definitions = dataset_definitions(db, text("dataset_id")?)?;
+        let (display, _) = split_display_fields(&data["display"], &definitions);
         values.push(
             search_blob(
                 text("category_path")?,
                 data["environment"].as_str(),
                 &data["indexes"],
-                &data["display"],
+                &display,
             )
             .into(),
         );
@@ -718,6 +733,34 @@ mod tests {
     use super::*;
     const FIXTURE: &str = include_str!("../../samples/fixtures/backup-v1.jsonl");
     #[test]
+    fn normal_and_ignored_schema_fields_round_trip_without_creating_search_terms() {
+        let keys = random_keys();
+        let mut db = Connection::open_in_memory().unwrap();
+        initialize_schema(&db).unwrap();
+        let tx = db.transaction().unwrap();
+        read_logical(FIXTURE.as_bytes(), &tx, &keys).unwrap();
+        tx.commit().unwrap();
+        let old = dataset_definitions(&db, "dataset-fixture").unwrap();
+        let mut new = old.clone();
+        new.iter_mut().find(|field| field.source_key == "name").unwrap().zone = "normal".into();
+        new.push(serde_json::from_value(json!({"source_key":"unused","zone":"ignore"})).unwrap());
+        migrate_schema_records(&db, &keys, "dataset-fixture", &old, &new, &["account.token".into()], "固定回归", None).unwrap();
+        db.execute("UPDATE datasets SET fields_json=?1", [serde_json::to_string(&new).unwrap()]).unwrap();
+        let mut output = Zeroizing::new(Vec::new());
+        write_logical(&db, &keys, &mut *output).unwrap();
+        let mut restored = Connection::open_in_memory().unwrap();
+        initialize_schema(&restored).unwrap();
+        let tx = restored.transaction().unwrap();
+        read_logical(output.as_slice(), &tx, &keys).unwrap();
+        tx.commit().unwrap();
+        let definitions = dataset_definitions(&restored, "dataset-fixture").unwrap();
+        assert_eq!(definitions.iter().find(|field| field.source_key == "unused").unwrap().zone, "ignore");
+        let (display, blob): (String, String) = restored.query_row("SELECT display_json,search_blob FROM records WHERE id='record-1'", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        let (_, normal) = split_display_fields(&serde_json::from_str(&display).unwrap(), &definitions);
+        assert_eq!(normal["name"], "示例");
+        assert!(!blob.contains("示例"));
+    }
+    #[test]
     fn v1_fixed_fixture_preserves_types_and_relations_and_rejects_unknown_format() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -793,5 +836,26 @@ mod tests {
         );
         let tx = db.transaction().unwrap();
         assert!(read_logical(unknown.as_bytes(), &tx, &keys).is_err());
+        drop(tx);
+
+        let description = "## 查询说明\n\n```sql\nSELECT * FROM demo WHERE id < 10;\n```\n";
+        db.execute("UPDATE datasets SET description=?1", [description]).unwrap();
+        output.clear();
+        write_logical(&db, &keys, &mut *output).unwrap();
+        let mut restored = Connection::open_in_memory().unwrap();
+        initialize_schema(&restored).unwrap();
+        let tx = restored.transaction().unwrap();
+        read_logical(output.as_slice(), &tx, &keys).unwrap();
+        validate_relations(&tx).unwrap();
+        tx.commit().unwrap();
+        let actual: String = restored.query_row("SELECT description FROM datasets", [], |r| r.get(0)).unwrap();
+        assert_eq!(actual, description);
+
+        // An older vault can be backed up directly before its first UI unlock.
+        db.execute("ALTER TABLE datasets DROP COLUMN description", []).unwrap();
+        output.clear();
+        write_logical(&db, &keys, &mut *output).unwrap();
+        let actual: Vec<Value> = std::str::from_utf8(&output).unwrap().lines().skip(1).map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(actual, expected);
     }
 }
