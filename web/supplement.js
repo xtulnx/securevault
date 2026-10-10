@@ -43,17 +43,18 @@ function bindSupplementSecrets(container) {
   }));
 }
 
-function supplementMarkup(row, fields, manage = false) {
+function supplementMarkup(row, fields, manage = false, showLink = true) {
   const labels = Object.fromEntries(fields.map((field) => [field.source_key, field.display_name || field.source_key]));
-  const secrets = row.protected_fields.map((field) => `<div class="supplement-secret"><strong>${escapeHtml(labels[field.field_name] || field.field_name)}</strong><span class="supplement-secret-value">••••••••</span>${field.zone === 'secrets' ? `<button class="secondary-button" data-supplement-reveal="${escapeHtml(row.id)}" data-field="${escapeHtml(field.field_name)}">查看</button>` : '<span>隐藏加密字段</span>'}</div>`).join('');
-  return `<article class="supplement-row ${row.orphan ? 'is-orphan' : ''}"><header><strong>${row.orphan ? '失联记录' : '已关联'}</strong><code>${escapeHtml(row.main_record_id)}</code><span>${escapeHtml(row.updated)}</span></header><p class="dataset-info-note">${escapeHtml(row.link.mode === 'id' ? '系统主键关联' : '索引关联')}：${escapeHtml(JSON.stringify(row.link.values))}</p>${detailRows(row.values, labels)}${secrets}${manage ? `<div class="row-actions">${!row.orphan ? `<button class="secondary-button" data-supplement-parent="${escapeHtml(row.main_record_id)}">查看主记录</button>` : ''}<button class="secondary-button" data-supplement-edit="${escapeHtml(row.id)}">编辑 / 重新关联</button><button class="secondary-button danger-button" data-supplement-delete="${escapeHtml(row.id)}">删除</button></div>` : ''}</article>`;
+  const secrets = row.protected_fields.map((field) => `<div class="detail-row protected"><span>${escapeHtml(labels[field.field_name] || field.field_name)}<small>${field.zone === 'secrets' ? '敏感字段' : '隐藏加密字段'}</small></span><strong><span class="supplement-secret-value">••••••••</span>${field.zone === 'secrets' ? `<button class="detail-secret-button" data-supplement-reveal="${escapeHtml(row.id)}" data-field="${escapeHtml(field.field_name)}">查看</button>` : '<small>仅加密存储，不可查看</small>'}</strong></div>`).join('');
+  const linkInfo = showLink ? `<header><strong>${row.orphan ? '失联记录' : '已关联'}</strong><code>${escapeHtml(row.main_record_id)}</code><span>${escapeHtml(row.updated)}</span></header><p class="dataset-info-note">${escapeHtml(row.link.mode === 'id' ? '系统主键关联' : '索引关联')}：${escapeHtml(JSON.stringify(row.link.values))}</p>` : '';
+  return `<article class="supplement-row ${row.orphan ? 'is-orphan' : ''}">${linkInfo}${detailRows(row.values, labels)}${secrets}${manage ? `<div class="row-actions">${!row.orphan ? `<button class="secondary-button" data-supplement-parent="${escapeHtml(row.main_record_id)}">查看主记录</button>` : ''}<button class="secondary-button" data-supplement-edit="${escapeHtml(row.id)}">编辑 / 重新关联</button><button class="secondary-button danger-button" data-supplement-delete="${escapeHtml(row.id)}">删除</button></div>` : ''}</article>`;
 }
 
 function renderRecordSupplement(detail) {
   const target = $('#record-supplement-content');
   if (!target) return;
   const fields = detail.supplement_fields || [];
-  target.innerHTML = (detail.supplement_records || []).map((row) => supplementMarkup(row, fields)).join('') || '<p class="detail-empty">暂无附表记录</p>';
+  target.innerHTML = (detail.supplement_records || []).map((row) => supplementMarkup(row, fields, false, false)).join('') || '<p class="detail-empty">暂无附表记录</p>';
   if (state.canManage) {
     const tools = document.createElement('div');
     tools.className = 'row-actions';
