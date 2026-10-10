@@ -54,6 +54,8 @@ const TABLES: &[(&str, &[&str])] = &[
         "audit_events",
         &["id", "event", "record_id", "field_name", "created_at"],
     ),
+    ("supplement_schemas", &["dataset_id", "fields_json"]),
+    ("supplement_records", &["id", "dataset_id", "main_record_id", "link_json", "orphan", "updated_at"]),
 ];
 const MAX_LINE: u64 = 16 * 1024 * 1024;
 const MAX_EXPANDED: u64 = 16 * 1024 * 1024 * 1024;
@@ -281,6 +283,7 @@ fn write_logical(connection: &Connection, keys: &KeySet, writer: &mut impl Write
     let mut counts = serde_json::Map::new();
     let has_description: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('datasets') WHERE name='description')", [], |row| row.get(0)).map_err(internal)?;
     for &(table, columns) in TABLES {
+        if table.starts_with("supplement_") && !connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)", [table], |r| r.get::<_,bool>(0)).map_err(internal)? { continue; }
         let selected = columns.iter().map(|column| {
             if table == "datasets" && *column == "description" && !has_description { "'' AS description" } else { *column }
         }).collect::<Vec<_>>().join(",");
@@ -328,10 +331,13 @@ fn write_logical(connection: &Connection, keys: &KeySet, writer: &mut impl Write
                     open_field(&keys.field, record, field, &nonce, &ciphertext)?,
                 );
             }
+            if table == "supplement_records" {
+                data.insert("value".into(), supplement::values(connection, keys, data["id"].as_str().ok_or_else(||internal("invalid supplement id"))?)?);
+            }
             line(writer, &json!({"type":table,"data":data}))?;
             count += 1;
         }
-        counts.insert(table.into(), json!(count));
+        if !table.starts_with("supplement_") || count > 0 { counts.insert(table.into(), json!(count)); }
     }
     line(writer, &json!({"type":"end","counts":counts}))
 }
@@ -417,6 +423,8 @@ fn restore(input: &FsPath, output: &FsPath, password: &str, master: &str) -> Api
         let tx = db.transaction().map_err(internal)?;
         read_logical(decrypted_gzip(input, password)?, &tx, &keys)?;
         rebuild_identities(&tx, &keys)?;
+        let datasets: Vec<String> = {let mut stmt=tx.prepare("SELECT id FROM datasets").map_err(internal)?;stmt.query_map([],|r|r.get(0)).map_err(internal)?.collect::<Result<_,_>>().map_err(internal)?};
+        for dataset in datasets {supplement::sync(&tx,&dataset)?;}
         validate_relations(&tx)?;
         tx.execute("INSERT INTO audit_events(event,field_name) VALUES('logical_backup_restored','offline_cli')",[]).map_err(internal)?;
         tx.commit().map_err(internal)?;
@@ -449,7 +457,7 @@ fn read_logical(reader: impl Read, db: &Connection, keys: &KeySet) -> ApiResult<
     let mut ended = false;
     let mut counts = serde_json::Map::new();
     for &(table, _) in TABLES {
-        counts.insert(table.into(), json!(0));
+        if !table.starts_with("supplement_") { counts.insert(table.into(), json!(0)); }
     }
     let mut current_table = 0usize;
     loop {
@@ -514,7 +522,7 @@ fn read_logical(reader: impl Read, db: &Connection, keys: &KeySet) -> ApiResult<
         }
         current_table = index;
         insert_row(db, keys, kind, TABLES[index].1, &item["data"])?;
-        let count = counts[kind].as_u64().unwrap() + 1;
+        let count = counts.get(kind).and_then(Value::as_u64).unwrap_or(0) + 1;
         if count > 10_000_000 {
             return Err(bad_request("备份数据行数超过限制"));
         }
@@ -542,7 +550,7 @@ fn insert_row(
     let map = data
         .as_object()
         .ok_or_else(|| bad_request("备份的 data 字段必须是 JSON 对象"))?;
-    if map.len() != columns.len() + usize::from(table == "protected_fields")
+    if map.len() != columns.len() + usize::from(table == "protected_fields" || table == "supplement_records")
         || columns
             .iter()
             .any(|c| !map.contains_key(c.strip_suffix("_json").unwrap_or(c)))
@@ -586,6 +594,22 @@ fn insert_row(
         }
         let _: Vec<String> = serde_json::from_value(data["datasets"].clone())
             .map_err(|_| bad_request("应用的数据集权限范围无效"))?;
+    }
+    if table == "supplement_schemas" {
+        let definitions: Vec<FieldDefinition> = serde_json::from_value(data["fields"].clone()).map_err(|_|bad_request("附表字段定义无效"))?;
+        validate_schema(&definitions, &[], &[])?;
+    }
+    if table == "supplement_records" {
+        if !data["value"].is_object() || !data["link"].is_object() || !matches!(data["orphan"].as_i64(),Some(0|1)) {return Err(bad_request("附表记录结构无效"));}
+        let link=&data["link"];
+        if link.as_object().unwrap().len()!=3 || !matches!(link["mode"].as_str(),Some("id"|"indexes"|"incomplete"|"unresolved")) || !link["fields"].as_array().is_some_and(|fields|fields.iter().all(Value::is_string)) || !link["values"].is_object() || (link["mode"]=="id" && !link["values"]["id"].is_string()) || text("main_record_id")?.is_empty() {return Err(bad_request("附表关联快照无效"));}
+        let definitions = supplement::fields(db, text("dataset_id")?)?;
+        if data["value"].as_object().unwrap().keys().any(|key| !definitions.iter().any(|f| f.source_key==*key && f.zone!="ignore")) {return Err(bad_request("附表记录字段未定义"));}
+        let (nonce,ciphertext) = seal_field(&keys.field,text("id")?,"supplement",&data["value"])?;
+        let occupied:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM supplement_records WHERE dataset_id=?1 AND main_record_id=?2 AND orphan=0)",params![text("dataset_id")?,text("main_record_id")?],|r|r.get(0)).map_err(internal)?;
+        let orphan = data["orphan"].as_i64().unwrap() == 1 || occupied;
+        db.execute("INSERT INTO supplement_records(id,dataset_id,main_record_id,link_json,orphan,updated_at,nonce,ciphertext) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![text("id")?,text("dataset_id")?,text("main_record_id")?,data["link"].to_string(),orphan,text("updated_at")?,nonce,ciphertext]).map_err(|_|bad_request("附表记录无效或重复"))?;
+        return Ok(());
     }
     if table == "protected_fields" {
         if !matches!(text("zone")?, "hidden" | "secrets") || !map.contains_key("value") {
@@ -708,6 +732,9 @@ fn rebuild_identities(db: &Connection, keys: &KeySet) -> ApiResult<()> {
     Ok(())
 }
 fn validate_relations(db: &Connection) -> ApiResult<()> {
+    let invalid:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM supplement_records s LEFT JOIN supplement_schemas d ON d.dataset_id=s.dataset_id LEFT JOIN records r ON r.id=s.main_record_id WHERE d.dataset_id IS NULL OR (s.orphan=0 AND (r.id IS NULL OR r.dataset_id<>s.dataset_id)))",[],|r|r.get(0)).map_err(internal)?;
+    if invalid {return Err(bad_request("附表的字段定义或主记录关联无效"));}
+
     let invalid:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM records r LEFT JOIN records p ON p.id=r.duplicate_of WHERE r.duplicate_of IS NOT NULL AND (p.id IS NULL OR p.dataset_id<>r.dataset_id))",[],|r|r.get(0)).map_err(internal)?;
     if invalid {
         return Err(bad_request("重复记录的关联关系无效"));
@@ -732,6 +759,28 @@ fn validate_relations(db: &Connection) -> ApiResult<()> {
 mod tests {
     use super::*;
     const FIXTURE: &str = include_str!("../../samples/fixtures/backup-v1.jsonl");
+    #[test]
+    fn supplementary_schema_values_and_orphans_round_trip_with_new_keys() {
+        let keys=random_keys();let db=Connection::open_in_memory().unwrap();initialize_schema(&db).unwrap();
+        read_logical(FIXTURE.as_bytes(),&db,&keys).unwrap();
+        db.execute("INSERT INTO supplement_schemas VALUES('dataset-fixture',?1)",[json!([{"source_key":"memo","zone":"normal"},{"source_key":"token","zone":"secrets"}]).to_string()]).unwrap();
+        let value=json!({"memo":"手工\n备注","token":{"secret":"addon-private"}});
+        db.execute("DROP INDEX ux_supplement_parent",[]).unwrap();
+        for(id,parent,orphan) in [("sup1","record-1",0),("sup2","deleted",1),("sup3","record-1",0)] {
+            let(nonce,ciphertext)=seal_field(&keys.field,id,"supplement",&value).unwrap();
+            db.execute("INSERT INTO supplement_records(id,dataset_id,main_record_id,link_json,nonce,ciphertext,orphan) VALUES(?1,'dataset-fixture',?2,?3,?4,?5,?6)",params![id,parent,json!({"mode":"id","fields":[],"values":{"id":parent}}).to_string(),nonce,ciphertext,orphan]).unwrap();
+        }
+        let mut logical=Vec::new();write_logical(&db,&keys,&mut logical).unwrap();
+        assert!(std::str::from_utf8(&logical).unwrap().contains("addon-private"));
+        let restored=Connection::open_in_memory().unwrap();initialize_schema(&restored).unwrap();let newkeys=random_keys();
+        read_logical(logical.as_slice(),&restored,&newkeys).unwrap();validate_relations(&restored).unwrap();
+        assert_eq!(supplement::values(&restored,&newkeys,"sup1").unwrap(),value);assert_eq!(supplement::values(&restored,&newkeys,"sup2").unwrap(),value);
+        assert!(supplement::values(&restored,&keys,"sup1").is_err());
+        assert_eq!(restored.query_row("SELECT orphan FROM supplement_records WHERE id='sup2'",[],|r|r.get::<_,bool>(0)).unwrap(),true);
+        assert_eq!(supplement::fields(&restored,"dataset-fixture").unwrap().len(),2);
+        assert_eq!(supplement::values(&restored,&newkeys,"sup3").unwrap(),value);
+        assert_eq!(restored.query_row("SELECT COUNT(*) FROM supplement_records WHERE main_record_id='record-1' AND orphan=0",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+    }
     #[test]
     fn normal_and_ignored_schema_fields_round_trip_without_creating_search_terms() {
         let keys = random_keys();

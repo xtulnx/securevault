@@ -66,12 +66,16 @@ age --passphrase --output repacked.jsonl.gz.age backup.jsonl.gz
 | import_templates | name、dataset_id、mappings、updated_at |
 | api_apps | id、name、permission、disabled、datasets、access_expires_at、created_at |
 | audit_events | id、event、record_id、field_name、created_at |
+| supplement_schemas（可选扩展） | dataset_id、fields |
+| supplement_records（可选扩展） | id、dataset_id、main_record_id、link、orphan、updated_at、value |
 
 `protected_fields.value` 为解密后的原始 JSON 值，`zone` 仅支持 hidden 或 secrets。业务字段仍以现有扁平路径为键，例如 `indexes` 内的 `config.region`，重建身份索引时按路径还原。对象、数组、数字、字符串、布尔及 null 均按 JSON 语义保存；不导出字段 nonce、密文、数据密钥、密钥封装、应用 key_hash、派生 identity_hash 或 search_blob。
 
 `expired`、`disabled` 是整数 0/1；audit_events.id、access_expires_at 是整数，后者可为 null。environment、duplicate_of、审计 record_id/field_name 可为 null。时间字符串保留原值，created_at 首行使用 UTC Unix 秒。字段定义和列表配置沿用公开 API 的结构及枚举，conflict_strategy 当前为 allow_mark。应用导出的 disabled 记录原状态，但恢复时全部强制停用。
 
-末行必须是 end，包含六种数据的实际行数：
+附表是 v1 的可选扩展，位于 audit_events 之后。未使用附表时省略两类记录及其计数，旧 v1 备份仍可恢复；包含附表的备份需使用支持此扩展的版本恢复。`supplement_records.value` 保存全部附表原始 JSON 值，恢复时使用新字段密钥整体重新加密；`link` 包含 mode、fields 和 values 关联快照，`orphan` 为整数 0/1。失联记录允许主记录已不存在，附表字段定义及数据集必须存在。恢复旧版重复关联数据时，第一条保持关联，其余保留为失联记录，确保主表与附表一对一。
+
+末行必须是 end，包含各类数据的实际行数：
 
 ```json
 {"type":"end","counts":{"datasets":8,"records":98,"protected_fields":308,"import_templates":10,"api_apps":4,"audit_events":20}}

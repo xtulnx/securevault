@@ -566,3 +566,26 @@ html { scroll-padding-top: calc(var(--topbar-height) + 16px); }
 .security-note { color: var(--muted); line-height: 1.7; overflow-wrap: anywhere; }
 #password-change-status { color: var(--cyan); overflow-wrap: anywhere; }
 @media (max-width: 760px) { #security-settings-button { width: 44px; padding: 0; } #security-settings-button b { display: none; } .password-panel { max-width: 100%; } }
+
+.supplement-dialog, .manual-record-dialog { width:min(1000px,calc(100vw - 40px)); max-height:90vh; overflow:auto; }
+#manual-record-modal { z-index:45; }
+.supplement-dialog input, .supplement-dialog select, .manual-record-dialog input, .manual-record-dialog select, .manual-record-dialog textarea { color:var(--ink); background:rgba(5,18,28,.62); border:1px solid var(--line-strong); border-radius:6px; padding:10px; min-width:0; }
+[data-theme="light"] .supplement-dialog input, [data-theme="light"] .supplement-dialog select, [data-theme="light"] .manual-record-dialog input, [data-theme="light"] .manual-record-dialog select, [data-theme="light"] .manual-record-dialog textarea { background:#f8fbfb; }
+.supplement-schema-row, .supplement-schema-head { display:grid; grid-template-columns:1fr 1fr 1.2fr 42px; gap:10px; margin:10px 0; }
+.supplement-tools, .supplement-row header, .manual-field-options, .manual-parent-search { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin:16px 0; }
+.supplement-row { padding:18px; border:1px solid var(--line-strong); border-radius:8px; margin:16px 0; overflow-wrap:anywhere; }
+.supplement-row.is-orphan { border-color:var(--amber,#bf832b); }
+.supplement-row header code, .manual-field label code { overflow-wrap:anywhere; }
+.supplement-secret { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin:10px 0; }
+.supplement-secret-value { white-space:pre-wrap; overflow-wrap:anywhere; }
+.manual-field { padding:16px 0; border-bottom:1px solid var(--line-strong); }
+.manual-field > label { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:10px; }
+.manual-field textarea { display:block; width:100%; resize:vertical; box-sizing:border-box; font:inherit; }
+.manual-field-options label { display:flex; align-items:center; gap:6px; }
+#manual-parent-picker > label { display:grid; gap:8px; }
+#manual-parent-options { width:100%; }
+.manual-parent-search input { flex:1; }
+.danger-button { color:var(--danger,#de6571); }
+@media(max-width:700px) { .supplement-schema-row { grid-template-columns:1fr 1fr; } .supplement-schema-head { display:none; } .supplement-dialog, .manual-record-dialog { width:calc(100vw - 24px); } }
+
+.supplement-row .detail-row strong, #record-detail-content .detail-row strong { white-space:pre-wrap; }

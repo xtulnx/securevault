@@ -20,7 +20,7 @@ function page(t, app = false) {
     window.scrollTo = () => {};
     window.fetch = async () => ({ ok: true, json: async () => ({ initialized: true, sealed: true, persistent: false }) });
     const source = fs.readFileSync(path.join(web, 'app.js'), 'utf8').replace('\ncheckStatus();\n', '\nwindow.initialStatusCheck = checkStatus();\n');
-    window.eval(source + '\nwindow.stateForTest = state; showToast = () => {}; refreshAfterWrite = async () => {};');
+    window.eval(source + '\n' + fs.readFileSync(path.join(web, 'supplement.js'), 'utf8') + '\nwindow.stateForTest = state; showToast = () => {}; refreshAfterWrite = async () => {};');
     window.document.querySelector('#dataset-info-modal').showModal = () => {};
     window.document.querySelector('#dataset-info-modal').close = () => {};
   }

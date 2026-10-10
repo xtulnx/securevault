@@ -272,6 +272,7 @@ fn rotate(
         target
             .execute_batch("PRAGMA temp_store=MEMORY")
             .map_err(internal)?;
+        initialize_schema(&target)?;
         let tx = target.transaction().map_err(internal)?;
         let mut records = connection.prepare("SELECT r.id,r.dataset_id,r.indexes_json,r.display_json,d.identity_fields_json FROM records r JOIN datasets d ON d.id=r.dataset_id ORDER BY r.id").map_err(internal)?;
         let mut rows = records.query([]).map_err(internal)?;
@@ -327,6 +328,7 @@ fn rotate(
         if expected != record_count {
             return Err(internal("orphan records detected"));
         }
+        supplement::rotate(&tx, &old_keys, &new_keys)?;
         // Stolen old application tokens must not grant access to the new vault.
         let ids = {
             let mut apps = tx.prepare("SELECT id FROM api_apps").map_err(internal)?;
@@ -358,7 +360,10 @@ fn rotate(
             "protected_fields",
             "import_templates",
             "api_apps",
+            "supplement_schemas",
+            "supplement_records",
         ] {
+            if table.starts_with("supplement_") && !connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)", [table], |r| r.get::<_,bool>(0)).map_err(internal)? {continue;}
             let sql = format!("SELECT COUNT(*) FROM {table}");
             let a: i64 = connection
                 .query_row(&sql, [], |r| r.get(0))
@@ -373,6 +378,11 @@ fn rotate(
         let reopened = open_database(&db, &checked.db)?;
         check_integrity(&reopened)?;
         verify_records(&connection, &reopened, &old_keys, &checked)?;
+        if connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='supplement_records')",[],|r|r.get::<_,bool>(0)).map_err(internal)? {
+            let mut stmt=connection.prepare("SELECT id FROM supplement_records").map_err(internal)?;
+            let ids=stmt.query_map([],|r|r.get::<_,String>(0)).map_err(internal)?;
+            for id in ids {let id=id.map_err(internal)?;if supplement::values(&connection,&old_keys,&id)? != supplement::values(&reopened,&checked,&id)? {return Err(internal("supplement verification failed"));}}
+        }
         drop(reopened);
         fs::File::open(&db)
             .map_err(internal)?
@@ -595,6 +605,10 @@ mod tests {
         )
         .unwrap();
         db.execute("INSERT INTO import_templates(name,dataset_id,mappings_json) VALUES('mapping','d','[]')", []).unwrap();
+        db.execute("INSERT INTO supplement_schemas VALUES('d',?1)",[json!([{"source_key":"memo","zone":"normal"},{"source_key":"token","zone":"secrets"}]).to_string()]).unwrap();
+        let addon=json!({"memo":"manual","token":"supplement-secret"});
+        let(nonce,ciphertext)=seal_field(&old.field,"sup-test","supplement",&addon).unwrap();
+        db.execute("INSERT INTO supplement_records(id,dataset_id,main_record_id,link_json,nonce,ciphertext) VALUES('sup-test','d','r1',?1,?2,?3)",params![json!({"mode":"id","fields":[],"values":{"id":"r1"}}).to_string(),nonce,ciphertext]).unwrap();
         drop(db);
         let original_db = fs::read(database_path(&state)).unwrap();
         let original_meta = fs::read(meta_path(&state)).unwrap();
@@ -654,6 +668,8 @@ mod tests {
             secret
         );
         assert!(open_field(&old.field, "r2", "account.token", &nonce, &ciphertext).is_err());
+        assert_eq!(supplement::values(&db,&new,"sup-test").unwrap(),addon);
+        assert!(supplement::values(&db,&old,"sup-test").is_err());
         let (disabled, token): (bool, String) = db
             .query_row(
                 "SELECT disabled,key_hash FROM api_apps WHERE id='a'",

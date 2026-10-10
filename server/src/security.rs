@@ -65,7 +65,7 @@ fn app_route(method: &axum::http::Method, path: &str) -> bool {
             || (path.starts_with("/datasets/") && path.ends_with("/export"));
     }
     method == axum::http::Method::POST
-        && path.starts_with("/records/")
+        && (path.starts_with("/records/") || path.starts_with("/supplement/"))
         && path.ends_with("/secrets/reveal")
 }
 
@@ -266,9 +266,14 @@ mod tests {
     fn app_routes_exclude_management_and_csv_formulas_are_neutralized() {
         use axum::http::Method;
         assert!(app_route(&Method::GET, "/records/search"));
+        assert!(app_route(&Method::POST, "/supplement/sup_1/secrets/reveal"));
         assert!(app_route(&Method::POST, "/records/rec_1/secrets/reveal"));
         for (method, path) in [
             (Method::GET, "/apps"),
+            (Method::GET, "/datasets/ds_1/supplement"),
+            (Method::PATCH, "/records/rec_1"),
+            (Method::POST, "/datasets/ds_1/records"),
+            (Method::POST, "/datasets/ds_1/supplement/cleanup"),
             (Method::POST, "/datasets"),
             (Method::POST, "/vault/seal"),
             (Method::PATCH, "/datasets/ds_1"),

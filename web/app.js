@@ -21,6 +21,7 @@ const state = {
   secretModalRecordId: null,
   recordDetail: null,
   detailRevealRequest: 0,
+  detailLoadRequest: 0,
   workspace: "search",
   securityReturn: "search",
   passwordChangeBusy: false,
@@ -207,6 +208,7 @@ async function sealVault(message = "数据空间已手动封印", callServer = t
   state.persistent = false;
   state.reveal = null;
   closeRecordDetail();
+  if (typeof clearManualData === "function") clearManualData();
   $("#dataset-info-modal").close();
   $("#secrets-modal").hidden = true;
   $("#reveal-modal").hidden = true;
@@ -287,6 +289,7 @@ async function fetchRecords() {
   state.records = result.records.map((record) => {
     const dataset = byId.get(record.dataset_id);
     const labels = Object.fromEntries((dataset?.fields || []).map((field) => [field.source_key, field.display_name || field.source_key]));
+    for (const [key, label] of Object.entries(record.supplement?.field_labels || {})) labels[`supplement.${key}`] = `附表 · ${label}`;
     return { ...record, fieldLabels: labels };
   });
   state.total = result.total;
@@ -352,9 +355,11 @@ function renderDatasetActions() {
   const icons = {
     view: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>',
     edit: '<path d="m16 3 5 5-12 12-6 1 1-6L16 3Z"/><path d="m14 5 5 5"/>',
+    supplement: '<path d="M4 4h16v16H4zM4 10h16M10 4v16"/>',
+    new: '<path d="M12 4v16M4 12h16"/>',
     import: '<path d="M12 16V3m-5 5 5-5 5 5M4 15v6h16v-6"/>',
   };
-  const actions = [{ action: "view", label: "查看数据集" }, ...(state.canManage ? [{ action: "edit", label: "编辑数据集" }, { action: "import", label: "导入到此数据集" }] : [])];
+  const actions = [{ action: "view", label: "查看数据集" }, ...(state.canManage ? [{ action: "edit", label: "编辑数据集" }, { action: "import", label: "导入到此数据集" }, { action: "new", label: "新增主表记录" }, { action: "supplement", label: "管理数据集附表" }] : [])];
   const chooser = candidates.length > 1 || !dataset ? `<select id="search-dataset-select" aria-label="选择具体数据集"><option value="">当前目录全部数据集</option>${candidates.map((item) => `<option value="${escapeHtml(item.id)}" ${dataset?.id === item.id ? "selected" : ""}>${escapeHtml(item.category_path)} · ${escapeHtml(item.environment || "无环境")}</option>`).join("")}</select>` : "";
   container.innerHTML = chooser + (dataset ? actions.map(({ action, label }) => `<button type="button" class="icon-button dataset-context-action" data-action="${action}" title="${label}" aria-label="${label}"><svg viewBox="0 0 24 24" aria-hidden="true">${icons[action]}</svg></button>`).join("") : "");
   $("#search-dataset-select")?.addEventListener("change", async (event) => {
@@ -365,6 +370,8 @@ function renderDatasetActions() {
   container.querySelectorAll('[data-action]').forEach((button) => button.addEventListener("click", () => {
     if (button.dataset.action === "view") openDatasetInfo(dataset.id);
     else if (button.dataset.action === "edit") openDatasetEdit(dataset.id);
+    else if (button.dataset.action === "new") openManualRecord("main", dataset.id);
+    else if (button.dataset.action === "supplement") openSupplement(dataset.id);
     else openImport(dataset.id);
   }));
 }
@@ -381,7 +388,7 @@ function insertSearchField(field) {
 function renderIndexReference() {
   const datasets = datasetsInCurrentDirectory();
   const groups = datasets.map((dataset) => {
-    const fields = (dataset.fields || []).filter((field) => field.zone === "indexes");
+    const fields = [...(dataset.fields || []).filter((field) => field.zone === "indexes"), ...(dataset.supplement_fields || []).filter((field) => field.zone === "indexes").map((field) => ({ ...field, source_key: `supplement.${field.source_key}`, display_name: `附表 · ${field.display_name || field.source_key}` }))];
     if (!fields.length) return "";
     const buttons = fields.map((field) => `<button type="button" class="index-field-token" data-query-field="${escapeHtml(field.source_key)}" title="插入 ${escapeHtml(field.source_key)}:"><code>${escapeHtml(field.source_key)}</code>${field.display_name && field.display_name !== field.source_key ? `<span>${escapeHtml(field.display_name)}</span>` : ""}</button>`).join("");
     return `<div class="index-reference-group"><div><strong>${escapeHtml(dataset.category_path)}</strong><span>${dataset.environment ? escapeHtml(dataset.environment) : "无环境"}</span></div><div class="index-field-list">${buttons}</div></div>`;
@@ -406,18 +413,22 @@ function allDisplay(record) {
   const display = record.display || {};
   const values = { ...record.indexes, ...display };
   const configured = (dataset?.list_fields || []).filter((field) => field.visible !== false).sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+  let result;
   if (configured.length) {
-    return configured.reduce((result, field) => {
+    result = configured.reduce((result, field) => {
       if (!(field.source_key in values)) return result;
       const value = values[field.source_key];
       result[field.source_key] = field.format === "json" && typeof value === "object" ? JSON.stringify(value) : value;
       return result;
     }, {});
   }
-  if (!Object.keys(display).length) return { 分类: record.category, ...(record.environment ? { 环境: record.environment } : {}), ...record.indexes };
-  const result = { ...display };
-  const matched = new Set(record.matched_fields || []);
-  for (const [key, value] of Object.entries(record.indexes || {})) if (matched.has(key)) result[key] = value;
+  else if (!Object.keys(display).length) result = { 分类: record.category, ...(record.environment ? { 环境: record.environment } : {}), ...record.indexes };
+  else {
+    result = { ...display };
+    for (const [key, value] of Object.entries(record.indexes || {})) if ((record.matched_fields || []).includes(key)) result[key] = value;
+  }
+  for (const [key, value] of Object.entries(record.supplement?.display || {})) result[`supplement.${key}`] = value;
+  for (const [key, value] of Object.entries(record.supplement?.indexes || {})) if ((record.matched_fields || []).includes(`supplement.${key}`)) result[`supplement.${key}`] = value;
   return result;
 }
 
@@ -483,21 +494,30 @@ function detailRows(values, labels = {}) {
 }
 
 async function openRecordDetail(recordId) {
+  const request = ++state.detailLoadRequest;
   try {
     const detail = await api(`/records/${encodeURIComponent(recordId)}`);
+    if (!state.unlocked || request !== state.detailLoadRequest) return;
     const dataset = state.datasets.find((item) => item.id === detail.dataset_id);
     const labels = Object.fromEntries((dataset?.fields || []).map((field) => [field.source_key, field.display_name || field.source_key]));
     $("#record-detail-title").textContent = labels.alias ? `${labels.alias} · 记录详情` : "记录详情";
     $("#record-detail-meta").textContent = `${detail.category}${detail.environment ? ` · ${detail.environment}` : ""}${detail.expired ? " · 已过期" : ""}`;
     state.reveal = null;
     state.recordDetail = { ...detail, labels };
-    $("#record-detail-content").innerHTML = `<section class="detail-section"><h4>索引字段</h4>${detailRows(detail.indexes, labels)}</section><section class="detail-section"><h4>展示字段</h4>${detailRows(detail.display, labels)}</section><section class="detail-section"><h4>普通字段</h4>${detailRows(detail.normal, labels)}</section><section class="detail-section"><h4>受保护字段</h4><p>敏感字段可在此临时查看，30 秒后恢复掩码。</p><div id="detail-protected-fields"></div></section>`;
+    $("#record-detail-content").innerHTML = `${state.canManage ? `<div class="row-actions"><button id="manual-edit-main" class="secondary-button">编辑主表记录</button><button id="manual-delete-main" class="secondary-button danger-button">删除主表记录</button></div>` : ""}<section class="detail-section"><h4>索引字段</h4>${detailRows(detail.indexes, labels)}</section><section class="detail-section"><h4>展示字段</h4>${detailRows(detail.display, labels)}</section><section class="detail-section"><h4>普通字段</h4>${detailRows(detail.normal, labels)}</section><section class="detail-section"><h4>受保护字段</h4><p>敏感字段可在此临时查看，30 秒后恢复掩码。</p><div id="detail-protected-fields"></div></section><section class="detail-section"><h4>附表扩展数据</h4><div id="record-supplement-content"></div></section>`;
     renderDetailSecrets();
+    if (typeof renderRecordSupplement === "function") renderRecordSupplement(detail);
+    $("#manual-edit-main")?.addEventListener("click", () => openManualRecord("main", detail.dataset_id, detail.id));
+    $("#manual-delete-main")?.addEventListener("click", async () => {
+      if (!window.confirm("删除此主表记录？它的附表数据将保留，可在附表管理中处理。")) return;
+      try { await api(`/records/${encodeURIComponent(detail.id)}`, { method: "DELETE" }); closeRecordDetail(); await refreshAfterWrite(); } catch (error) { showToast(error.message, "error"); }
+    });
     $("#record-detail-modal").hidden = false;
   } catch (error) { showToast(error.message, "error"); }
 }
 
 function closeRecordDetail() {
+  state.detailLoadRequest++;
   state.detailRevealRequest++;
   state.recordDetail = null;
   state.reveal = null;
@@ -645,8 +665,10 @@ function openDatasetEdit(datasetId) {
 }
 
 function renderDatasetManager() {
-  $("#dataset-manager-list").innerHTML = state.datasets.map((dataset) => `<div class="dataset-manager-row"><div><strong>${escapeHtml(dataset.category_path)}</strong><span>${dataset.environment ? `环境：${escapeHtml(dataset.environment)}` : "无环境标签"} · ${dataset.record_count} 条记录 · ${dataset.fields.length} 个字段 · KEY ${dataset.identity_fields.length ? escapeHtml(dataset.identity_fields.join(" + ")) : "未设置"}</span></div><div class="row-actions"><div class="dataset-download"><button class="secondary-button dataset-download-toggle" aria-expanded="false" aria-controls="download-${escapeHtml(dataset.id)}"><span aria-hidden="true">⤓</span> 下载 <span aria-hidden="true">▾</span></button><div id="download-${escapeHtml(dataset.id)}" class="dataset-download-menu" hidden><span class="download-menu-label">选择下载格式</span>${["json", "csv", "xlsx"].map((format) => `<button class="dataset-export-button" data-format="${format}" data-dataset-id="${escapeHtml(dataset.id)}">${format.toUpperCase()}</button>`).join("")}</div></div><button class="secondary-button dataset-view-button" data-dataset-id="${escapeHtml(dataset.id)}">查看</button><button class="secondary-button dataset-edit-button" data-dataset-id="${escapeHtml(dataset.id)}">编辑</button></div></div>`).join("") || '<p class="detail-empty">暂无数据集</p>';
+  $("#dataset-manager-list").innerHTML = state.datasets.map((dataset) => `<div class="dataset-manager-row"><div><strong>${escapeHtml(dataset.category_path)}</strong><span>${dataset.environment ? `环境：${escapeHtml(dataset.environment)}` : "无环境标签"} · ${dataset.record_count} 条记录 · ${dataset.fields.length} 个字段 · KEY ${dataset.identity_fields.length ? escapeHtml(dataset.identity_fields.join(" + ")) : "未设置"}</span></div><div class="row-actions"><div class="dataset-download"><button class="secondary-button dataset-download-toggle" aria-expanded="false" aria-controls="download-${escapeHtml(dataset.id)}"><span aria-hidden="true">⤓</span> 下载 <span aria-hidden="true">▾</span></button><div id="download-${escapeHtml(dataset.id)}" class="dataset-download-menu" hidden><span class="download-menu-label">选择下载格式</span>${["json", "csv", "xlsx"].map((format) => `<button class="dataset-export-button" data-format="${format}" data-dataset-id="${escapeHtml(dataset.id)}">${format.toUpperCase()}</button>`).join("")}</div></div><button class="secondary-button dataset-view-button" data-dataset-id="${escapeHtml(dataset.id)}">查看</button><button class="secondary-button dataset-supplement-button" data-dataset-id="${escapeHtml(dataset.id)}">附表</button><button class="secondary-button dataset-new-record-button" data-dataset-id="${escapeHtml(dataset.id)}">新增记录</button><button class="secondary-button dataset-edit-button" data-dataset-id="${escapeHtml(dataset.id)}">编辑</button></div></div>`).join("") || '<p class="detail-empty">暂无数据集</p>';
   $$(".dataset-view-button").forEach((button) => button.addEventListener("click", () => openDatasetInfo(button.dataset.datasetId)));
+  $$(".dataset-supplement-button").forEach((button) => button.addEventListener("click", () => openSupplement(button.dataset.datasetId)));
+  $$(".dataset-new-record-button").forEach((button) => button.addEventListener("click", () => openManualRecord("main", button.dataset.datasetId)));
   $$(".dataset-edit-button").forEach((button) => button.addEventListener("click", () => openDatasetEdit(button.dataset.datasetId)));
   $$(".dataset-download-toggle").forEach((button) => button.addEventListener("click", () => {
     const menu = button.nextElementSibling;

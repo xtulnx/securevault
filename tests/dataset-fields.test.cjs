@@ -23,7 +23,7 @@ test('search has dataset-specific view, edit and import icons and limits managem
   window.renderDatasetActions();
   const container = window.document.querySelector('#dataset-context-actions');
   assert.equal(container.hidden, false);
-  assert.equal(container.querySelectorAll('button svg').length, 3);
+  assert.equal(container.querySelectorAll('button svg').length, 5);
   container.querySelector('[data-action="view"]').click();
   assert.equal(window.document.querySelector('#dataset-info-content h2').textContent, 'ds_product 说明');
   container.querySelector('[data-action="edit"]').click();
@@ -97,6 +97,7 @@ test('record details display ordinary fields in their own section', async (t) =>
   const window = page(t, true);
   await window.initialStatusCheck;
   const state = window.stateForTest;
+  state.unlocked = true;
   state.datasets = [{ ...dataset('ds_product'), fields: [{ source_key: 'notes', display_name: '说明', zone: 'normal' }] }];
   window.fetch = async () => ({ ok: true, json: async () => ({ dataset_id: 'ds_product', category: '业务/产品', indexes: {}, display: {}, normal: { notes: '只在详情展示的普通内容' }, protected_fields: [] }) });
   await window.openRecordDetail('rec_test');

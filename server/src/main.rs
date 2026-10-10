@@ -32,6 +32,7 @@ use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
 type HmacSha256 = Hmac<Sha256>;
+mod supplement;
 mod security;
 use security::*;
 mod backup;
@@ -534,7 +535,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .route("/imports/upload", post(upload_import))
         .route("/records/import", post(import_records))
         .route("/records/{id}/expired", post(set_expired))
-        .route("/records/{id}", get(record_detail))
+        .route("/records/{id}", get(record_detail).patch(supplement::update_main).delete(supplement::delete_main))
+        .route("/datasets/{id}/records", post(supplement::create_main))
+        .route("/datasets/{id}/supplement", get(supplement::get_table).patch(supplement::save_schema))
+        .route("/datasets/{id}/supplement/records", post(supplement::create_row))
+        .route("/datasets/{id}/supplement/records/{row}", axum::routing::patch(supplement::update_row).delete(supplement::delete_row))
+        .route("/datasets/{id}/supplement/cleanup", post(supplement::cleanup))
+        .route("/supplement/{id}/secrets/reveal", post(supplement::reveal))
         .route("/records/search", get(search_records))
         .route("/records/{id}/secrets/reveal", post(reveal_secret))
         .route("/apps", get(list_apps).post(create_app))
@@ -588,6 +595,7 @@ fn open_database(path: &FsPath, key: &[u8; 32]) -> ApiResult<Connection> {
     let key_hex = Zeroizing::new(hex::encode(key));
     let key_statement = Zeroizing::new(format!("PRAGMA key = \"x'{}'\"; PRAGMA cipher_memory_security = ON;", key_hex.as_str()));
     connection.execute_batch(&key_statement).map_err(internal)?;
+    connection.execute_batch("PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;").map_err(internal)?;
     connection
         .query_row("SELECT count(*) FROM sqlite_master", [], |row| {
             row.get::<_, i64>(0)
@@ -652,6 +660,7 @@ fn initialize_schema(connection: &Connection) -> ApiResult<()> {
     if !has_datasets { connection.execute("ALTER TABLE api_apps ADD COLUMN datasets_json TEXT NOT NULL DEFAULT '[]'", []).map_err(internal)?; }
     let has_access_expiry: bool = connection.prepare("PRAGMA table_info(api_apps)").map_err(internal)?.query_map([], |row| row.get::<_, String>(1)).map_err(internal)?.filter_map(Result::ok).any(|name| name == "access_expires_at");
     if !has_access_expiry { connection.execute("ALTER TABLE api_apps ADD COLUMN access_expires_at INTEGER", []).map_err(internal)?; }
+    supplement::initialize(connection)?;
     Ok(())
 }
 
@@ -821,7 +830,17 @@ fn transform_record(
     let mut display = serde_json::Map::new();
     let mut protected = Vec::new();
     let mut flat = Vec::new();
-    flatten_fields(input, "", &mut flat);
+    // A defined field may hold a JSON object. Preserve its configured zone as
+    // one value rather than inventing public child fields from its contents.
+    fn collect(value: &Value, prefix: &str, definitions: &[FieldDefinition], output: &mut Vec<(String,Value)>) {
+        if let Some(object) = value.as_object() {
+            for (key,value) in object {
+                let path = if prefix.is_empty() {key.clone()} else {format!("{prefix}.{key}")};
+                if value.is_object() && !definitions.iter().any(|field|field.source_key==path) {collect(value,&path,definitions,output);} else {output.push((path,value.clone()));}
+            }
+        }
+    }
+    collect(input, "", definitions, &mut flat);
     for (source_key, value) in flat {
         if definitions.iter().any(|field| field.zone == "ignore" && (field.source_key == source_key || source_key.starts_with(&format!("{}.", field.source_key)))) { continue; }
         let definition = definitions
@@ -1142,6 +1161,37 @@ fn matched_fields(clauses: &[SearchClause], category: &str, environment: Option<
     fields
 }
 
+// The supplement namespace keeps main and supplementary fields unambiguous;
+// unqualified field queries may match either table, including same-name fields.
+fn combined_search(clauses: &[SearchClause], category: &str, environment: Option<&str>, dataset_id: &str, indexes: &Value, display: &Value, supplement: &Value) -> (bool, Vec<String>) {
+    if supplement.is_null() && !clauses.iter().any(|clause| clause.field.as_deref().is_some_and(|field|field.starts_with("supplement.") || field.starts_with("附表."))) {
+        return (record_matches(clauses,category,environment,dataset_id,indexes,display),matched_fields(clauses,category,environment,dataset_id,indexes,display));
+    }
+    let mut matched=Vec::new();
+    for clause in clauses {
+        let field=clause.field.as_deref();
+        let explicit=field.and_then(|f|f.strip_prefix("supplement.").or_else(||f.strip_prefix("附表.")));
+        let mut candidates=if explicit.is_some(){Vec::new()}else{clause_fields(clause,category,environment,dataset_id,indexes,display)};
+        let main_only=field.is_some_and(|f|f.starts_with("indexes.") || f.starts_with("display.") || matches!(f,"category"|"env"|"environment"|"dataset"|"dataset_id"));
+        if !main_only {
+            let selected=explicit.or(field);
+            let (area,key)=selected.map(|f| {
+                if let Some(k)=f.strip_prefix("indexes."){(Some("indexes"),Some(k))}else if let Some(k)=f.strip_prefix("display."){(Some("display"),Some(k))}else{(None,Some(f))}
+            }).unwrap_or((None,None));
+            for zone in ["indexes","display"] {
+                if area.is_some_and(|a|a!=zone){continue;}
+                for (name,value) in supplement[zone].as_object().into_iter().flat_map(|m|m.iter()) {
+                    if key.is_none_or(|k|name.eq_ignore_ascii_case(k)) {candidates.push((format!("supplement.{name}"),value.clone()));}
+                }
+            }
+        }
+        let hits=candidates.into_iter().filter(|(field,value)|clause_matches(field,value,clause)).map(|(field,_)|field).collect::<Vec<_>>();
+        if hits.is_empty(){return (false,Vec::new());}
+        for field in hits {if !matched.contains(&field){matched.push(field);}}
+    }
+    (true,matched)
+}
+
 fn insert_records(
     connection: &Connection,
     keys: &KeySet,
@@ -1158,7 +1208,8 @@ fn insert_records(
     let mut duplicates = Vec::new();
     let mut updated = 0usize;
     let mut skipped = 0usize;
-    let tx = connection.unchecked_transaction().map_err(internal)?;
+    let transaction = if connection.is_autocommit() { Some(connection.unchecked_transaction().map_err(internal)?) } else { None };
+    let tx: &Connection = transaction.as_deref().unwrap_or(connection);
     for (index, input) in inputs.iter().enumerate() {
         let id = input
             .get("id")
@@ -1213,7 +1264,8 @@ fn insert_records(
         }
         inserted.push(target_id);
     }
-    tx.commit().map_err(internal)?;
+    supplement::sync(tx, dataset_id)?;
+    if let Some(transaction) = transaction { transaction.commit().map_err(internal)?; }
     Ok(
         json!({ "imported": inserted.len() - updated, "updated":updated,"skipped":skipped,"record_ids": inserted, "duplicates": duplicates, "duplicate_policy": if skip_existing {"skip-existing"} else {"update-first-match"}, "physical_unique_constraint": false }),
     )
@@ -1255,7 +1307,9 @@ async fn update_dataset(
     Path(dataset_id): Path<String>,
     Json(request): Json<DatasetUpdate>,
 ) -> ApiResult<Json<Value>> {
-    with_connection(&state, |connection, keys| {
+    with_connection(&state, |db, keys| {
+        let transaction = db.unchecked_transaction().map_err(internal)?;
+        let connection: &Connection = &transaction;
         let (old_category, old_environment, old_fields, old_identity, old_list_fields, old_description): (String, Option<String>, String, String, String, String) = connection.query_row(
             "SELECT category_path,environment,fields_json,identity_fields_json,list_fields_json,description FROM datasets WHERE id=?1", [&dataset_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
@@ -1286,6 +1340,8 @@ async fn update_dataset(
         connection.execute("UPDATE datasets SET category_path=?2,environment=?3,fields_json=?4,identity_fields_json=?5,list_fields_json=?6,description=?7 WHERE id=?1", params![dataset_id, category, environment, fields, identity, list_fields_json, description]).map_err(internal)?;
         connection.execute("UPDATE records SET category_path=?2,environment=?3 WHERE dataset_id=?1", params![dataset_id, category, environment]).map_err(internal)?;
         migrate_schema_records(connection, keys, &dataset_id, &old_definitions, &new_definitions, &identity_fields, &category, environment.as_deref())?;
+        supplement::sync(connection, &dataset_id)?;
+        transaction.commit().map_err(internal)?;
         Ok(Json(json!({"id":dataset_id,"category_path":category,"environment":environment,"list_fields":list_fields,"description":description})))
     }).await
 }
@@ -1312,8 +1368,8 @@ async fn set_expired(
 
 async fn list_datasets(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     with_connection(&state, |connection, _| {
-        let mut statement = connection.prepare("SELECT d.id,d.category_path,d.environment,d.fields_json,d.identity_fields_json,d.conflict_strategy,d.list_fields_json,COUNT(r.id),d.description FROM datasets d LEFT JOIN records r ON r.dataset_id=d.id GROUP BY d.id ORDER BY d.category_path").map_err(internal)?;
-        let rows = statement.query_map([], |row| Ok(json!({ "id": row.get::<_,String>(0)?, "category_path": row.get::<_,String>(1)?, "environment": row.get::<_,Option<String>>(2)?, "fields": serde_json::from_str::<Value>(&row.get::<_,String>(3)?).unwrap_or(Value::Array(vec![])), "identity_fields": serde_json::from_str::<Value>(&row.get::<_,String>(4)?).unwrap_or(Value::Array(vec![])), "conflict_strategy": row.get::<_,String>(5)?, "list_fields": serde_json::from_str::<Value>(&row.get::<_,String>(6)?).unwrap_or(Value::Array(vec![])), "record_count": row.get::<_,i64>(7)?, "description": row.get::<_,String>(8)? }))).map_err(internal)?;
+        let mut statement = connection.prepare("SELECT d.id,d.category_path,d.environment,d.fields_json,d.identity_fields_json,d.conflict_strategy,d.list_fields_json,COUNT(r.id),d.description,(SELECT fields_json FROM supplement_schemas s WHERE s.dataset_id=d.id) FROM datasets d LEFT JOIN records r ON r.dataset_id=d.id GROUP BY d.id ORDER BY d.category_path").map_err(internal)?;
+        let rows = statement.query_map([], |row| Ok(json!({ "id": row.get::<_,String>(0)?, "category_path": row.get::<_,String>(1)?, "environment": row.get::<_,Option<String>>(2)?, "fields": serde_json::from_str::<Value>(&row.get::<_,String>(3)?).unwrap_or(Value::Array(vec![])), "identity_fields": serde_json::from_str::<Value>(&row.get::<_,String>(4)?).unwrap_or(Value::Array(vec![])), "conflict_strategy": row.get::<_,String>(5)?, "list_fields": serde_json::from_str::<Value>(&row.get::<_,String>(6)?).unwrap_or(Value::Array(vec![])), "record_count": row.get::<_,i64>(7)?, "description": row.get::<_,String>(8)?, "supplement_fields": serde_json::from_str::<Value>(&row.get::<_,Option<String>>(9)?.unwrap_or_else(||"[]".into())).unwrap_or(json!([])) }))).map_err(internal)?;
         let mut datasets = Vec::new(); for row in rows { datasets.push(row.map_err(internal)?); }
         Ok(Json(json!({ "datasets": datasets })))
     }).await
@@ -1671,7 +1727,9 @@ async fn import_records(
             })?
     };
     let inputs = mapped_records(&inputs, &request.mappings)?;
-    with_connection(&state, |connection, keys| {
+    with_connection(&state, |db, keys| {
+        let transaction = db.unchecked_transaction().map_err(internal)?;
+        let connection: &Connection = &transaction;
         let (category, environment, fields_json, identity_json): (String, Option<String>, String, String) = connection.query_row("SELECT category_path,environment,fields_json,identity_fields_json FROM datasets WHERE id=?1", [&request.dataset_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(internal)?.ok_or_else(|| ApiError(StatusCode::NOT_FOUND,"dataset not found".into()))?;
         let mut fields: Vec<FieldDefinition> = serde_json::from_str(&fields_json).map_err(internal)?;
         let mut identity: Vec<String> = serde_json::from_str(&identity_json).map_err(internal)?;
@@ -1697,14 +1755,16 @@ async fn import_records(
                 return Err(bad_request("delete_missing requires every imported row to have a complete logical KEY"));
             }
             let ids = { let mut stmt = connection.prepare("SELECT id,identity_hash FROM records WHERE dataset_id=?1").map_err(internal)?; stmt.query_map([&request.dataset_id], |row| Ok((row.get::<_,String>(0)?, row.get::<_,Option<String>>(1)?))).map_err(internal)?.collect::<Result<Vec<_>,_>>().map_err(internal)?.into_iter().filter(|(_,h)| h.as_ref().is_none_or(|h| !hashes.contains(h))).map(|(id,_)| id).collect::<Vec<_>>() };
-            for id in &ids { connection.execute("DELETE FROM records WHERE id=?1", [id]).map_err(internal)?; }
+            for id in &ids { connection.execute("DELETE FROM records WHERE id=?1", [id]).map_err(internal)?; connection.execute("UPDATE records SET duplicate_of=NULL WHERE duplicate_of=?1", [id]).map_err(internal)?; }
             ids.len()
         } else { 0 };
         if let Some(name) = request.template_name.as_deref().filter(|s| !s.trim().is_empty()) {
             connection.execute("INSERT INTO import_templates(name,dataset_id,mappings_json) VALUES(?1,?2,?3) ON CONFLICT(name) DO UPDATE SET dataset_id=excluded.dataset_id,mappings_json=excluded.mappings_json,updated_at=CURRENT_TIMESTAMP", params![name, request.dataset_id, serde_json::to_string(&request.mappings).map_err(internal)?]).map_err(internal)?;
         }
+        supplement::sync(connection, &request.dataset_id)?;
         let mut response = result;
         response["deleted_missing"] = json!(deleted_missing);
+        transaction.commit().map_err(internal)?;
         Ok(Json(response))
     }).await
 }
@@ -1717,8 +1777,9 @@ async fn search_records(
     let limit = query.limit.clamp(1, 100);
     let offset = query.page.saturating_sub(1).saturating_mul(limit);
     let clauses = parse_search_clauses(&query.q)?;
-    with_connection(&state, |connection, _| {
+    with_connection(&state, |connection, keys| {
         let dataset_scope = authorized_dataset_scope(connection, &headers, "search")?;
+        let supplements = supplement::searchable(connection, keys, dataset_scope.as_deref(), query.dataset_id.as_deref())?;
         let mut datasets = connection.prepare("SELECT id,fields_json FROM datasets").map_err(internal)?;
         let definitions = datasets.query_map([], |row| Ok((row.get::<_, String>(0)?, serde_json::from_str::<Vec<FieldDefinition>>(&row.get::<_, String>(1)?).unwrap_or_default()))).map_err(internal)?.collect::<Result<std::collections::HashMap<_, _>, _>>().map_err(internal)?;
         let mut sql = String::from("SELECT id,dataset_id,category_path,environment,indexes_json,display_json,updated_at,duplicate_of,(SELECT COUNT(*) FROM protected_fields p WHERE p.record_id=r.id AND p.zone='secrets'),(SELECT json_group_array(source_key) FROM protected_fields p WHERE p.record_id=r.id AND p.zone='secrets'),expired FROM records r WHERE 1=1");
@@ -1737,9 +1798,11 @@ async fn search_records(
             let dataset_id = row.get::<_,String>(1)?;
             let (display, _) = split_display_fields(&display, definitions.get(&dataset_id).map(Vec::as_slice).unwrap_or_default());
             if dataset_scope.as_ref().is_some_and(|allowed| !allowed.iter().any(|candidate| candidate == &dataset_id)) { return Ok(None); }
-            if !record_matches(&clauses, &category, environment.as_deref(), &dataset_id, &indexes, &display) { return Ok(None); }
-            let matched = matched_fields(&clauses, &category, environment.as_deref(), &dataset_id, &indexes, &display);
-            Ok(Some(json!({"id":row.get::<_,String>(0)?,"dataset_id":dataset_id,"category":category,"environment":environment,"indexes":indexes,"display":display,"updated":row.get::<_,String>(6)?,"duplicate_of":row.get::<_,Option<String>>(7)?,"secret_count":row.get::<_,i64>(8)?,"secret_fields":secret_fields,"matched_fields":matched,"expired":row.get::<_,bool>(10)?})))
+            let id=row.get::<_,String>(0)?;
+            let extension=supplements.get(&id).cloned().unwrap_or(Value::Null);
+            let (matches,matched)=combined_search(&clauses,&category,environment.as_deref(),&dataset_id,&indexes,&display,&extension);
+            if !matches {return Ok(None);}
+            Ok(Some(json!({"id":row.get::<_,String>(0)?,"dataset_id":dataset_id,"category":category,"environment":environment,"indexes":indexes,"display":display,"updated":row.get::<_,String>(6)?,"duplicate_of":row.get::<_,Option<String>>(7)?,"secret_count":row.get::<_,i64>(8)?,"secret_fields":secret_fields,"matched_fields":matched,"supplement":extension,"expired":row.get::<_,bool>(10)?})))
         }).map_err(internal)?;
         let all_records: Vec<Value> = rows.filter_map(|row| row.map_err(internal).transpose()).collect::<ApiResult<Vec<_>>>()?;
         let total = all_records.len();
@@ -1753,7 +1816,7 @@ async fn record_detail(
     Path(record_id): Path<String>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Value>> {
-    with_connection(&state, |connection, _| {
+    with_connection(&state, |connection, keys| {
         let row: Option<(String, String, String, Option<String>, String, String, String, Option<String>, bool)> = connection.query_row(
             "SELECT r.id,r.dataset_id,r.category_path,r.environment,r.indexes_json,r.display_json,r.updated_at,r.duplicate_of,r.expired FROM records r WHERE r.id=?1",
             [&record_id],
@@ -1771,7 +1834,9 @@ async fn record_detail(
         Ok(Json(json!({
             "id": id, "dataset_id": dataset_id, "category": category, "environment": environment,
             "indexes": indexes, "display": display, "normal": normal, "protected_fields": protected_fields,
-            "updated": updated, "duplicate_of": duplicate_of, "expired": expired
+            "updated": updated, "duplicate_of": duplicate_of, "expired": expired,
+            "supplement_fields": supplement::fields(connection, &dataset_id)?,
+            "supplement_records": supplement::rows(connection, keys, &dataset_id, Some(&id))?
         })))
     }).await
 }
