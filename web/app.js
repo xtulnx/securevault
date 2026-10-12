@@ -434,12 +434,14 @@ function allDisplay(record) {
 
 function recordCard(record) {
   const dataset = state.datasets.find((item) => item.id === record.dataset_id);
-  const displayEntries = Object.entries(allDisplay(record));
+  const titleField = (dataset?.list_fields || []).filter((field) => field.visible !== false).sort((a, b) => (a.position ?? 0) - (b.position ?? 0))[0];
+  const displayEntries = Object.entries(allDisplay(record)).filter(([key]) => key !== titleField?.source_key);
   const matched = new Set(record.matched_fields || []);
   const visibleEntries = [...displayEntries.filter(([key]) => matched.has(key)), ...displayEntries.filter(([key]) => !matched.has(key))].filter((entry, index, all) => all.findIndex((item) => item[0] === entry[0]) === index);
   const displayMarkup = visibleEntries.map(([key, value]) => { const format = dataset?.list_fields?.find((field) => field.source_key === key)?.format || "single_line"; return `<div class="data-point ${matched.has(key) ? "is-match" : ""}"><label>${highlightValue(record.fieldLabels[key] || key)}</label><span class="display-format-${escapeHtml(format)}" title="${escapeHtml(typeof value === "object" ? JSON.stringify(value) : value)}">${highlightValue(value)}</span></div>`; }).join("");
   const environmentTag = record.environment ? `<span class="tag environment">${escapeHtml(record.environment)}</span>` : `<span class="tag optional-tag">无环境</span>`;
-  const title = record.indexes.alias || record.indexes.merchant_id || Object.values(record.indexes)[0] || "未命名记录";
+  const titleValue = titleField ? { ...record.indexes, ...record.display }[titleField.source_key] : null;
+  const title = titleValue == null || titleValue === "" ? "未命名记录" : titleValue;
   return `<article class="record-card ${record.expired ? "is-expired" : ""}"><div class="record-head"><div class="record-title"><div class="record-tags"><span class="tag">${highlightValue(record.category)}</span>${environmentTag}${record.expired ? '<span class="tag expired-tag">已过期</span>' : ""}</div><h4>${highlightValue(title)}</h4><button class="detail-button" data-action="open-detail" data-record="${escapeHtml(record.id)}">查看全部详情</button></div></div><div class="record-display">${displayMarkup}</div><div class="record-secrets"><span class="secret-count">${record.secret_count} 个敏感字段</span>${record.secret_count ? `<button class="reveal-secrets-button" data-action="open-secrets" data-record="${escapeHtml(record.id)}">按需查看 <span>→</span></button>` : ""}</div><div class="card-footer"><span>最近更新 ${escapeHtml(record.updated)}</span><button class="expired-toggle" data-expired-record="${escapeHtml(record.id)}" data-expired="${record.expired}">${record.expired ? "恢复有效" : "标记过期"}</button></div></article>`;
 }
 
