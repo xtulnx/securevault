@@ -35,7 +35,7 @@ const state = {
   idleTimeout: 1800,
   maxSeconds: 14400
   ,persistent: false,
-  theme: localStorage.getItem("securevault-theme") || "dark"
+  theme: localStorage.getItem("securevault-theme") || "light"
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -158,10 +158,11 @@ async function checkStatus() {
     if (status.sealed && state.unlocked) {
       await sealVault("服务端会话已失效，请重新解锁", false);
     }
-    if (!status.sealed && status.persistent && !state.unlocked) {
+    if (!status.sealed && state.canManage && !state.unlocked) {
       state.unlocked = true;
-      state.unlockAt = Date.now();
-      state.lastActivity = state.unlockAt;
+      const now = Date.now();
+      state.unlockAt = now - (state.maxSeconds - (status.ttl_seconds_remaining ?? state.maxSeconds)) * 1000;
+      state.lastActivity = now - (state.idleTimeout - (status.idle_seconds_remaining ?? state.idleTimeout)) * 1000;
       $("#app").classList.remove("is-sealed");
       $("#app").classList.add("is-unsealed");
       await loadWorkspace();
@@ -343,7 +344,7 @@ function datasetCandidates() {
 
 function currentDataset() {
   const candidates = datasetCandidates();
-  return candidates.find((dataset) => dataset.id === state.selectedDatasetId) || (candidates.length === 1 && candidates[0].category_path === state.category ? candidates[0] : null);
+  return candidates.find((dataset) => dataset.id === state.selectedDatasetId) || (candidates.length === 1 ? candidates[0] : null);
 }
 
 function renderDatasetActions() {
@@ -399,6 +400,7 @@ function renderIndexReference() {
 
 async function selectCategory(category) {
   state.category = category;
+  state.categories = [];
   state.selectedDatasetId = null;
   if (!environments().includes(state.environment)) state.environment = "all";
   state.page = 1;
@@ -506,7 +508,7 @@ async function openRecordDetail(recordId) {
     $("#record-detail-meta").textContent = `${detail.category}${detail.environment ? ` · ${detail.environment}` : ""}${detail.expired ? " · 已过期" : ""}`;
     state.reveal = null;
     state.recordDetail = { ...detail, labels };
-    $("#record-detail-content").innerHTML = `${state.canManage ? `<div class="row-actions"><button id="manual-edit-main" class="secondary-button">编辑主表记录</button><button id="manual-delete-main" class="secondary-button danger-button">删除主表记录</button></div>` : ""}<section class="detail-section"><h4>索引字段</h4>${detailRows(detail.indexes, labels)}</section><section class="detail-section"><h4>展示字段</h4>${detailRows(detail.display, labels)}</section><section class="detail-section"><h4>普通字段</h4>${detailRows(detail.normal, labels)}</section><section class="detail-section"><h4>受保护字段</h4><p>敏感字段可在此临时查看，30 秒后恢复掩码。</p><div id="detail-protected-fields"></div></section><section class="detail-section"><h4>附表扩展数据</h4><div id="record-supplement-content"></div></section>`;
+    $("#record-detail-content").innerHTML = `${state.canManage ? `<div class="row-actions"><button id="manual-edit-main" class="secondary-button">编辑主表记录</button><button id="manual-delete-main" class="secondary-button danger-button">删除主表记录</button></div>` : ""}<section class="detail-section"><h4>索引字段</h4>${detailRows(detail.indexes, labels)}</section><section class="detail-section"><h4>展示字段</h4>${detailRows(detail.display, labels)}</section><section class="detail-section"><h4>普通字段</h4>${detailRows(detail.normal, labels)}</section><section class="detail-section"><h4>受保护字段</h4><p class="protected-fields-help">敏感字段可在此临时查看，30 秒后恢复掩码。</p><div id="detail-protected-fields"></div></section><section class="detail-section"><h4>附表扩展数据</h4><div id="record-supplement-content"></div></section>`;
     renderDetailSecrets();
     if (typeof renderRecordSupplement === "function") renderRecordSupplement(detail);
     $("#manual-edit-main")?.addEventListener("click", () => openManualRecord("main", detail.dataset_id, detail.id));
@@ -660,7 +662,7 @@ function openDatasetEdit(datasetId) {
   $("#dataset-environment").value = dataset.environment || "";
   $("#dataset-description").value = dataset.description || "";
   updateDatasetDescriptionPreview();
-  renderSchemaFields(dataset.fields || []);
+  renderSchemaFields((dataset.fields || []).map(field => ({ ...field, unique: (dataset.identity_fields || []).includes(field.source_key) })));
   renderListConfig(dataset.fields || [], dataset.list_fields || []);
   $("#save-dataset").innerHTML = "保存修改";
   openDatasetEditor();
@@ -727,7 +729,7 @@ async function loadApps() {
   $$(".app-configure").forEach((button) => button.addEventListener("click", () => { const editor = button.closest(".app-manager-row").querySelector(".app-dataset-editor"); editor.hidden = !editor.hidden; button.textContent = editor.hidden ? "配置权限" : "收起配置"; }));
   $$(".app-save-scope").forEach((button) => button.addEventListener("click", async () => { try { const row = button.closest(".app-manager-row"); const datasets = [...row.querySelectorAll(".app-dataset-option input")].filter((input) => input.checked).map((input) => input.value); const permission = row.querySelector(".app-permission-edit").value; const access_ttl_seconds = Number(row.querySelector(".app-ttl-edit").value); await api(`/apps/${encodeURIComponent(button.dataset.id)}`, { method: "PATCH", body: JSON.stringify({ datasets, permission, access_ttl_seconds }) }); await loadApps(); showToast("应用授权已保存并重新开启", "success"); } catch (error) { showToast(error.message, "error"); } }));
   $$(".app-toggle").forEach((button) => button.addEventListener("click", async () => { try { await api(`/apps/${encodeURIComponent(button.dataset.id)}`, { method: "PATCH", body: JSON.stringify({ disabled: button.dataset.disabled !== "true" }) }); await loadApps(); } catch (error) { showToast(error.message, "error"); } }));
-  $$(".app-rotate").forEach((button) => button.addEventListener("click", async () => { try { const result = await api(`/apps/${encodeURIComponent(button.dataset.id)}/rotate`, { method: "POST" }); window.prompt("请立即保存新的 API Key（只显示这一次）", result.key); } catch (error) { showToast(error.message, "error"); } }));
+  $$(".app-rotate").forEach((button) => button.addEventListener("click", async () => { try { const result = await api(`/apps/${encodeURIComponent(button.dataset.id)}/rotate`, { method: "POST" }); showAppKey(result.key); } catch (error) { showToast(error.message, "error"); } }));
 }
 
 function renderSecretFields() {
@@ -768,7 +770,9 @@ function moveRowToPosition(row, rowSelector, value, refresh) {
   const container = row.parentElement;
   const rows = [...container.querySelectorAll(rowSelector)];
   if (!rows.length) return;
-  const target = Math.max(0, Math.min(rows.length - 1, Number(value) - 1 || 0));
+  const requested = Number(value);
+  if (!String(value).trim() || !Number.isInteger(requested)) { refresh(); return; }
+  const target = Math.max(0, Math.min(rows.length - 1, requested - 1));
   const current = rows.indexOf(row);
   if (current < 0 || current === target) { refresh(); return; }
   if (target >= rows.length - 1) container.append(row);
@@ -777,11 +781,11 @@ function moveRowToPosition(row, rowSelector, value, refresh) {
 }
 
 function renderSchemaFields(fields) {
-  $("#schema-fields").innerHTML = fields.map((field, index) => `<div class="schema-field" data-original-source="${escapeHtml(field.source_key)}"><input class="schema-source-key-input" value="${escapeHtml(field.source_key)}" aria-label="字段名称" /><input class="schema-field-label" value="${escapeHtml(field.display_name || field.source_key)}" aria-label="字段显示名称" /><select class="schema-field-zone" aria-label="字段区域">${fieldZoneOptions(field.zone)}</select><label class="schema-unique"><input class="schema-field-unique" type="checkbox" ${field.unique ? "checked" : ""} />唯一 KEY</label><span class="schema-order"><input class="schema-position" type="number" min="1" max="${fields.length}" value="${index + 1}" aria-label="字段顺序" title="输入目标位置，可直接跳转" /><button type="button" data-schema-move="up" ${index === 0 ? "disabled" : ""} title="上移一行">↑</button><button type="button" data-schema-move="down" ${index === fields.length - 1 ? "disabled" : ""} title="下移一行">↓</button></span></div>`).join("");
+  $("#schema-fields").innerHTML = fields.map((field, index) => `<div class="schema-field" data-original-source="${escapeHtml(field.source_key)}">${rowOrderControl(index, "字段顺序")}<input class="schema-source-key-input" value="${escapeHtml(field.source_key)}" aria-label="字段名称" /><input class="schema-field-label" value="${escapeHtml(field.display_name || field.source_key)}" aria-label="字段显示名称" /><select class="schema-field-zone" aria-label="字段区域">${fieldZoneOptions(field.zone)}</select><label class="schema-unique"><input class="schema-field-unique" type="checkbox" ${field.unique ? "checked" : ""} />唯一 KEY</label><span class="schema-order"><button type="button" data-schema-move="up" ${index === 0 ? "disabled" : ""} title="上移一行">↑</button><button type="button" data-schema-move="down" ${index === fields.length - 1 ? "disabled" : ""} title="下移一行">↓</button></span></div>`).join("");
   $("#schema-preview").hidden = false;
   $("#schema-preview .schema-column-head").hidden = !fields.length;
   $$('[data-schema-move]').forEach((button) => button.addEventListener("click", () => { const row = button.closest(".schema-field"); const sibling = button.dataset.schemaMove === "up" ? row.previousElementSibling : row.nextElementSibling; if (!sibling) return; if (button.dataset.schemaMove === "up") row.parentElement.insertBefore(row, sibling); else row.parentElement.insertBefore(sibling, row); renderSchemaOrderButtons(); }));
-  $$("#schema-fields .schema-position").forEach((input) => input.addEventListener("change", () => moveRowToPosition(input.closest(".schema-field"), ".schema-field", input.value, renderSchemaOrderButtons)));
+  bindRowOrder($("#schema-fields"), ".schema-field", renderSchemaOrderButtons);
   bindSchemaZoneControls($("#schema-fields"), true);
   renderSchemaOrderButtons();
 }
@@ -809,9 +813,105 @@ function bindSchemaZoneControls(container, updateList = false) {
   });
 }
 
+function rowOrderControl(index, label) {
+  return `<span class="schema-row-controls"><button type="button" class="row-drag-handle" aria-label="拖动第 ${index + 1} 行" title="拖动调整顺序">⠿</button><button type="button" class="schema-row-number" aria-label="第 ${index + 1} 行，点击修改顺序" title="点击输入目标行号">${index + 1}</button><input class="schema-position" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" value="${index + 1}" aria-label="${label}" hidden /></span>`;
+}
+
+function orderChanged(container, row, previous) {
+  const current = [...container.children].indexOf(row);
+  if (current === previous) return;
+  container.dispatchEvent(new Event('change', { bubbles: true }));
+  const status = $('#reorder-status');
+  if (status) status.textContent = `已从第 ${previous + 1} 行移动到第 ${current + 1} 行`;
+}
+
+function bindRowOrder(container, rowSelector, refresh) {
+  container.querySelectorAll(rowSelector).forEach(row => {
+    const number = row.querySelector('.schema-row-number');
+    const input = row.querySelector('.schema-position');
+    const finish = commit => {
+      if (input.hidden) return;
+      const previous = [...container.children].indexOf(row);
+      input.hidden = true; number.hidden = false;
+      if (commit) moveRowToPosition(row, rowSelector, input.value, refresh);
+      else refresh();
+      orderChanged(container, row, previous);
+    };
+    number.addEventListener('click', () => {
+      container.querySelectorAll('.schema-position:not([hidden])').forEach(other => other.blur());
+      number.hidden = true; input.hidden = false;
+      input.focus(); input.select();
+    });
+    input.addEventListener('blur', () => finish(true));
+    input.addEventListener('keydown', event => {
+      if (!['Enter', 'Escape'].includes(event.key)) return;
+      event.preventDefault(); event.stopPropagation();
+      finish(event.key === 'Enter'); number.focus();
+    });
+    bindRowDrag(container, row, rowSelector, refresh);
+  });
+}
+
+function bindRowDrag(container, row, rowSelector, refresh) {
+  const handle = row.querySelector('.row-drag-handle');
+  let drag = null;
+  const clearMarker = () => container.querySelectorAll('.reorder-before, .reorder-after').forEach(item => item.classList.remove('reorder-before', 'reorder-after'));
+  const locate = () => {
+    clearMarker();
+    const others = [...container.querySelectorAll(rowSelector)].filter(item => item !== row);
+    drag.before = others.find(item => { const rect = item.getBoundingClientRect(); return drag.y < rect.top + rect.height / 2; }) || null;
+    if (drag.before) drag.before.classList.add('reorder-before');
+    else others.at(-1)?.classList.add('reorder-after');
+  };
+  const cleanup = () => {
+    if (!drag) return;
+    const previous = drag; drag = null;
+    if (previous.frame) cancelAnimationFrame(previous.frame);
+    if (handle.hasPointerCapture?.(previous.id)) handle.releasePointerCapture(previous.id);
+    clearMarker(); row.classList.remove('reorder-dragging');
+    document.body.classList.remove('reordering-fields');
+  };
+  const scroll = () => {
+    if (!drag?.active) return;
+    if (!handle.isConnected || container.closest('[hidden]')) { cleanup(); return; }
+    const top = $('.topbar')?.getBoundingClientRect().bottom || 0;
+    const speed = drag.y < top + 48 ? -12 : drag.y > innerHeight - 80 ? 12 : 0;
+    if (speed) { window.scrollBy(0, speed); locate(); }
+    drag.frame = requestAnimationFrame(scroll);
+  };
+  handle.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || handle.disabled) return;
+    event.preventDefault();
+    container.querySelector('.schema-position:not([hidden])')?.blur();
+    drag = { id: event.pointerId, startX: event.clientX, startY: event.clientY, y: event.clientY, previous: [...container.children].indexOf(row), active: false };
+    handle.setPointerCapture?.(event.pointerId);
+  });
+  handle.addEventListener('pointermove', event => {
+    if (!drag || event.pointerId !== drag.id) return;
+    drag.y = event.clientY;
+    if (!drag.active && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 5) return;
+    if (!drag.active) {
+      drag.active = true; row.classList.add('reorder-dragging');
+      document.body.classList.add('reordering-fields');
+      drag.frame = requestAnimationFrame(scroll);
+    }
+    locate();
+  });
+  handle.addEventListener('pointerup', event => {
+    if (!drag || event.pointerId !== drag.id) return;
+    const { active, before, previous } = drag;
+    cleanup();
+    if (!active) return;
+    if (before) container.insertBefore(row, before); else container.append(row);
+    refresh(); orderChanged(container, row, previous); handle.focus();
+  });
+  handle.addEventListener('pointercancel', cleanup);
+  handle.addEventListener('lostpointercapture', cleanup);
+}
+
 function renderSchemaOrderButtons() {
   const rows = $$("#schema-fields .schema-field");
-  rows.forEach((row, index) => { const buttons = row.querySelectorAll("[data-schema-move]"); buttons[0].disabled = index === 0; buttons[1].disabled = index === rows.length - 1; const input = row.querySelector(".schema-position"); if (input) { input.value = index + 1; input.max = rows.length; } });
+  rows.forEach((row, index) => { const buttons = row.querySelectorAll("[data-schema-move]"); buttons[0].disabled = index === 0; buttons[1].disabled = index === rows.length - 1; const input = row.querySelector(".schema-position"); if (input) { input.value = index + 1; input.setAttribute("aria-description", `共 ${rows.length} 行，输入目标行号后移动`); } const number = row.querySelector(".schema-row-number"); if (number) { number.textContent = index + 1; number.setAttribute("aria-label", `第 ${index + 1} 行，点击修改顺序`); } const handle = row.querySelector(".row-drag-handle"); if (handle) { handle.disabled = rows.length < 2; handle.setAttribute("aria-label", `拖动第 ${index + 1} 行`); } });
 }
 
 function renderListConfig(fields, configured = []) {
@@ -820,15 +920,15 @@ function renderListConfig(fields, configured = []) {
   const saved = new Map(configured.map((field, index) => [field.source_key, { ...field, position: field.position ?? index }]));
   const rows = eligible.map((field, index) => saved.has(field.source_key) ? { ...field, ...saved.get(field.source_key) } : { ...field, position: configured.length + index, visible: true, format: "single_line" }).sort((a, b) => a.position - b.position);
   $("#list-config").hidden = false;
-  $("#list-config-fields").innerHTML = rows.map((field, index) => `<div class="list-config-row" data-list-source="${escapeHtml(field.source_key)}"><label class="list-config-visible"><input type="checkbox" class="list-field-visible" ${field.visible !== false ? "checked" : ""} />显示</label><span class="list-config-name"><strong>${escapeHtml(field.display_name || field.source_key)}</strong><code>${escapeHtml(field.source_key)}</code></span><select class="list-field-format" aria-label="展示形式"><option value="single_line" ${field.format === "single_line" ? "selected" : ""}>单行截断</option><option value="multiline" ${field.format === "multiline" ? "selected" : ""}>多行换行</option><option value="json" ${field.format === "json" ? "selected" : ""}>JSON</option></select><span class="schema-order"><input class="schema-position" type="number" min="1" max="${rows.length}" value="${index + 1}" aria-label="列表字段顺序" title="输入目标位置，可直接跳转" /><button type="button" data-list-move="up" ${index === 0 ? "disabled" : ""} title="上移一行">↑</button><button type="button" data-list-move="down" ${index === rows.length - 1 ? "disabled" : ""} title="下移一行">↓</button></span></div>`).join("");
+  $("#list-config-fields").innerHTML = rows.map((field, index) => `<div class="list-config-row" data-list-source="${escapeHtml(field.source_key)}">${rowOrderControl(index, "列表字段顺序")}<label class="list-config-visible"><input type="checkbox" class="list-field-visible" ${field.visible !== false ? "checked" : ""} />显示</label><span class="list-config-name"><strong>${escapeHtml(field.display_name || field.source_key)}</strong><code>${escapeHtml(field.source_key)}</code></span><select class="list-field-format" aria-label="展示形式"><option value="single_line" ${field.format === "single_line" ? "selected" : ""}>单行截断</option><option value="multiline" ${field.format === "multiline" ? "selected" : ""}>多行换行</option><option value="json" ${field.format === "json" ? "selected" : ""}>JSON</option></select><span class="schema-order"><button type="button" data-list-move="up" ${index === 0 ? "disabled" : ""} title="上移一行">↑</button><button type="button" data-list-move="down" ${index === rows.length - 1 ? "disabled" : ""} title="下移一行">↓</button></span></div>`).join("");
   $$('[data-list-move]').forEach((button) => button.addEventListener("click", () => { const row = button.closest(".list-config-row"); const sibling = button.dataset.listMove === "up" ? row.previousElementSibling : row.nextElementSibling; if (!sibling) return; if (button.dataset.listMove === "up") row.parentElement.insertBefore(row, sibling); else row.parentElement.insertBefore(sibling, row); renderListOrderButtons(); }));
-  $$("#list-config-fields .schema-position").forEach((input) => input.addEventListener("change", () => moveRowToPosition(input.closest(".list-config-row"), ".list-config-row", input.value, renderListOrderButtons)));
+  bindRowOrder($("#list-config-fields"), ".list-config-row", renderListOrderButtons);
   renderListOrderButtons();
 }
 
 function renderListOrderButtons() {
   const rows = $$("#list-config-fields .list-config-row");
-  rows.forEach((row, index) => { const buttons = row.querySelectorAll("[data-list-move]"); buttons[0].disabled = index === 0; buttons[1].disabled = index === rows.length - 1; const input = row.querySelector(".schema-position"); if (input) { input.value = index + 1; input.max = rows.length; } });
+  rows.forEach((row, index) => { const buttons = row.querySelectorAll("[data-list-move]"); buttons[0].disabled = index === 0; buttons[1].disabled = index === rows.length - 1; const input = row.querySelector(".schema-position"); if (input) { input.value = index + 1; input.setAttribute("aria-description", `共 ${rows.length} 行，输入目标行号后移动`); } const number = row.querySelector(".schema-row-number"); if (number) { number.textContent = index + 1; number.setAttribute("aria-label", `第 ${index + 1} 行，点击修改顺序`); } const handle = row.querySelector(".row-drag-handle"); if (handle) { handle.disabled = rows.length < 2; handle.setAttribute("aria-label", `拖动第 ${index + 1} 行`); } });
 }
 
 function readListConfig() {
@@ -1001,35 +1101,36 @@ $("#search-input").addEventListener("input", (event) => {
   state.searchTimer = setTimeout(() => fetchRecords().catch((error) => showToast(error.message, "error")), 180);
 });
 $("#clear-filters").addEventListener("click", async () => {
-  state.query = ""; state.selectedDatasetId = null; state.category = "all"; state.environment = "all"; state.page = 1;
+  state.query = ""; state.selectedDatasetId = null; state.category = "all"; state.categories = []; state.environment = "all"; state.includeExpired = false; state.page = 1;
+  $("#include-expired").checked = false;
   $("#search-input").value = "";
   await fetchRecords(); renderCategoryTree(); renderFilters();
 });
 $("#previous-page").addEventListener("click", async () => { if (state.page > 1) { state.page--; await fetchRecords(); window.scrollTo({ top: 0, behavior: "smooth" }); } });
 $("#next-page").addEventListener("click", async () => { if (state.page * state.pageSize < state.total) { state.page++; await fetchRecords(); window.scrollTo({ top: 0, behavior: "smooth" }); } });
-$("#security-settings-button").addEventListener("click", openSecuritySettings);
+$("#security-settings-button").addEventListener("click", () => openSecuritySettings());
 $("#change-password-form").addEventListener("submit", changeMasterPassword);
 ["#close-security", "#cancel-password-change"].forEach((id) => $(id).addEventListener("click", () => { if (!state.passwordChangeBusy) showWorkspace(state.securityReturn); }));
-$("#dataset-manager-button").addEventListener("click", openDatasetManager);
+$("#dataset-manager-button").addEventListener("click", () => openDatasetManager());
 $("#manager-new-dataset").addEventListener("click", () => $("#new-dataset-button").click());
-$("#manager-import").addEventListener("click", openImport);
-$("#app-manager-button").addEventListener("click", async () => { try { await loadApps(); $("#app-manager-modal").hidden = false; } catch (error) { showToast(error.message, "error"); } });
-$("#create-app").addEventListener("click", async () => { try { const name = $("#app-name").value.trim(); if (!name) throw new Error("请填写应用名称"); const result = await api("/apps", { method: "POST", body: JSON.stringify({ name, permission: $("#app-permission").value, datasets: [] }) }); $("#app-name").value = ""; await loadApps(); window.prompt("请立即保存新的 API Key（只显示这一次）", result.key); } catch (error) { showToast(error.message, "error"); } });
+$("#manager-import").addEventListener("click", () => openImport());
+$("#app-manager-button").addEventListener("click", async () => { try { await loadApps(); showWorkspace("apps"); } catch (error) { showToast(error.message, "error"); } });
+$("#create-app").addEventListener("click", async () => { try { const name = $("#app-name").value.trim(); if (!name) throw new Error("请填写应用名称"); const result = await api("/apps", { method: "POST", body: JSON.stringify({ name, permission: $("#app-permission").value, datasets: [] }) }); $("#app-name").value = ""; await loadApps(); showAppKey(result.key); } catch (error) { showToast(error.message, "error"); } });
 $("#new-dataset-button").addEventListener("click", () => { state.editDatasetId = null; state.evolvedFields = []; state.currentBatchSources = []; $("#dataset-title").textContent = "定义数据集"; $("#dataset-help").textContent = "可先创建空数据集，首次导入时再定义 Schema。"; $("#dataset-category").value = ""; $("#dataset-environment").value = ""; $("#dataset-description").value = ""; updateDatasetDescriptionPreview(); renderSchemaFields([]); $("#list-config").hidden = true; $("#list-config-fields").replaceChildren(); $("#first-schema-fields").replaceChildren(); $("#first-schema").hidden = true; $("#save-dataset").innerHTML = "创建数据集 <span>↗</span>"; openDatasetEditor(); $("#dataset-category").focus(); });
 $("#edit-dataset-button").addEventListener("click", () => {
   const dataset = currentDataset();
   if (dataset) openDatasetEdit(dataset.id);
   else openDatasetManager();
 });
-$("#import-button").addEventListener("click", openImport);
+$("#import-button").addEventListener("click", () => openImport());
 $("#choose-file").addEventListener("click", () => $("#import-file").click());
 $("#import-file").addEventListener("change", (event) => importFile(event.target.files[0]));
-$("#commit-import").addEventListener("click", commitImport);
+$("#commit-import").addEventListener("click", () => commitImport());
 $("#include-expired").addEventListener("change", async (event) => { state.includeExpired = event.target.checked; state.page = 1; await fetchRecords(); });
 $("#close-import").addEventListener("click", () => showWorkspace(state.importReturn));
 $("#close-reveal").addEventListener("click", () => { $("#reveal-modal").hidden = true; state.pendingReveal = null; });
 $("#close-secrets").addEventListener("click", () => { $("#secret-fields-list").replaceChildren(); $("#secrets-modal").hidden = true; state.secretModalRecordId = null; state.reveal = null; });
-$("#close-record-detail").addEventListener("click", closeRecordDetail);
+$("#close-record-detail").addEventListener("click", () => closeRecordDetail());
 $("#close-dataset-info").addEventListener("click", () => $("#dataset-info-modal").close());
 $("#dataset-info-modal").addEventListener("click", (event) => {
   if (event.target !== event.currentTarget) return;
@@ -1038,7 +1139,7 @@ $("#dataset-info-modal").addEventListener("click", (event) => {
 });
 $("#dataset-info-modal").addEventListener("close", () => $("#dataset-info-content").replaceChildren());
 $("#close-dataset-manager").addEventListener("click", () => showWorkspace("search"));
-$("#close-app-manager").addEventListener("click", () => { $("#app-manager-modal").hidden = true; });
+$("#close-app-manager").addEventListener("click", () => { showWorkspace("search"); });
 $("#cancel-reveal").addEventListener("click", () => { $("#reveal-modal").hidden = true; state.pendingReveal = null; });
 $("#confirm-reveal").addEventListener("click", () => { if (state.pendingReveal) handleSecretAction("reveal", state.pendingReveal.field); $("#reveal-modal").hidden = true; });
 $("#detect-schema")?.addEventListener("click", detectSchema);
@@ -1048,13 +1149,13 @@ $("#dataset-description").addEventListener("input", () => {
 $("#dataset-description-preview-panel").addEventListener("toggle", () => {
   if ($("#dataset-description-preview-panel").open) updateDatasetDescriptionPreview();
 });
-$("#save-dataset").addEventListener("click", createDataset);
-$("#close-dataset").addEventListener("click", returnFromDatasetEditor);
-$("#cancel-dataset").addEventListener("click", returnFromDatasetEditor);
+$("#save-dataset").addEventListener("click", () => createDataset());
+$("#close-dataset").addEventListener("click", () => returnFromDatasetEditor());
+$("#cancel-dataset").addEventListener("click", () => returnFromDatasetEditor());
 $("#load-dataset-file")?.addEventListener("click", () => $("#dataset-file")?.click());
 document.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); $("#search-input").focus(); }
-  if (event.key === "Escape") { $("#secret-fields-list").replaceChildren(); closeRecordDetail(); state.reveal = null; state.secretModalRecordId = null; ["#reveal-modal", "#secrets-modal", "#app-manager-modal"].forEach((selector) => { $(selector).hidden = true; }); }
+
 });
 document.addEventListener("pointerdown", touch, { passive: true });
 
@@ -1064,11 +1165,10 @@ document.head.appendChild(toastStyle);
 
 applyTheme();
 setSealedView();
-checkStatus();
-setInterval(checkStatus, 5000);
-window.addEventListener("focus", checkStatus);
-window.addEventListener("online", checkStatus);
+setInterval(() => { if (state.workbenchReady) checkStatus(); }, 5000);
+window.addEventListener("focus", () => { if (state.workbenchReady) checkStatus(); });
+window.addEventListener("online", () => { if (state.workbenchReady) checkStatus(); });
 window.addEventListener("offline", handleServiceOffline);
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) checkStatus();
+  if (!document.hidden && state.workbenchReady) checkStatus();
 });

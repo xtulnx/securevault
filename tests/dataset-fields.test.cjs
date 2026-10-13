@@ -69,7 +69,9 @@ test('multiple datasets sharing a directory require explicit selection and searc
   assert.equal(window.currentDataset().id, 'ds_prod');
   state.category = '业务';
   window.renderDatasetActions();
-  assert.equal(container.querySelector('[data-action="view"]'), null);
+  assert.equal(window.currentDataset().id, 'ds_prod');
+  assert.ok(container.querySelector('[data-action="view"]'));
+  assert.equal(container.querySelector('select'), null);
 });
 
 test('ordinary and ignored schema zones stay out of list configuration and ignore cannot be a KEY', async (t) => {

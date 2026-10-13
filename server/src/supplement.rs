@@ -29,7 +29,7 @@ pub(super) fn fields(db: &Connection, dataset: &str) -> ApiResult<Vec<FieldDefin
     serde_json::from_str(raw.as_deref().unwrap_or("[]")).map_err(internal)
 }
 
-fn link_fields(db: &Connection, dataset: &str) -> ApiResult<Vec<String>> {
+pub(super) fn link_fields(db: &Connection, dataset: &str) -> ApiResult<Vec<String>> {
     let definitions = dataset_definitions(db, dataset)?;
     let raw: String = db
         .query_row(
@@ -290,7 +290,7 @@ pub(super) async fn save_schema(
     }).await
 }
 
-fn write_row(
+pub(super) fn write_row(
     db: &Connection,
     keys: &KeySet,
     dataset: &str,
@@ -447,7 +447,7 @@ pub(super) async fn reveal(
     }).await
 }
 
-fn main_values(
+pub(super) fn main_values(
     db: &Connection,
     keys: &KeySet,
     id: &str,
@@ -488,7 +488,7 @@ fn main_values(
     Ok(values)
 }
 
-fn write_main(
+pub(super) fn write_main(
     db: &Connection,
     keys: &KeySet,
     dataset: &str,

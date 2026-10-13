@@ -1,0 +1,37 @@
+SecureVault 数据集交换格式 · v1
+
+用途
+“仅结构”用于复制数据集定义并创建空数据集，类似导出表结构；“仅数据”保留 JSON/CSV/XLSX 常规交换；“结构与数据”使用原生 JSON 数据集包。全量加密保险库备份仍使用 BACKUP_FORMAT.md 中的独立格式。
+
+原生 JSON 顶层
+format: securevault-dataset
+version: 1
+mode: schema 或 package
+record_scope: all 或 active
+schema: 数据集定义
+records: 主表记录数组
+supplements: 附表记录数组
+templates: 可选导入映射模板数组
+
+schema 保留 category_path、environment、description（完整 Markdown）、fields、identity_fields、conflict_strategy、list_fields、display_config、supplement_fields、supplement_link_version。
+fields 保留 source_key、display_name、zone、unique、position。display_config.identifier_fields 只能引用索引或展示字段，density 为 summary 或 full。记录标识不等同于逻辑唯一 KEY。
+
+记录
+主表为 source_id、values、omitted_fields、expired；附表还包含 main_source_id、orphan、link。values 保留 JSON 类型，业务字段 id 与系统 ID 分开处理。缺失值不写入 values，JSON null 仍是实际值。
+默认省略敏感和隐藏字段，将实际省略项列入 omitted_fields，不写入掩码。更新现有记录时省略的值保留，明确传入的值参与更新。导入重新分配系统 ID、重建加密值并映射附表关联，不迁移应用凭据、数据库密钥或会话。
+active 包只包含有效主记录及对应附表，并保留失联附表；all 包还包含过期记录及过期标记。
+
+API
+GET /datasets/{id}/export?content=schema|package&format=json
+include_templates、include_supplements、include_secrets 默认 false；include_expired 默认 true。
+content=data（或省略）沿用常规格式导出。原生结构与包只允许管理会话。
+POST /datasets/transfer/preview
+POST /datasets/transfer/import
+请求包含 package、category_path、可选 environment、可选 dataset_id、skip_existing、confirm_changes、confirmation_token、template_names。package 接受 JSON 对象或原始 JSON 字符串；网页发送原始字符串以保留超过 JavaScript 精确范围的整数。请求体最大 16 MiB。
+
+预览与提交
+预览运行实际事务再回滚，不创建数据集、不修改结构或记录；返回差异、统计与 confirmation_token。最终提交携带 token；目标数据或结构已变更时必须重新预览。结构变更需要 confirm_changes，整体事务失败不留下部分写入。
+现有目标保留源结构没有声明的字段；修改已有字段区域、KEY、顺序、列表规则或将字段设为忽略等变化列入确认。忽略区域会清除对应已有值。模板重名拒绝提交，可在配置中明确重命名。
+
+兼容性
+仅结构不能夹带记录；版本或未知属性不受支持时拒绝导入。若旧数据包含未声明字段，原生包导出会拒绝并提示先补全字段定义，避免静默丢失；常规数据导出仍可用于取出旧数据。文件为明文 JSON，机密是否包含由每次导出明确选择，选择不会沿用上一次。

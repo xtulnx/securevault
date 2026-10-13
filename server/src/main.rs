@@ -33,6 +33,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 type HmacSha256 = Hmac<Sha256>;
 mod supplement;
+mod search_rank;
+mod transfer;
 mod security;
 use security::*;
 mod backup;
@@ -208,6 +210,29 @@ struct ListFieldDefinition {
     visible: bool,
 }
 
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct DisplayConfig {
+    #[serde(default)]
+    identifier_fields: Vec<String>,
+    #[serde(default = "default_density")]
+    density: String,
+}
+fn default_density() -> String { "summary".into() }
+impl Default for DisplayConfig {
+    fn default() -> Self { Self { identifier_fields: Vec::new(), density: default_density() } }
+}
+fn validate_display_config(config: &DisplayConfig, fields: &[FieldDefinition]) -> ApiResult<()> {
+    if !matches!(config.density.as_str(), "summary" | "full") { return Err(bad_request("展示密度无效")); }
+    let mut seen = std::collections::HashSet::new();
+    for key in &config.identifier_fields {
+        if !seen.insert(key) || !fields.iter().any(|field| &field.source_key == key && matches!(field.zone.as_str(), "indexes" | "display")) {
+            return Err(bad_request("记录标识只能选择不重复的公开索引或展示字段"));
+        }
+    }
+    Ok(())
+}
+
 fn default_list_format() -> String { "single_line".into() }
 fn default_list_visible() -> bool { true }
 
@@ -237,6 +262,8 @@ struct DatasetCreateRequest {
     sample_data: Option<Value>,
     #[serde(default)]
     list_fields: Vec<ListFieldDefinition>,
+    #[serde(default)]
+    display_config: DisplayConfig,
 }
 
 fn default_conflict() -> String {
@@ -292,6 +319,8 @@ struct DatasetUpdate {
     merge_fields: bool,
     #[serde(default)]
     list_fields: Option<Vec<ListFieldDefinition>>,
+    #[serde(default)]
+    display_config: Option<DisplayConfig>,
 }
 
 #[derive(Deserialize)]
@@ -302,6 +331,8 @@ struct SearchQuery {
     q: String,
     #[serde(default)]
     category: Option<String>,
+    #[serde(default)]
+    categories: Option<String>,
     #[serde(default)]
     environment: Option<String>,
     #[serde(default)]
@@ -343,6 +374,14 @@ struct ExportQuery {
     format: Option<String>,
     #[serde(default)]
     include_secrets: bool,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    include_templates: bool,
+    #[serde(default)]
+    include_supplements: bool,
+    #[serde(default = "default_list_visible")]
+    include_expired: bool,
 }
 
 fn default_app_permission() -> String {
@@ -526,6 +565,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .route("/vault/seal", post(vault_seal))
         .route("/vault/password", post(change_password))
         .route("/datasets/schema-preview", post(schema_preview))
+        .route("/datasets/transfer/preview", post(transfer::preview).layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)))
+        .route("/datasets/transfer/import", post(transfer::import).layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)))
+        .route("/records/import/preview", post(preview_import))
         .route("/datasets", get(list_datasets).post(create_dataset))
         .route("/datasets/{id}", axum::routing::patch(update_dataset))
         .route("/datasets/{id}/export", get(export_dataset))
@@ -660,6 +702,8 @@ fn initialize_schema(connection: &Connection) -> ApiResult<()> {
     if !has_datasets { connection.execute("ALTER TABLE api_apps ADD COLUMN datasets_json TEXT NOT NULL DEFAULT '[]'", []).map_err(internal)?; }
     let has_access_expiry: bool = connection.prepare("PRAGMA table_info(api_apps)").map_err(internal)?.query_map([], |row| row.get::<_, String>(1)).map_err(internal)?.filter_map(Result::ok).any(|name| name == "access_expires_at");
     if !has_access_expiry { connection.execute("ALTER TABLE api_apps ADD COLUMN access_expires_at INTEGER", []).map_err(internal)?; }
+    let has_display_config: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('datasets') WHERE name='display_config_json')", [], |row| row.get(0)).map_err(internal)?;
+    if !has_display_config { connection.execute("ALTER TABLE datasets ADD COLUMN display_config_json TEXT NOT NULL DEFAULT '{}'", []).map_err(internal)?; }
     supplement::initialize(connection)?;
     Ok(())
 }
@@ -1088,11 +1132,11 @@ fn query_terms(query: &str) -> Vec<String> {
     terms
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum SearchOperator { Contains, Exact, Prefix, Suffix, Regex }
 
 #[derive(Clone)]
-struct SearchClause { field: Option<String>, operator: SearchOperator, value: String }
+struct SearchClause { field: Option<String>, operator: SearchOperator, value: String, regex: Option<Regex> }
 
 fn parse_search_clauses(query: &str) -> ApiResult<Vec<SearchClause>> {
     query_terms(query).into_iter().map(|term| {
@@ -1104,9 +1148,9 @@ fn parse_search_clauses(query: &str) -> ApiResult<Vec<SearchClause>> {
             Some('~') => (SearchOperator::Regex, raw[1..].trim_matches('/').to_owned()),
             _ => (SearchOperator::Contains, raw),
         };
-        if matches!(operator, SearchOperator::Regex) { Regex::new(&value).map_err(|error| bad_request(format!("invalid search regex: {error}")))?; }
+        let regex = if matches!(operator, SearchOperator::Regex) { Some(Regex::new(&value).map_err(|error| bad_request(format!("invalid search regex: {error}")))?) } else { None };
         if value.is_empty() { return Err(bad_request("search operator requires a value")); }
-        Ok(SearchClause { field, operator, value: { if matches!(operator, SearchOperator::Regex) { value } else { std::mem::take(&mut value) } } })
+        Ok(SearchClause { field, operator, value: { if matches!(operator, SearchOperator::Regex) { value } else { std::mem::take(&mut value) } }, regex })
     }).collect()
 }
 
@@ -1118,10 +1162,11 @@ fn matches_value(value: &str, clause: &SearchClause) -> bool {
         SearchOperator::Exact => value.eq_ignore_ascii_case(&clause.value),
         SearchOperator::Prefix => value.to_lowercase().starts_with(&clause.value.to_lowercase()),
         SearchOperator::Suffix => value.to_lowercase().ends_with(&clause.value.to_lowercase()),
-        SearchOperator::Regex => Regex::new(&clause.value).map(|regex| regex.is_match(value)).unwrap_or(false),
+        SearchOperator::Regex => clause.regex.as_ref().is_some_and(|regex| regex.is_match(value)),
     }
 }
 
+#[cfg(test)]
 fn clause_fields(clause: &SearchClause, category: &str, environment: Option<&str>, dataset_id: &str, indexes: &Value, display: &Value) -> Vec<(String, Value)> {
     match clause.field.as_deref() {
         Some("category") => vec![("category".into(), Value::String(category.to_owned()))],
@@ -1151,24 +1196,28 @@ fn clause_matches(field: &str, value: &Value, clause: &SearchClause) -> bool {
     matches_value(&value, clause)
 }
 
+#[cfg(test)]
 fn record_matches(clauses: &[SearchClause], category: &str, environment: Option<&str>, dataset_id: &str, indexes: &Value, display: &Value) -> bool {
     clauses.iter().all(|clause| clause_fields(clause, category, environment, dataset_id, indexes, display).iter().any(|(field, value)| clause_matches(field, value, clause)))
 }
 
-fn matched_fields(clauses: &[SearchClause], category: &str, environment: Option<&str>, dataset_id: &str, indexes: &Value, display: &Value) -> Vec<String> {
-    let mut fields = Vec::new();
-    for clause in clauses { for (field, value) in clause_fields(clause, category, environment, dataset_id, indexes, display) { if clause_matches(&field, &value, clause) && !fields.iter().any(|item| item == &field) { fields.push(field); } } }
-    fields
-}
-
 // The supplement namespace keeps main and supplementary fields unambiguous;
 // unqualified field queries may match either table, including same-name fields.
+#[cfg(test)]
 fn combined_search(clauses: &[SearchClause], category: &str, environment: Option<&str>, dataset_id: &str, indexes: &Value, display: &Value, supplement: &Value) -> (bool, Vec<String>) {
-    if supplement.is_null() && !clauses.iter().any(|clause| clause.field.as_deref().is_some_and(|field|field.starts_with("supplement.") || field.starts_with("附表."))) {
-        return (record_matches(clauses,category,environment,dataset_id,indexes,display),matched_fields(clauses,category,environment,dataset_id,indexes,display));
-    }
     let mut matched=Vec::new();
     for clause in clauses {
+        let candidates = combined_clause_fields(clause, category, environment, dataset_id, indexes, display, supplement);
+        let hits=candidates.into_iter().filter(|(field,value)|clause_matches(field,value,clause)).map(|(field,_)|field).collect::<Vec<_>>();
+        if hits.is_empty(){return (false,Vec::new());}
+        for field in hits {if !matched.contains(&field){matched.push(field);}}
+    }
+    (true,matched)
+}
+
+// Filtering and relevance use the same candidates and namespace rules.
+#[cfg(test)]
+fn combined_clause_fields(clause: &SearchClause, category: &str, environment: Option<&str>, dataset_id: &str, indexes: &Value, display: &Value, supplement: &Value) -> Vec<(String, Value)> {
         let field=clause.field.as_deref();
         let explicit=field.and_then(|f|f.strip_prefix("supplement.").or_else(||f.strip_prefix("附表.")));
         let mut candidates=if explicit.is_some(){Vec::new()}else{clause_fields(clause,category,environment,dataset_id,indexes,display)};
@@ -1185,11 +1234,48 @@ fn combined_search(clauses: &[SearchClause], category: &str, environment: Option
                 }
             }
         }
-        let hits=candidates.into_iter().filter(|(field,value)|clause_matches(field,value,clause)).map(|(field,_)|field).collect::<Vec<_>>();
-        if hits.is_empty(){return (false,Vec::new());}
-        for field in hits {if !matched.contains(&field){matched.push(field);}}
+        candidates
+}
+
+// Highlight offsets use UTF-16, as JavaScript string slicing does. Regex runs
+// in the same linear-time engine as search, rather than in the browser.
+fn match_highlights(clauses: &[SearchClause], record: &Value) -> Value {
+    let mut output=serde_json::Map::new();
+    for key in record["matched_fields"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        let value=match key {
+            "category" => Some(&record["category"]),
+            "environment" => Some(&record["environment"]),
+            "dataset" => Some(&record["dataset_id"]),
+            key if key.starts_with("supplement.") => {let key=&key[11..];record["supplement"]["indexes"].get(key).or_else(||record["supplement"]["display"].get(key))},
+            key => record["indexes"].get(key).or_else(||record["display"].get(key)),
+        };
+        let Some(value)=value else {continue;};let text=value_text(value);let mut ranges=Vec::new();
+        for clause in clauses {
+            let eligible=match clause.field.as_deref() {
+                None=>true,
+                Some("env"|"environment")=>key=="environment",
+                Some("dataset"|"dataset_id")=>key=="dataset",
+                Some(field) if field.starts_with("supplement.") || field.starts_with("附表.")=> {
+                    let source=field.strip_prefix("supplement.").or_else(||field.strip_prefix("附表.")).unwrap();
+                    let source=source.strip_prefix("indexes.").or_else(||source.strip_prefix("display.")).unwrap_or(source);
+                    key.eq_ignore_ascii_case(&format!("supplement.{source}"))
+                },
+                Some(field) if field.starts_with("indexes.") || field.starts_with("display.")=>key.eq_ignore_ascii_case(&field[field.find('.').unwrap()+1..]),
+                Some(field)=>key.eq_ignore_ascii_case(field) || key.eq_ignore_ascii_case(&format!("supplement.{field}")),
+            };
+            if !eligible || !clause_matches(key,value,clause) {continue;}
+            let literal;
+            let regex=if let Some(regex)=clause.regex.as_ref() {regex} else {
+                literal=match regex::RegexBuilder::new(&regex::escape(&clause.value)).case_insensitive(true).build() {Ok(regex)=>regex,Err(_)=>continue};&literal
+            };
+            for hit in regex.find_iter(&text) {
+                if hit.start()==hit.end() || matches!(clause.operator,SearchOperator::Prefix) && hit.start()!=0 || matches!(clause.operator,SearchOperator::Suffix) && hit.end()!=text.len() {continue;}
+                ranges.push(json!([text[..hit.start()].encode_utf16().count(),text[..hit.end()].encode_utf16().count()]));
+            }
+        }
+        output.insert(key.into(),json!({"text":text,"ranges":ranges}));
     }
-    (true,matched)
+    Value::Object(output)
 }
 
 fn insert_records(
@@ -1276,6 +1362,7 @@ async fn create_dataset(
     Json(request): Json<DatasetCreateRequest>,
 ) -> ApiResult<Json<Value>> {
     validate_schema(&request.fields, &request.identity_fields, &request.list_fields)?;
+    validate_display_config(&request.display_config, &request.fields)?;
     let category = normalize_category(&request.category_path)?;
     let environment = request.environment.filter(|value| !value.trim().is_empty());
     let records = request
@@ -1296,7 +1383,7 @@ async fn create_dataset(
             request.fields.iter().filter(|field| matches!(field.zone.as_str(), "indexes" | "display")).enumerate().map(|(position, field)| ListFieldDefinition { source_key: field.source_key.clone(), display_name: field.display_name.clone(), position, format: default_list_format(), visible: true }).collect::<Vec<_>>()
         } else { request.list_fields.clone() };
         let list_fields_json = serde_json::to_string(&list_fields).map_err(internal)?;
-        connection.execute("INSERT INTO datasets(id,category_path,environment,fields_json,identity_fields_json,conflict_strategy,list_fields_json,description) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![dataset_id, category, environment, definitions_json, identity_json, request.conflict_strategy, list_fields_json, request.description]).map_err(internal)?;
+        connection.execute("INSERT INTO datasets(id,category_path,environment,fields_json,identity_fields_json,conflict_strategy,list_fields_json,description,display_config_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![dataset_id, category, environment, definitions_json, identity_json, request.conflict_strategy, list_fields_json, request.description, serde_json::to_string(&request.display_config).map_err(internal)?]).map_err(internal)?;
         let import = if records.is_empty() { json!({"imported":0,"record_ids":[],"duplicates":[]}) } else { insert_records(connection, keys, &dataset_id, &category, environment.as_deref(), &request.fields, &request.identity_fields, &records, false)? };
         Ok(Json(json!({ "dataset_id": dataset_id, "category_path": category, "environment": environment, "description": request.description, "fields": request.fields, "identity_fields": request.identity_fields, "import": import })))
     }).await
@@ -1308,15 +1395,22 @@ async fn update_dataset(
     Json(request): Json<DatasetUpdate>,
 ) -> ApiResult<Json<Value>> {
     with_connection(&state, |db, keys| {
-        let transaction = db.unchecked_transaction().map_err(internal)?;
-        let connection: &Connection = &transaction;
-        let (old_category, old_environment, old_fields, old_identity, old_list_fields, old_description): (String, Option<String>, String, String, String, String) = connection.query_row(
-            "SELECT category_path,environment,fields_json,identity_fields_json,list_fields_json,description FROM datasets WHERE id=?1", [&dataset_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
+        let tx = db.unchecked_transaction().map_err(internal)?;
+        let result = update_dataset_in_connection(&tx, keys, &dataset_id, request)?;
+        tx.commit().map_err(internal)?;
+        Ok(Json(result))
+    }).await
+}
+
+fn update_dataset_in_connection(connection: &Connection, keys: &KeySet, dataset_id: &str, request: DatasetUpdate) -> ApiResult<Value> {
+        let (old_category, old_environment, old_fields, old_identity, old_list_fields, old_description, old_display_config): (String, Option<String>, String, String, String, String, String) = connection.query_row(
+            "SELECT category_path,environment,fields_json,identity_fields_json,list_fields_json,description,display_config_json FROM datasets WHERE id=?1", [&dataset_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))
         ).optional().map_err(internal)?.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "dataset not found".into()))?;
         let category = request.category_path.as_deref().map(normalize_category).transpose()?.unwrap_or(old_category);
         let environment = if request.clear_environment { None } else { request.environment.map(|v| if v.trim().is_empty() { None } else { Some(v.trim().to_owned()) }).unwrap_or(old_environment) };
         let old_definitions: Vec<FieldDefinition> = serde_json::from_str(&old_fields).map_err(internal)?;
+        let has_schema_update = request.fields.is_some();
         let new_definitions = if let Some(new_fields) = request.fields {
             let mut definitions = old_definitions.clone();
             if request.merge_fields {
@@ -1330,20 +1424,40 @@ async fn update_dataset(
         let identity_fields: Vec<String> = request.identity_fields.clone().unwrap_or_else(|| serde_json::from_str(&old_identity).unwrap_or_default());
         let identity = serde_json::to_string(&identity_fields).map_err(internal)?;
         let list_fields = request.list_fields.unwrap_or_else(|| {
-            let mut fields: Vec<ListFieldDefinition> = serde_json::from_str(&old_list_fields).unwrap_or_default();
-            fields.retain(|field| normalized_definitions.iter().any(|definition| definition.source_key == field.source_key && matches!(definition.zone.as_str(), "indexes" | "display")));
+            let saved: Vec<ListFieldDefinition> = serde_json::from_str(&old_list_fields).unwrap_or_default();
+            if !has_schema_update { return saved; }
+            let eligible = |field: &&FieldDefinition| matches!(field.zone.as_str(), "indexes" | "display");
+            let old_order: Vec<&str> = old_definitions.iter().filter(eligible).map(|f| f.source_key.as_str()).collect();
+            let next_order: Vec<&str> = new_definitions.iter().filter(eligible).map(|f| f.previous_source_key.as_deref().unwrap_or(&f.source_key)).collect();
+            let reordered = old_order != next_order;
+            let mut fields: Vec<ListFieldDefinition> = new_definitions.iter().filter(eligible).enumerate().map(|(index, field)| {
+                let setting = saved.iter().find(|item| item.source_key == field.source_key || field.previous_source_key.as_ref() == Some(&item.source_key));
+                ListFieldDefinition { source_key: field.source_key.clone(), display_name: field.display_name.clone(),
+                    position: if reordered { index } else { setting.map(|s| s.position).unwrap_or(saved.len() + index) },
+                    format: setting.map(|s| s.format.clone()).unwrap_or_else(default_list_format),
+                    visible: setting.map(|s| s.visible).unwrap_or(true) }
+            }).collect();
+            fields.sort_by_key(|f| f.position);
+            for (position, field) in fields.iter_mut().enumerate() { field.position = position; }
             fields
         });
         validate_schema(&normalized_definitions, &identity_fields, &list_fields)?;
+        let display_config = if let Some(config) = request.display_config { config } else {
+            let mut config: DisplayConfig = serde_json::from_str(&old_display_config).map_err(internal)?;
+            for key in &mut config.identifier_fields {
+                if let Some(field) = new_definitions.iter().find(|field| field.previous_source_key.as_deref() == Some(key.as_str())) { *key = field.source_key.clone(); }
+            }
+            config.identifier_fields.retain(|key| normalized_definitions.iter().any(|field| &field.source_key == key && matches!(field.zone.as_str(), "indexes" | "display")));
+            config
+        };
+        validate_display_config(&display_config, &normalized_definitions)?;
         let list_fields_json = serde_json::to_string(&list_fields).map_err(internal)?;
         let description = request.description.unwrap_or(old_description);
-        connection.execute("UPDATE datasets SET category_path=?2,environment=?3,fields_json=?4,identity_fields_json=?5,list_fields_json=?6,description=?7 WHERE id=?1", params![dataset_id, category, environment, fields, identity, list_fields_json, description]).map_err(internal)?;
+        connection.execute("UPDATE datasets SET category_path=?2,environment=?3,fields_json=?4,identity_fields_json=?5,list_fields_json=?6,description=?7,display_config_json=?8 WHERE id=?1", params![dataset_id, category, environment, fields, identity, list_fields_json, description, serde_json::to_string(&display_config).map_err(internal)?]).map_err(internal)?;
         connection.execute("UPDATE records SET category_path=?2,environment=?3 WHERE dataset_id=?1", params![dataset_id, category, environment]).map_err(internal)?;
         migrate_schema_records(connection, keys, &dataset_id, &old_definitions, &new_definitions, &identity_fields, &category, environment.as_deref())?;
         supplement::sync(connection, &dataset_id)?;
-        transaction.commit().map_err(internal)?;
-        Ok(Json(json!({"id":dataset_id,"category_path":category,"environment":environment,"list_fields":list_fields,"description":description})))
-    }).await
+        Ok(json!({"id":dataset_id,"category_path":category,"environment":environment,"list_fields":list_fields,"description":description,"display_config":display_config}))
 }
 
 async fn set_expired(
@@ -1368,8 +1482,8 @@ async fn set_expired(
 
 async fn list_datasets(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     with_connection(&state, |connection, _| {
-        let mut statement = connection.prepare("SELECT d.id,d.category_path,d.environment,d.fields_json,d.identity_fields_json,d.conflict_strategy,d.list_fields_json,COUNT(r.id),d.description,(SELECT fields_json FROM supplement_schemas s WHERE s.dataset_id=d.id) FROM datasets d LEFT JOIN records r ON r.dataset_id=d.id GROUP BY d.id ORDER BY d.category_path").map_err(internal)?;
-        let rows = statement.query_map([], |row| Ok(json!({ "id": row.get::<_,String>(0)?, "category_path": row.get::<_,String>(1)?, "environment": row.get::<_,Option<String>>(2)?, "fields": serde_json::from_str::<Value>(&row.get::<_,String>(3)?).unwrap_or(Value::Array(vec![])), "identity_fields": serde_json::from_str::<Value>(&row.get::<_,String>(4)?).unwrap_or(Value::Array(vec![])), "conflict_strategy": row.get::<_,String>(5)?, "list_fields": serde_json::from_str::<Value>(&row.get::<_,String>(6)?).unwrap_or(Value::Array(vec![])), "record_count": row.get::<_,i64>(7)?, "description": row.get::<_,String>(8)?, "supplement_fields": serde_json::from_str::<Value>(&row.get::<_,Option<String>>(9)?.unwrap_or_else(||"[]".into())).unwrap_or(json!([])) }))).map_err(internal)?;
+        let mut statement = connection.prepare("SELECT d.id,d.category_path,d.environment,d.fields_json,d.identity_fields_json,d.conflict_strategy,d.list_fields_json,COUNT(r.id),d.description,(SELECT fields_json FROM supplement_schemas s WHERE s.dataset_id=d.id),d.display_config_json FROM datasets d LEFT JOIN records r ON r.dataset_id=d.id GROUP BY d.id ORDER BY d.category_path").map_err(internal)?;
+        let rows = statement.query_map([], |row| Ok(json!({ "id": row.get::<_,String>(0)?, "category_path": row.get::<_,String>(1)?, "environment": row.get::<_,Option<String>>(2)?, "fields": serde_json::from_str::<Value>(&row.get::<_,String>(3)?).unwrap_or(Value::Array(vec![])), "identity_fields": serde_json::from_str::<Value>(&row.get::<_,String>(4)?).unwrap_or(Value::Array(vec![])), "conflict_strategy": row.get::<_,String>(5)?, "list_fields": serde_json::from_str::<Value>(&row.get::<_,String>(6)?).unwrap_or(Value::Array(vec![])), "record_count": row.get::<_,i64>(7)?, "description": row.get::<_,String>(8)?, "supplement_fields": serde_json::from_str::<Value>(&row.get::<_,Option<String>>(9)?.unwrap_or_else(||"[]".into())).unwrap_or(json!([])), "display_config": serde_json::from_str::<Value>(&row.get::<_,String>(10)?).unwrap_or(json!({})) }))).map_err(internal)?;
         let mut datasets = Vec::new(); for row in rows { datasets.push(row.map_err(internal)?); }
         Ok(Json(json!({ "datasets": datasets })))
     }).await
@@ -1408,14 +1522,17 @@ async fn export_dataset(
     Query(query): Query<ExportQuery>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
+    if query.content.as_deref().is_some_and(|content| content != "data") {
+        return transfer::export(state, dataset_id, query, headers).await;
+    }
     let format = query.format.as_deref().unwrap_or("json");
     if !matches!(format, "json" | "csv" | "xlsx") { return Err(bad_request("export format must be json, csv or xlsx")); }
     with_connection(&state, |connection, keys| {
         authorize_app_dataset(connection, &headers, &dataset_id, if query.include_secrets { "secrets" } else { "search" })?;
         let exists: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM datasets WHERE id=?1)", [&dataset_id], |row| row.get(0)).map_err(internal)?;
         if !exists { return Err(ApiError(StatusCode::NOT_FOUND, "dataset not found".into())); }
-        let mut statement = connection.prepare("SELECT id,indexes_json,display_json FROM records WHERE dataset_id=?1 ORDER BY id").map_err(internal)?;
-        let base_rows = statement.query_map([&dataset_id], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?))).map_err(internal)?.collect::<Result<Vec<_>, _>>().map_err(internal)?;
+        let mut statement = connection.prepare("SELECT id,indexes_json,display_json FROM records WHERE dataset_id=?1 AND (?2 OR expired=0) ORDER BY id").map_err(internal)?;
+        let base_rows = statement.query_map(params![dataset_id,query.include_expired], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?))).map_err(internal)?.collect::<Result<Vec<_>, _>>().map_err(internal)?;
         let mut records = Vec::new();
         for (id, indexes_json, display_json) in base_rows {
             let indexes: Value = serde_json::from_str(&indexes_json).unwrap_or(Value::Object(Default::default()));
@@ -1728,8 +1845,29 @@ async fn import_records(
     };
     let inputs = mapped_records(&inputs, &request.mappings)?;
     with_connection(&state, |db, keys| {
-        let transaction = db.unchecked_transaction().map_err(internal)?;
-        let connection: &Connection = &transaction;
+        let tx = db.unchecked_transaction().map_err(internal)?;
+        let response = import_records_in_connection(&tx, keys, &request, &inputs)?;
+        tx.commit().map_err(internal)?;
+        Ok(Json(response))
+    }).await
+}
+
+async fn preview_import(State(state): State<AppState>, Json(request): Json<ImportRequest>) -> ApiResult<Json<Value>> {
+    let inputs = {
+        let batches = state.batches.lock().await;
+        batches.get(&request.batch_id).filter(|(created, _)| created.elapsed() < Duration::from_secs(3600)).map(|(_, records)| records.clone())
+            .ok_or_else(|| bad_request("导入批次已过期，请重新上传"))?
+    };
+    let inputs = mapped_records(&inputs, &request.mappings)?;
+    with_connection(&state, |db, keys| {
+        let tx = db.unchecked_transaction().map_err(internal)?;
+        let result = import_records_in_connection(&tx, keys, &request, &inputs)?;
+        tx.rollback().map_err(internal)?;
+        Ok(Json(result))
+    }).await
+}
+
+fn import_records_in_connection(connection: &Connection, keys: &KeySet, request: &ImportRequest, inputs: &[Value]) -> ApiResult<Value> {
         let (category, environment, fields_json, identity_json): (String, Option<String>, String, String) = connection.query_row("SELECT category_path,environment,fields_json,identity_fields_json FROM datasets WHERE id=?1", [&request.dataset_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(internal)?.ok_or_else(|| ApiError(StatusCode::NOT_FOUND,"dataset not found".into()))?;
         let mut fields: Vec<FieldDefinition> = serde_json::from_str(&fields_json).map_err(internal)?;
         let mut identity: Vec<String> = serde_json::from_str(&identity_json).map_err(internal)?;
@@ -1745,9 +1883,15 @@ async fn import_records(
             let list_json: String = connection.query_row("SELECT list_fields_json FROM datasets WHERE id=?1", [&request.dataset_id], |row| row.get(0)).map_err(internal)?;
             let mut list: Vec<ListFieldDefinition> = serde_json::from_str(&list_json).map_err(internal)?;
             list.retain(|item| fields.iter().any(|field| field.source_key == item.source_key && matches!(field.zone.as_str(), "indexes" | "display")));
+            let raw_config:String=connection.query_row("SELECT display_config_json FROM datasets WHERE id=?1",[&request.dataset_id],|row|row.get(0)).map_err(internal)?;
+            let mut config:DisplayConfig=serde_json::from_str(&raw_config).map_err(internal)?;
+            config.identifier_fields.retain(|key|fields.iter().any(|field|&field.source_key==key && matches!(field.zone.as_str(),"indexes"|"display")));
+            validate_display_config(&config,&fields)?;
+            connection.execute("UPDATE datasets SET display_config_json=?2 WHERE id=?1",params![request.dataset_id,serde_json::to_string(&config).map_err(internal)?]).map_err(internal)?;
             connection.execute("UPDATE datasets SET fields_json=?2,identity_fields_json=?3,list_fields_json=?4 WHERE id=?1", params![request.dataset_id, serde_json::to_string(&fields).map_err(internal)?, serde_json::to_string(&request.evolved_identity_fields).map_err(internal)?, serde_json::to_string(&list).map_err(internal)?]).map_err(internal)?;
             migrate_schema_records(connection, keys, &request.dataset_id, &old_fields, &fields, &identity, &category, environment.as_deref())?;
         }
+        if request.delete_missing && identity.is_empty() { return Err(bad_request("删除缺失记录需要逻辑唯一 KEY")); }
         let result = insert_records(connection, keys, &request.dataset_id, &category, environment.as_deref(), &fields, &identity, &inputs, request.skip_existing)?;
         let deleted_missing = if request.delete_missing && !identity.is_empty() {
             let hashes = inputs.iter().filter_map(|r| identity_hash(&keys.identity, &request.dataset_id, &identity, r)).collect::<std::collections::HashSet<_>>();
@@ -1764,9 +1908,7 @@ async fn import_records(
         supplement::sync(connection, &request.dataset_id)?;
         let mut response = result;
         response["deleted_missing"] = json!(deleted_missing);
-        transaction.commit().map_err(internal)?;
-        Ok(Json(response))
-    }).await
+        Ok(response)
 }
 
 async fn search_records(
@@ -1777,36 +1919,74 @@ async fn search_records(
     let limit = query.limit.clamp(1, 100);
     let offset = query.page.saturating_sub(1).saturating_mul(limit);
     let clauses = parse_search_clauses(&query.q)?;
+    let categories = match query.categories.as_deref() {
+        Some(raw) => {
+            let paths: Vec<String> = serde_json::from_str(raw).map_err(|_| bad_request("categories 必须是目录路径的 JSON 数组"))?;
+            if paths.len() > 128 { return Err(bad_request("最多选择 128 个目录")); }
+            paths.iter().map(|path| normalize_category(path)).collect::<ApiResult<Vec<_>>>()?
+        }
+        None => Vec::new(),
+    };
     with_connection(&state, |connection, keys| {
         let dataset_scope = authorized_dataset_scope(connection, &headers, "search")?;
         let supplements = supplement::searchable(connection, keys, dataset_scope.as_deref(), query.dataset_id.as_deref())?;
-        let mut datasets = connection.prepare("SELECT id,fields_json FROM datasets").map_err(internal)?;
-        let definitions = datasets.query_map([], |row| Ok((row.get::<_, String>(0)?, serde_json::from_str::<Vec<FieldDefinition>>(&row.get::<_, String>(1)?).unwrap_or_default()))).map_err(internal)?.collect::<Result<std::collections::HashMap<_, _>, _>>().map_err(internal)?;
-        let mut sql = String::from("SELECT id,dataset_id,category_path,environment,indexes_json,display_json,updated_at,duplicate_of,(SELECT COUNT(*) FROM protected_fields p WHERE p.record_id=r.id AND p.zone='secrets'),(SELECT json_group_array(source_key) FROM protected_fields p WHERE p.record_id=r.id AND p.zone='secrets'),expired FROM records r WHERE 1=1");
+        let mut datasets = connection.prepare("SELECT id,fields_json,identity_fields_json,display_config_json FROM datasets").map_err(internal)?;
+        let definitions = datasets.query_map([], |row| Ok((row.get::<_, String>(0)?, (
+            serde_json::from_str::<Vec<FieldDefinition>>(&row.get::<_, String>(1)?).unwrap_or_default(),
+            serde_json::from_str::<Vec<String>>(&row.get::<_, String>(2)?).unwrap_or_default(),
+            serde_json::from_str::<DisplayConfig>(&row.get::<_, String>(3)?).unwrap_or_default(),
+        )))).map_err(internal)?.collect::<Result<std::collections::HashMap<_, _>, _>>().map_err(internal)?;
+        let plan = search_rank::SearchPlan::new(&clauses);
+        let mut top = search_rank::TopResults::new(offset, limit);
+        let mut sql = String::from("SELECT id,dataset_id,category_path,environment,indexes_json,display_json,updated_at,duplicate_of,expired FROM records r WHERE 1=1");
         let mut values: Vec<rusqlite::types::Value> = Vec::new();
         if let Some(dataset_id) = query.dataset_id.as_ref() { sql.push_str(" AND r.dataset_id=?"); values.push(dataset_id.clone().into()); }
         if !query.include_expired { sql.push_str(" AND expired=0"); }
         if let Some(category) = query.category.as_ref() { sql.push_str(" AND (category_path=? OR category_path LIKE ? ESCAPE '\\')"); values.push(category.clone().into()); values.push(format!("{}/%", category.replace('\\',"\\\\").replace('%',"\\%").replace('_',"\\_")).into()); }
+        if !categories.is_empty() {
+            sql.push_str(" AND (");
+            for (index, category) in categories.iter().enumerate() {
+                if index > 0 { sql.push_str(" OR "); }
+                sql.push_str("(category_path=? OR category_path LIKE ? ESCAPE '\\')");
+                values.push(category.clone().into());
+                values.push(format!("{}/%", category.replace('\\',"\\\\").replace('%',"\\%").replace('_',"\\_")).into());
+            }
+            sql.push(')');
+        }
         if let Some(environment) = query.environment.as_ref() { sql.push_str(" AND environment=?"); values.push(environment.clone().into()); }
         let mut statement=connection.prepare(&sql).map_err(internal)?;
-        let rows=statement.query_map(rusqlite::params_from_iter(values), |row| {
-            let category = row.get::<_,String>(2)?;
-            let environment = row.get::<_,Option<String>>(3)?;
-            let indexes: Value=serde_json::from_str(&row.get::<_,String>(4)?).unwrap_or(Value::Null);
-            let display: Value=serde_json::from_str(&row.get::<_,String>(5)?).unwrap_or(Value::Null);
-            let secret_fields: Value=serde_json::from_str(&row.get::<_,String>(9)?).unwrap_or(Value::Array(vec![]));
-            let dataset_id = row.get::<_,String>(1)?;
-            let (display, _) = split_display_fields(&display, definitions.get(&dataset_id).map(Vec::as_slice).unwrap_or_default());
-            if dataset_scope.as_ref().is_some_and(|allowed| !allowed.iter().any(|candidate| candidate == &dataset_id)) { return Ok(None); }
-            let id=row.get::<_,String>(0)?;
-            let extension=supplements.get(&id).cloned().unwrap_or(Value::Null);
-            let (matches,matched)=combined_search(&clauses,&category,environment.as_deref(),&dataset_id,&indexes,&display,&extension);
-            if !matches {return Ok(None);}
-            Ok(Some(json!({"id":row.get::<_,String>(0)?,"dataset_id":dataset_id,"category":category,"environment":environment,"indexes":indexes,"display":display,"updated":row.get::<_,String>(6)?,"duplicate_of":row.get::<_,Option<String>>(7)?,"secret_count":row.get::<_,i64>(8)?,"secret_fields":secret_fields,"matched_fields":matched,"supplement":extension,"expired":row.get::<_,bool>(10)?})))
-        }).map_err(internal)?;
-        let all_records: Vec<Value> = rows.filter_map(|row| row.map_err(internal).transpose()).collect::<ApiResult<Vec<_>>>()?;
-        let total = all_records.len();
-        let records = all_records.into_iter().skip(offset).take(limit).collect::<Vec<_>>();
+        let mut rows = statement.query(rusqlite::params_from_iter(values)).map_err(internal)?;
+        let empty_supplement = Value::Null;
+        while let Some(row) = rows.next().map_err(internal)? {
+            let dataset_id = row.get::<_,String>(1).map_err(internal)?;
+            if dataset_scope.as_ref().is_some_and(|allowed| !allowed.iter().any(|candidate| candidate == &dataset_id)) { continue; }
+            let category = row.get::<_,String>(2).map_err(internal)?;
+            let environment = row.get::<_,Option<String>>(3).map_err(internal)?;
+            let indexes: Value=serde_json::from_str(&row.get::<_,String>(4).map_err(internal)?).unwrap_or(Value::Null);
+            let display: Value=serde_json::from_str(&row.get::<_,String>(5).map_err(internal)?).unwrap_or(Value::Null);
+            let (display, _) = split_display_fields(&display, definitions.get(&dataset_id).map(|schema| schema.0.as_slice()).unwrap_or_default());
+            let id = row.get::<_,String>(0).map_err(internal)?;
+            let extension = supplements.get(&id).unwrap_or(&empty_supplement);
+            let view = search_rank::RecordView { category: &category, environment: environment.as_deref(), dataset_id: &dataset_id,
+                indexes: &indexes, display: &display, supplement: extension };
+            let Some(mut evaluation) = plan.evaluate(&view, definitions.get(&dataset_id)) else { continue; };
+            let matched = std::mem::take(&mut evaluation.matched_fields);
+            let updated = row.get::<_,String>(6).map_err(internal)?;
+            let duplicate = row.get::<_,Option<String>>(7).map_err(internal)?;
+            let expired = row.get::<_,bool>(8).map_err(internal)?;
+            top.offer(evaluation.rank(expired, updated.clone(), id.clone()), || json!({"id":id,"dataset_id":dataset_id,
+                "category":category,"environment":environment,"indexes":indexes,"display":display,"updated":updated,
+                "duplicate_of":duplicate,"matched_fields":matched,"supplement":extension,"expired":expired}));
+        }
+        let total = top.total;
+        let mut records = top.finish(offset);
+        let mut secret_metadata = connection.prepare("SELECT COUNT(*),json_group_array(source_key) FROM protected_fields WHERE record_id=?1 AND zone='secrets'").map_err(internal)?;
+        for record in &mut records {
+            let (count, fields): (i64, String) = secret_metadata.query_row([record["id"].as_str().unwrap_or_default()], |row| Ok((row.get(0)?, row.get(1)?))).map_err(internal)?;
+            record["secret_count"] = json!(count);
+            record["secret_fields"] = serde_json::from_str(&fields).unwrap_or(Value::Array(vec![]));
+            record["match_info"] = match_highlights(&clauses,record);
+        }
         Ok(Json(json!({"records":records,"page":query.page.max(1),"limit":limit,"total":total})))
     }).await
 }
@@ -1865,6 +2045,133 @@ async fn reveal_secret(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn multiple_directory_search_uses_union_preserves_filters_and_avoids_duplicates() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("samples/.build");
+        fs::create_dir_all(&root).unwrap();
+        let directory = root.join(format!("directory-search-{}", Uuid::new_v4()));
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+        let _cleanup = Cleanup(directory.clone());
+        private_dir(&directory).unwrap();
+        let state = rotation::state_for(directory);
+        let (keys, _) = initialize_vault(&state, "directory-test-password-123").unwrap();
+        activate(&state, keys, true).await;
+        for (category, environment, value) in [("A/one", "prod", "first"), ("A/two", "test", "second"), ("B/one", "prod", "third")] {
+            let request = serde_json::from_value(json!({"category_path":category,"environment":environment,"fields":[{"source_key":"value","zone":"indexes"}],"sample_data":[{"value":value}]})).unwrap();
+            create_dataset(State(state.clone()), Json(request)).await.unwrap();
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert("x-vault-owner", HeaderValue::from_static("true"));
+        for (paths, environment, q, count) in [
+            (json!(["A", "B"]), None, "", 3),
+            (json!(["A", "A/one"]), None, "", 2),
+            (json!(["A", "B"]), Some("prod"), "", 2),
+            (json!(["A", "B"]), None, "third", 1),
+            (json!(["A%"]), None, "", 0),
+        ] {
+            let query = serde_json::from_value(json!({"categories":paths.to_string(),"environment":environment,"q":q})).unwrap();
+            let result = search_records(State(state.clone()), Query(query), headers.clone()).await.unwrap().0;
+            assert_eq!(result["total"], count);
+        }
+        let query = serde_json::from_value(json!({"categories":"not-json"})).unwrap();
+        assert_eq!(search_records(State(state), Query(query), headers).await.unwrap_err().0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn search_relevance_is_applied_before_pagination_and_keeps_filters_and_highlights() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("samples/.build");
+        fs::create_dir_all(&root).unwrap();
+        let directory = root.join(format!("search-relevance-{}", Uuid::new_v4()));
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+        let _cleanup = Cleanup(directory.clone());
+        private_dir(&directory).unwrap();
+        let state = rotation::state_for(directory);
+        let (keys, _) = initialize_vault(&state, "search-relevance-test-123").unwrap();
+        activate(&state, keys, true).await;
+        let request = serde_json::from_value(json!({"category_path":"排序/产品","environment":"prod",
+            "identity_fields":["key"],"display_config":{"identifier_fields":["title"]},
+            "fields":[{"source_key":"key","zone":"indexes"},{"source_key":"code","zone":"indexes"},{"source_key":"title","zone":"display"},{"source_key":"notes","zone":"normal"}],
+            "sample_data":[
+                {"key":"one","code":"bobcatfish","notes":"cat"},
+                {"key":"two","code":"catnap"},
+                {"key":"three","code":"cat-food"},
+                {"key":"four","title":"cat"},
+                {"key":"five","code":"cat"},
+                {"key":"cat","code":"catnap"}
+            ]})).unwrap();
+        let created = create_dataset(State(state.clone()), Json(request)).await.unwrap().0;
+        let dataset = created["dataset_id"].as_str().unwrap();
+        // Make weak matches newer so recency cannot conceal broken relevance.
+        with_connection(&state, |db, _| {
+            db.execute("UPDATE records SET updated_at=CASE WHEN json_extract(indexes_json,'$.key') IN ('cat','four','five') THEN '2020-01-01 00:00:00' ELSE '2030-01-01 00:00:00' END WHERE dataset_id=?1", [dataset]).unwrap();
+            Ok(())
+        }).await.unwrap();
+        let mut headers = HeaderMap::new(); headers.insert("x-vault-owner", HeaderValue::from_static("true"));
+        let mut seen = Vec::new();
+        for page in 1..=3 {
+            let query = serde_json::from_value(json!({"q":"category:=排序 env:=prod cat","dataset_id":dataset,"page":page,"limit":2})).unwrap();
+            let result = search_records(State(state.clone()), Query(query), headers.clone()).await.unwrap().0;
+            assert_eq!(result["total"], 6);
+            for record in result["records"].as_array().unwrap() {
+                seen.push(record["indexes"]["key"].as_str().unwrap().to_owned());
+                assert!(!record["matched_fields"].as_array().unwrap().contains(&json!("notes")));
+                assert!(record["match_info"].is_object());
+            }
+            if page == 1 { assert_eq!(result["records"][0]["matched_fields"][0], "key"); }
+        }
+        assert_eq!(seen, vec!["cat", "four", "five", "three", "two", "one"]);
+        let query = serde_json::from_value(json!({"q":"code:=cat","dataset_id":dataset})).unwrap();
+        let result = search_records(State(state.clone()), Query(query), headers.clone()).await.unwrap().0;
+        assert_eq!(result["total"], 1);
+        assert_eq!(result["records"][0]["indexes"]["key"], "five");
+        let query = serde_json::from_value(json!({"q":"cat","environment":"test"})).unwrap();
+        assert_eq!(search_records(State(state), Query(query), headers).await.unwrap().0["total"], 0);
+    }
+
+    #[test]
+    fn schema_reordering_updates_default_list_order_without_losing_display_settings() {
+        let db = Connection::open_in_memory().unwrap();
+        initialize_schema(&db).unwrap();
+        let keys = random_keys();
+        let fields = json!([
+            {"source_key":"a","display_name":"A","zone":"display","position":0},
+            {"source_key":"b","display_name":"B","zone":"display","position":1},
+            {"source_key":"c","display_name":"C","zone":"indexes","position":2}
+        ]);
+        let list = json!([
+            {"source_key":"c","display_name":"C","position":0,"format":"single_line","visible":true},
+            {"source_key":"a","display_name":"A","position":1,"format":"multiline","visible":true},
+            {"source_key":"b","display_name":"B","position":2,"format":"json","visible":false}
+        ]);
+        db.execute("INSERT INTO datasets(id,category_path,fields_json,identity_fields_json,conflict_strategy,list_fields_json) VALUES('order-test','验证/顺序',?1,'[]','allow_mark',?2)", params![fields.to_string(),list.to_string()]).unwrap();
+        let next = json!([
+            {"source_key":"b","display_name":"新 B","zone":"display","position":0},
+            {"source_key":"a","display_name":"A","zone":"display","position":1},
+            {"source_key":"c","display_name":"C","zone":"indexes","position":2}
+        ]);
+        let result = update_dataset_in_connection(&db, &keys, "order-test", serde_json::from_value(json!({"fields":next})).unwrap()).unwrap();
+        assert_eq!(result["list_fields"], json!([
+            {"source_key":"b","display_name":"新 B","position":0,"format":"json","visible":false},
+            {"source_key":"a","display_name":"A","position":1,"format":"multiline","visible":true},
+            {"source_key":"c","display_name":"C","position":2,"format":"single_line","visible":true}
+        ]));
+        update_dataset_in_connection(&db, &keys, "order-test", serde_json::from_value(json!({"list_fields":list})).unwrap()).unwrap();
+        let result = update_dataset_in_connection(&db, &keys, "order-test", serde_json::from_value(json!({"fields":next})).unwrap()).unwrap();
+        let actual: Vec<&str> = result["list_fields"].as_array().unwrap().iter().map(|f| f["source_key"].as_str().unwrap()).collect();
+        assert_eq!(actual, vec!["c", "a", "b"]); // Explicit list sorting stays independent until the schema is reordered again.
+    }
+
+    #[test]
+    fn highlights_use_server_regex_unicode_offsets_and_distinct_supplement_namespaces() {
+        let clauses=parse_search_clauses("value:~[α-ω]+ supplement.value:^abc").unwrap();
+        let record=json!({"category":"demo","environment":null,"dataset_id":"ds","indexes":{"value":"😀αβ tail"},"display":{},"supplement":{"indexes":{"value":"abcdef"},"display":{}},"matched_fields":["value","supplement.value"]});
+        let info=match_highlights(&clauses,&record);
+        assert_eq!(info["value"]["ranges"],json!([[2,4]]));
+        assert_eq!(info["supplement.value"]["ranges"],json!([[0,3]]));
+    }
 
     #[tokio::test]
     async fn ordinary_and_ignored_fields_are_enforced_in_storage_search_detail_export_and_migration() {

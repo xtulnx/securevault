@@ -247,4 +247,3 @@ $('#manual-record-cancel').addEventListener('click', closeManualRecord);
 $('#manual-record-save').addEventListener('click', saveManualRecord);
 $('#manual-parent-find').addEventListener('click', searchManualParents);
 $('#manual-parent-options').addEventListener('change', (event) => { if (event.target.value) $('#manual-parent-id').value = event.target.value; });
-document.addEventListener('keydown', (event) => { if (event.key === 'Escape') { closeManualRecord(); closeSupplement(); } });

@@ -17,6 +17,7 @@ const TABLES: &[(&str, &[&str])] = &[
             "list_fields_json",
             "created_at",
             "description",
+            "display_config_json",
         ],
     ),
     (
@@ -282,10 +283,11 @@ fn write_logical(connection: &Connection, keys: &KeySet, writer: &mut impl Write
     )?;
     let mut counts = serde_json::Map::new();
     let has_description: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('datasets') WHERE name='description')", [], |row| row.get(0)).map_err(internal)?;
+    let has_display_config: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('datasets') WHERE name='display_config_json')", [], |row| row.get(0)).map_err(internal)?;
     for &(table, columns) in TABLES {
         if table.starts_with("supplement_") && !connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)", [table], |r| r.get::<_,bool>(0)).map_err(internal)? { continue; }
         let selected = columns.iter().map(|column| {
-            if table == "datasets" && *column == "description" && !has_description { "'' AS description" } else { *column }
+            if table == "datasets" && *column == "description" && !has_description { "'' AS description" } else if table == "datasets" && *column == "display_config_json" && !has_display_config { "'{}' AS display_config_json" } else { *column }
         }).collect::<Vec<_>>().join(",");
         let mut statement = connection
             .prepare(&format!(
@@ -300,6 +302,7 @@ fn write_logical(connection: &Connection, keys: &KeySet, writer: &mut impl Write
             let mut data = serde_json::Map::new();
             for (i, column) in columns.iter().enumerate() {
                 if table == "datasets" && *column == "description" && row.get::<_, String>(i).map_err(internal)?.is_empty() { continue; }
+                if table == "datasets" && *column == "display_config_json" && row.get::<_, String>(i).map_err(internal)? == "{}" { continue; }
                 let value = match row.get_ref(i).map_err(internal)? {
                     rusqlite::types::ValueRef::Null => Value::Null,
                     rusqlite::types::ValueRef::Integer(n) => json!(n),
@@ -541,9 +544,11 @@ fn insert_row(
     data: &Value,
 ) -> ApiResult<()> {
     // Description is an optional v1 extension; older backups default to empty.
-    let normalized = if table == "datasets" && data.get("description").is_none() {
+    let normalized = if table == "datasets" {
         let mut value = data.clone();
-        value.as_object_mut().ok_or_else(|| bad_request("备份的 data 字段必须是 JSON 对象"))?.insert("description".into(), json!(""));
+        value.as_object_mut().ok_or_else(|| bad_request("备份的 data 字段必须是 JSON 对象"))?;
+        value.as_object_mut().unwrap().entry("description").or_insert(json!(""));
+        value.as_object_mut().unwrap().entry("display_config").or_insert(json!({}));
         Some(value)
     } else { None };
     let data = normalized.as_ref().unwrap_or(data);
@@ -571,6 +576,8 @@ fn insert_row(
         let list: Vec<ListFieldDefinition> = serde_json::from_value(data["list_fields"].clone())
             .map_err(|_| bad_request("列表展示字段定义无效"))?;
         validate_schema(&fields, &identity, &list)?;
+        let config: DisplayConfig = serde_json::from_value(data["display_config"].clone()).map_err(|_| bad_request("展示配置无效"))?;
+        validate_display_config(&config, &fields)?;
         if !matches!(text("conflict_strategy")?, "allow_mark") {
             return Err(bad_request("重复记录处理策略无效"));
         }
@@ -889,6 +896,8 @@ mod tests {
 
         let description = "## 查询说明\n\n```sql\nSELECT * FROM demo WHERE id < 10;\n```\n";
         db.execute("UPDATE datasets SET description=?1", [description]).unwrap();
+        let display_config = r#"{"identifier_fields":["name"],"density":"full"}"#;
+        db.execute("UPDATE datasets SET display_config_json=?1", [display_config]).unwrap();
         output.clear();
         write_logical(&db, &keys, &mut *output).unwrap();
         let mut restored = Connection::open_in_memory().unwrap();
@@ -899,9 +908,12 @@ mod tests {
         tx.commit().unwrap();
         let actual: String = restored.query_row("SELECT description FROM datasets", [], |r| r.get(0)).unwrap();
         assert_eq!(actual, description);
+        let actual: String = restored.query_row("SELECT display_config_json FROM datasets", [], |r| r.get(0)).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&actual).unwrap(), serde_json::from_str::<Value>(display_config).unwrap());
 
         // An older vault can be backed up directly before its first UI unlock.
         db.execute("ALTER TABLE datasets DROP COLUMN description", []).unwrap();
+        db.execute("UPDATE datasets SET display_config_json='{}'", []).unwrap();
         output.clear();
         write_logical(&db, &keys, &mut *output).unwrap();
         let actual: Vec<Value> = std::str::from_utf8(&output).unwrap().lines().skip(1).map(|l| serde_json::from_str(l).unwrap()).collect();
