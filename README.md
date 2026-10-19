@@ -117,7 +117,7 @@ python3 samples/scripts/api_demo.py  # 验证应用检索范围与解密权限
 
 ## 构建与运行
 
-需要 Rust stable（支持 edition 2024）、C/C++ 编译工具及 Perl；SQLCipher 与 OpenSSL 从源码构建。使用 `make` 命令需要 Make，打包还需要 Python 3。Windows 使用 MSVC 工具链、Strawberry Perl 和 NASM，并在 Visual Studio 开发者终端运行 Cargo。
+需要 Rust stable（支持 edition 2024）、C/C++ 编译工具及 Perl；SQLCipher 与 OpenSSL 从源码构建。使用 `make` 命令需要 Make，打包还需要 Python 3。当前发布支持下表中的 Linux 和 macOS 平台。
 
 ```sh
 make             # 编译 release 二进制
@@ -126,24 +126,15 @@ make test        # 运行测试
 make test-web    # 前端回归测试（首次运行前执行 npm ci）
 make run         # 从源码运行
 make run ARGS='--port 8080'
-make package     # 生成 dist/securevault-<版本>-<平台>.tar.gz（Windows 为 .zip）
+make package     # 生成 dist/securevault-<版本>-<平台>.tar.gz
 make clean       # 清理构建产物和 dist
 ```
 
-默认构建本机平台，可通过 `make package TARGET=x86_64-unknown-linux-gnu` 指定下表中的 Rust target（须自行安装对应工具链与链接器）。Makefile 使用已提交的 `server/Cargo.lock` 固定依赖版本。Windows 可直接执行以下命令，无需安装 Make：
-
-```powershell
-$env:RUSTFLAGS = '-C target-feature=+crt-static'
-cargo test --locked --manifest-path server/Cargo.toml --target x86_64-pc-windows-msvc
-cargo build --locked --release --manifest-path server/Cargo.toml --target x86_64-pc-windows-msvc
-python scripts/release.py package --target x86_64-pc-windows-msvc
-```
+默认构建本机平台，可通过 `make package TARGET=x86_64-unknown-linux-gnu` 指定下表中的 Rust target（须自行安装对应工具链与链接器）。Makefile 使用已提交的 `server/Cargo.lock` 固定依赖版本。
 
 发布包仅包含 `securevault` 单个二进制，HTML、CSS、JavaScript 及其他 `web/` 资源在构建时自动嵌入，无需额外分发前端目录。解压后执行 `./securevault`，访问 `http://127.0.0.1:4173`，默认将数据写入二进制同目录的 `data/`。`make run` / debug 构建仍直接读取项目的 `web/`，便于修改前端后刷新调试；release 构建始终使用嵌入资源，更新前端后需要重新构建并替换二进制。构建脚本会监测 `web/` 的文件变化及新增、删除，自动重新生成嵌入资源。可用 `-d, --data-dir PATH`、`-p, --port PORT`、`-a, --addr HOST:PORT` 覆盖默认设置，或使用 `SECUREVAULT_DATA_DIR`、`SECUREVAULT_ADDR` 环境变量。
 
-Windows 压缩包内为 `securevault.exe`，在 PowerShell 中执行 `.\securevault.exe`。Windows 的备份、恢复及离线密钥轮换使用 `-s / --passwords-stdin`，从标准输入提供 UTF-8 密码 JSON；字段格式见各命令的 `--help`。避免将真实密码直接写入命令历史或脚本。Windows 会同步文件内容，目录同步目前仅在 Unix 平台执行。
-
-Windows CI 在 MSVC 环境中使用 PowerShell 执行 Cargo，避免 Git Bash 的 `link.exe` 覆盖 MSVC 链接器；复用 runner 自带的 Strawberry Perl，并通过 `ilammy/setup-nasm@v1` 安装固定版本 NASM，不依赖 Chocolatey 软件源。构建依据见 [Rust 静态运行库说明](https://doc.rust-lang.org/reference/linkage.html#static-and-dynamic-c-runtimes)、[OpenSSL Windows 汇编构建说明](https://github.com/alexcrichton/openssl-src-rs#windows-msvc-assembly) 和 [NASM 安装 Action](https://github.com/ilammy/setup-nasm)。
+Windows 连续三次构建未通过，已停止自动构建和打包，不提供 Windows 发布包。源码中的适配保留，但尚未通过发布验证。后续研究可参考 [Rust MSVC 平台要求](https://doc.rust-lang.org/stable/rustc/platform-support/windows-msvc.html)、[Rust 静态运行库说明](https://doc.rust-lang.org/reference/linkage.html#static-and-dynamic-c-runtimes)、[OpenSSL Windows 汇编构建说明](https://github.com/alexcrichton/openssl-src-rs#windows-msvc-assembly) 和 [NASM 安装 Action](https://github.com/ilammy/setup-nasm)。
 
 CLI 支持长短参数名称，长名称保持兼容：
 
@@ -197,11 +188,10 @@ git push origin v0.1.0
 | Linux ARM64 | `aarch64-unknown-linux-gnu` | `ubuntu-24.04-arm` | `.tar.gz` |
 | macOS Apple Silicon | `aarch64-apple-darwin` | `macos-15` | `.tar.gz` |
 | macOS Intel | `x86_64-apple-darwin` | `macos-15-intel` | `.tar.gz` |
-| Windows x86_64 | `x86_64-pc-windows-msvc` | `windows-2022` | `.zip` |
 
 runner 标签见 [GitHub 官方说明](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)。
 
-五个平台全部成功且附件齐全后才创建 GitHub Release，附带自动生成的版本说明、五个压缩包和覆盖全部压缩包的 `SHA256SUMS`。Linux 包使用 glibc，运行环境需兼容 Ubuntu 24.04 的系统库。Windows 包静态链接 MSVC 运行时及源码构建的 OpenSSL、SQLCipher。
+四个平台全部成功且附件齐全后才创建 GitHub Release，附带自动生成的版本说明、四个压缩包和覆盖全部压缩包的 `SHA256SUMS`。校验脚本会拒绝缺失平台或额外压缩包，Windows ZIP 不会进入发布。Linux 包使用 glibc，运行环境需兼容 Ubuntu 24.04 的系统库。
 
 含 `-` 的版本标签（如 `v0.2.0-rc.1`）标记为预发布；重跑工作流会更新已有 Release 的附件。也可在 Actions 页面手动运行 Release 工作流，验证全部平台并下载构建附件；手动运行不会创建或修改 GitHub Release。无需额外 Token，发布任务使用仓库的 `GITHUB_TOKEN`。
 

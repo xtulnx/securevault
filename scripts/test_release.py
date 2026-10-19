@@ -52,13 +52,13 @@ class ReleaseTests(unittest.TestCase):
             release.package("0.1.0", release.TARGETS[0], self.target, self.dist)
         self.assertFalse(self.dist.exists())
 
-    def test_checksums_require_every_platform_and_cover_zip_and_tar(self):
+    def test_checksums_require_all_release_platforms_and_reject_extra_archives(self):
         for target in release.TARGETS:
             self.build_fixture(target)
             release.package("0.1.0", target, self.target, self.dist)
         checksum = release.checksums("0.1.0", self.dist)
         lines = checksum.read_text().splitlines()
-        self.assertEqual(len(lines), 5)
+        self.assertEqual(len(lines), 4)
         for line in lines:
             digest, name = line.split("  ")
             self.assertEqual(digest, hashlib.sha256((self.dist / name).read_bytes()).hexdigest())
@@ -66,8 +66,9 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unexpected.zip"):
             release.checksums("0.1.0", self.dist)
         (self.dist / "unexpected.zip").unlink()
-        next(self.dist.glob("*.zip")).unlink()
-        with self.assertRaisesRegex(ValueError, "windows-msvc.zip"):
+        missing = release.archive_name("0.1.0", release.TARGETS[0])
+        (self.dist / missing).unlink()
+        with self.assertRaisesRegex(ValueError, "x86_64-unknown-linux-gnu"):
             release.checksums("0.1.0", self.dist)
 
     def test_tag_must_match_the_manifest_including_prerelease(self):

@@ -44,10 +44,6 @@ jobs:
 
   build:
     needs: prepare
-    defaults:
-      run:
-        # Git Bash prepends /usr/bin, whose link.exe shadows the MSVC linker.
-        shell: ${{ matrix.runner == 'windows-2022' && 'pwsh' || 'bash' }}
     strategy:
       fail-fast: false
       matrix:
@@ -60,39 +56,14 @@ jobs:
             target: aarch64-apple-darwin
           - runner: macos-15-intel
             target: x86_64-apple-darwin
-          - runner: windows-2022
-            target: x86_64-pc-windows-msvc
-            rustflags: -C target-feature=+crt-static
     runs-on: ${{ matrix.runner }}
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/server/target
-      RUSTFLAGS: ${{ matrix.rustflags || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Set up MSVC
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-      - name: Install NASM for Windows OpenSSL
-        if: runner.os == 'Windows'
-        uses: ilammy/setup-nasm@v1
-        with:
-          version: '2.16.01'
-          from-source: false
-      - name: Configure native Windows Perl
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $perlDirectory = 'C:\Strawberry\perl\bin'
-          if (!(Test-Path "$perlDirectory\perl.exe")) {
-            throw 'Native Strawberry Perl is required by the vendored OpenSSL build.'
-          }
-          $perlDirectory >> $env:GITHUB_PATH
-          & "$perlDirectory\perl.exe" -V:osname
       - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal
@@ -103,10 +74,8 @@ jobs:
       - name: Build release
         run: cargo build --locked --release --manifest-path server/Cargo.toml --target "${{ matrix.target }}"
       - name: Smoke test release binary
-        shell: bash
         run: |
           binary="server/target/${{ matrix.target }}/release/securevault"
-          if [[ "$RUNNER_OS" == Windows ]]; then binary="$binary.exe"; fi
           "$binary" --help
           python scripts/smoke_release.py --binary "$binary"
       - name: Package
@@ -114,9 +83,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: securevault-${{ matrix.target }}
-          path: |
-            dist/*.tar.gz
-            dist/*.zip
+          path: dist/*.tar.gz
           if-no-files-found: error
 
   release:
@@ -135,7 +102,7 @@ jobs:
           pattern: securevault-*
           merge-multiple: true
           path: dist
-      - name: Verify all five platform assets and generate checksums
+      - name: Verify all four platform assets and generate checksums
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: python scripts/release.py checksums --version "$RELEASE_VERSION"
@@ -146,7 +113,7 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           cd dist
-          assets=(*.tar.gz *.zip SHA256SUMS)
+          assets=(*.tar.gz SHA256SUMS)
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
           else
