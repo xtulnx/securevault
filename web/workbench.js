@@ -889,8 +889,11 @@ async function confirmImport() {
   finally { state.importBusy = false; $('#confirm-import').disabled = false; }
 }
 
-function showAppKey(value) {
+function showAppKey(value, app = null) {
   if (!state.unlocked) return;
+  $('#app-key-context').textContent = app ? app.name : '';
+  $('#app-key-id').textContent = app?.id || '';
+  $('#app-key-identity').hidden = !app?.id;
   $('#app-key-value').value = value; openDialog('app-key-modal');
 }
 
@@ -898,6 +901,9 @@ function showAppKey(value) {
 const overlayFrames = new Map();
 let overlayOrder = [];
 function modalElement() {
+  // Native dialogs restore focus to their opener, including a dialog underneath.
+  const focusedDialog = document.activeElement?.closest('dialog[open]');
+  if (focusedDialog) return focusedDialog;
   const dialogs = [...document.querySelectorAll('dialog[open]')];
   if (dialogs.length) return dialogs.at(-1);
   return overlayOrder.filter(id => !document.getElementById(id).hidden && !document.getElementById(id).classList.contains('docked')).map(id => document.getElementById(id)).at(-1);
@@ -924,6 +930,7 @@ function closeTopOverlay() {
   if (!top) { $('.app-navigation').classList.remove('directory-open'); return; }
   if (top.id === 'description-edit-modal') { closeDescription(); return; }
   if (top.id === 'app-scope-modal') { closeAppScope(); return; }
+  if (top.id === 'app-details-modal') { closeAppDetails(); return; }
   if (top.tagName === 'DIALOG') { top.close(); return; }
   const close = { 'manual-record-modal': closeManualRecord, 'supplement-modal': closeSupplement, 'record-detail-modal': closeRecordDetail, 'secrets-modal': () => { $('#secrets-modal').hidden = true; $('#secret-fields-list').replaceChildren(); state.secretModalRecordId = null; state.reveal = null; }, 'reveal-modal': () => { $('#reveal-modal').hidden = true; state.pendingReveal = null; } };
   close[top.id]?.();
@@ -932,7 +939,9 @@ function closeTopOverlay() {
 sealVault = async function(...args) {
   state.searchRequest++; state.workspaceRequest++; state.editorDirty = false; state.importPreview = null; state.transferPackage = null; state.transferRaw = null;
   state.descriptionTarget = null; state.exportDatasetId = null; state.categories = []; state.directoryDraft = [];
-  state.scopeEditing = null; state.apps = [];
+  state.scopeEditing = null; state.appViewing = null; state.appDetailBusy = null; state.apps = [];
+  $('#app-details-content').replaceChildren(); $('#scope-name').value = '';
+  $('#app-key-context').textContent = ''; $('#app-key-id').textContent = '';
   $('#app-scope-modal').close(); $('#scope-datasets').replaceChildren(); $('#app-manager-list').replaceChildren();
   for (const dialog of $$('dialog[open]')) dialog.close();
   $('#description-draft').value = ''; $('#description-draft-preview').replaceChildren(); $('#app-key-value').value = '';
@@ -984,7 +993,7 @@ $('#transfer-target').addEventListener('change', event => {
   $('#transfer-environment').value = dataset?.environment || (dataset ? '' : state.transferPackage?.schema.environment || '');
 });
 for (const id of ['close-app-key', 'finish-app-key']) $(`#${id}`).addEventListener('click', () => $('#app-key-modal').close());
-$('#app-key-modal').addEventListener('close', () => { $('#app-key-value').value = ''; });
+$('#app-key-modal').addEventListener('close', () => { $('#app-key-value').value = ''; $('#app-key-context').textContent = ''; $('#app-key-id').textContent = ''; });
 $('#copy-app-key').addEventListener('click', async () => { try { await navigator.clipboard.writeText($('#app-key-value').value); showToast('应用密钥已复制', 'success'); } catch { showToast('剪贴板不可用', 'error'); } });
 $('#records-grid').addEventListener('keydown', event => {
   if (!['ArrowUp', 'ArrowDown', 'Enter'].includes(event.key) || event.target.closest('input, textarea, select, summary')) return;

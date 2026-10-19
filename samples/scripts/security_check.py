@@ -62,6 +62,22 @@ def main():
                                       ('/vault/seal','POST',{}),('/vault/password','POST',{}),('/apps/x','PATCH',{}),
                                       ('/records/x/expired','POST',{})]:
                 owner.request(path, data, method=method, headers=app, expected=403)
+            session = owner.request('/vault/status')
+            assert session['max_session_seconds'] == 21600
+            activity = {'session_id': session['session_id'], 'idle_ms': 0}
+            anonymous.request('/vault/activity', activity, expected=401)
+            owner.request('/vault/activity', activity, headers=app, expected=403)
+            owner.request('/vault/activity', dict(activity, session_id='old-session'), expected=409)
+            owner.request('/vault/activity', dict(activity, idle_ms=1800000), expected=400)
+            renewed = owner.request('/vault/activity', activity)
+            assert renewed['idle_seconds_remaining'] == 1800
+            time.sleep(1.1)
+            owner.request('/records/search', headers=app)
+            owner.request('/vault/summary')
+            unchanged = owner.request('/vault/status')
+            assert unchanged['idle_seconds_remaining'] <= 1799, 'API traffic must not renew browser idle time'
+            assert unchanged['ttl_seconds_remaining'] <= renewed['ttl_seconds_remaining']
+            assert owner.request('/vault/activity', activity)['idle_seconds_remaining'] == 1800
             owner.request('/records/search', headers={'X-App-Id':'invalid','X-App-Key':'invalid'}, expected=401)
             for headers in [{'Origin':'https://evil.example'}, {'Host':'evil.example'}, {'Sec-Fetch-Site':'cross-site'}]:
                 owner.request('/records/search', headers=headers, expected=403)

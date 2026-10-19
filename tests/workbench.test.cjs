@@ -142,7 +142,7 @@ test('authorization editing filters without deselecting and saves only the chose
   w.document.querySelector('#scope-ttl').value = '1800';
   w.fetch = async (url, options = {}) => { requests.push({ url, options }); return { ok: true, json: async () => url.endsWith('/apps') ? { apps: [] } : {} }; };
   await w.saveAppScope();
-  assert.deepEqual(JSON.parse(requests[0].options.body), { permission: 'search', access_ttl_seconds: 1800, datasets: ['ds'] });
+  assert.deepEqual(JSON.parse(requests[0].options.body), { permission: 'search', access_ttl_seconds: 1800, datasets: ['ds'], disabled: false });
   assert.equal(w.document.querySelector('#app-scope-modal').open, false);
 });
 
@@ -179,7 +179,7 @@ test('refresh restores an existing owner session with the server remaining lifet
   await w.checkStatus();
   assert.equal(w.stateForTest.unlocked, true);
   assert.equal(w.document.querySelector('#app').classList.contains('is-unsealed'), true);
-  assert.ok(Math.abs((Date.now() - w.stateForTest.unlockAt) / 1000 - 10800) < 2);
+  assert.ok(Math.abs((w.performance.now() - w.stateForTest.unlockAt) / 1000 - 18000) < 2);
 });
 
 test('row numbers edit on demand, commit with Enter, and cancel with Escape without dirtying the schema', async t => {

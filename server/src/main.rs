@@ -76,10 +76,11 @@ struct StartupOptions {
 
 struct Runtime {
     keys: Option<KeySet>,
-    unlocked_at: Option<Instant>,
-    last_activity: Option<Instant>,
+    unlocked_at: Option<SessionInstant>,
+    last_activity: Option<SessionInstant>,
     persistent: bool,
     session_hash: Option<String>,
+    session_id: Option<String>,
     unlock_failures: u32,
     unlock_after: Option<Instant>,
 }
@@ -528,6 +529,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             last_activity: None,
             persistent: false,
             session_hash: None,
+            session_id: None,
             unlock_failures: 0,
             unlock_after: None,
         })),
@@ -563,6 +565,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .route("/vault/setup", post(vault_setup))
         .route("/vault/unlock", post(vault_unlock))
         .route("/vault/seal", post(vault_seal))
+        .route("/vault/activity", post(vault_activity))
         .route("/vault/password", post(change_password))
         .route("/datasets/schema-preview", post(schema_preview))
         .route("/datasets/transfer/preview", post(transfer::preview).layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)))
@@ -709,15 +712,11 @@ fn initialize_schema(connection: &Connection) -> ApiResult<()> {
 }
 
 async fn vault_status(State(state): State<AppState>, headers: HeaderMap) -> Json<Value> {
-    let runtime = state.runtime.lock().await;
-    let now = Instant::now();
-    let idle = runtime
-        .last_activity
-        .map(|t| 1800u64.saturating_sub(now.duration_since(t).as_secs()));
-    let ttl = runtime
-        .unlocked_at
-        .map(|t| 14400u64.saturating_sub(now.duration_since(t).as_secs()));
-    Json(json!({ "initialized": meta_path(&state).exists(), "sealed": !owner_cookie(&headers, &runtime), "can_manage": owner_cookie(&headers, &runtime), "persistent": runtime.persistent, "idle_seconds_remaining": idle, "ttl_seconds_remaining": ttl }))
+    let mut runtime = state.runtime.lock().await;
+    expire_runtime(&mut runtime);
+    let mut status = owner_status(&runtime, owner_cookie(&headers, &runtime));
+    status["initialized"] = json!(meta_path(&state).exists());
+    Json(status)
 }
 
 async fn vault_setup(
@@ -756,8 +755,9 @@ async fn vault_unlock(
 async fn activate(state: &AppState, keys: KeySet, persistent: bool) {
     let mut runtime = state.runtime.lock().await;
     runtime.session_hash = None;
+    runtime.session_id = None;
     runtime.keys = Some(keys);
-    runtime.unlocked_at = Some(Instant::now());
+    runtime.unlocked_at = Some(SessionInstant::now());
     runtime.last_activity = runtime.unlocked_at;
     runtime.persistent = persistent;
 }
@@ -765,6 +765,7 @@ async fn activate(state: &AppState, keys: KeySet, persistent: bool) {
 async fn vault_seal(State(state): State<AppState>) -> Json<Value> {
     let mut runtime = state.runtime.lock().await;
     runtime.session_hash = None;
+    runtime.session_id = None;
     runtime.keys = None;
     runtime.unlocked_at = None;
     runtime.last_activity = None;
@@ -786,9 +787,7 @@ async fn with_connection<T>(
     if runtime.keys.is_none() { return Err(locked()); }
     let keys = runtime.keys.as_ref().ok_or_else(locked)?;
     let connection = open_database(&database_path(state), &keys.db)?;
-    let result = operation(&connection, keys);
-    if result.is_ok() { runtime.last_activity = Some(Instant::now()); }
-    result
+    operation(&connection, keys)
 }
 
 fn flatten_sample(value: &Value) -> Vec<Value> {
@@ -1772,7 +1771,6 @@ async fn upload_import(
     }
     expire_runtime(&mut runtime);
     if runtime.keys.is_none() { return Err(locked()); }
-    runtime.last_activity = Some(Instant::now());
     let records = parse_tabular(&bytes, &filename)?;
     let id = Uuid::new_v4().simple().to_string();
     let count = records.len();

@@ -564,3 +564,137 @@ dialog > header > .icon-button { position: absolute; right: 16px; top: 12px; }
 @media (max-width: 767px) {
   .directory-picker { width: 100vw; height: 100dvh; max-height: 100dvh; max-width: none; margin: 0; border: 0; border-radius: 0; padding: 22px 20px calc(20px + env(safe-area-inset-bottom)); }
 }
+
+.session-pill[data-warning="true"] b { color: var(--warning, #b7791f); }
+@media (max-width: 767px) {
+  .topbar:has(.session-pill[data-warning="true"]) .brand-lockup strong { display: none; }
+  .session-pill b { white-space: nowrap; }
+}
+
+/* Application access is read as a compact register; editing stays in a bounded dialog. */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+.applications-panel { min-width: 0; }
+.applications-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 24px; }
+.applications-heading h3 { margin: 0 0 6px; }
+.applications-heading p { margin: 0; color: var(--muted); font-size: 13px; }
+.applications-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.application-search { flex: 1; min-width: 0; max-width: 420px; }
+.application-search input { width: 100%; }
+.application-filter { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+#application-count { margin-left: auto; white-space: nowrap; color: var(--muted); font-size: 12px; }
+.applications-list { min-width: 0; }
+.application-list-heading, .application-row { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, .9fr) minmax(0, 1fr) 144px; gap: 16px; align-items: center; }
+.application-list-heading { color: var(--muted); font-size: 12px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.application-list-heading > :last-child { text-align: right; }
+.application-row { padding: 18px 0; border-bottom: 1px solid var(--line); }
+.application-row:last-child { border-bottom: 0; }
+.application-row > div { min-width: 0; }
+.application-name { display: grid; gap: 5px; }
+.application-name-button { justify-self: start; max-width: 100%; padding: 0; border: 0; color: var(--ink); background: transparent; font-size: 15px; font-weight: 600; text-align: left; overflow-wrap: anywhere; }
+.application-name-button:hover { color: var(--cyan); text-decoration: underline; text-underline-offset: 4px; }
+.application-name code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; }
+.application-access { display: inline-block; font-size: 12px; padding: 4px 7px; border-radius: 5px; background: var(--bg-2); color: var(--muted); }
+.application-access.sensitive { color: var(--amber); background: color-mix(in srgb, var(--amber) 10%, var(--panel)); }
+.application-scope, .application-row .application-state { display: grid !important; gap: 5px; align-content: center; font-size: 13px; }
+.application-scope small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.application-row small { color: var(--muted); font-size: 12px; }
+.application-status { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.application-status::before { content: ''; width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; background: currentColor; }
+.application-status.active { color: var(--cyan); }
+.application-status.expired, .application-status.unscoped { color: var(--amber); }
+.application-row-actions { display: flex; justify-content: flex-end; align-items: center; gap: 6px; }
+.application-row-actions .secondary-button { min-height: 34px; font-size: 12px; padding: 7px 10px; }
+.application-row-actions .clear-button { white-space: nowrap; }
+.application-row-actions .clear-button, .scope-selection-tools .clear-button, .application-identity .clear-button { width: auto; text-align: center; flex-shrink: 0; }
+.application-empty { padding: 36px 16px; text-align: center; color: var(--muted); font-size: 13px; }
+.application-empty h4 { font-size: 16px; color: var(--ink); margin: 0 0 8px; }
+.application-empty p { margin: 0; }
+.application-dialog { width: min(680px, calc(100% - 32px)); max-height: calc(100dvh - 32px); padding: 24px; overflow-y: auto; scrollbar-color: var(--line-strong) var(--panel); border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--ink); box-shadow: 0 20px 70px #0003; }
+.application-dialog > header, .application-dialog form > header { padding: 0 128px 20px 0; margin: 0; border-bottom: 1px solid var(--line); display: flex; align-items: flex-start; gap: 12px; }
+.application-dialog h3 { font-size: 22px; line-height: 1.4; overflow-wrap: anywhere; }
+.application-dialog form > header > .icon-button { position: absolute; right: 16px; top: 12px; }
+.application-dialog .application-caption { color: var(--muted); font-size: 13px; margin: 6px 0 0; line-height: 1.65; }
+.application-dialog-body { padding-top: 20px; }
+.application-field { display: grid; gap: 8px; font-size: 13px; color: var(--muted); min-width: 0; }
+.application-field > input, .application-field > select { width: 100%; min-width: 0; }
+#scope-name-field { margin-bottom: 18px; }
+.scope-settings { display: grid; grid-template-columns: 1fr 1.2fr; gap: 16px; }
+#scope-permission-note { padding: 10px 12px; margin-top: 12px; background: var(--bg-2); border-radius: 6px; }
+#scope-permission-note.sensitive-note { color: var(--amber); }
+.scope-selection { margin-top: 24px; }
+.scope-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.scope-section-heading h4 { margin: 0; font-size: 15px; }
+#scope-count { margin: 0; color: var(--cyan); font-size: 12px; font-variant-numeric: tabular-nums; }
+#scope-search { width: 100%; }
+.scope-selection-tools { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 0; font-size: 12px; color: var(--muted); }
+.scope-selection-tools > label { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.scope-selection-tools > div { display: flex; }
+.scope-selection-tools .clear-button { font-size: 12px; padding: 7px 5px; }
+#scope-datasets { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; max-height: min(32vh, 280px); overflow-y: auto; overscroll-behavior: contain; margin: 0; border-block: 1px solid var(--line); }
+#scope-datasets .app-dataset-option { display: flex; align-items: flex-start; gap: 10px; min-width: 0; padding: 12px 4px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; cursor: pointer; }
+#scope-datasets .app-dataset-option:last-child { border-bottom: 0; }
+#scope-datasets .app-dataset-option:has(input:checked) { background: var(--selected-bg); }
+#scope-datasets input { margin: 4px 0 0 8px; flex-shrink: 0; width: 16px; height: 16px; }
+#scope-datasets .app-dataset-option > span { display: flex; justify-content: space-between; flex: 1; min-width: 0; gap: 12px; padding-right: 10px; }
+#scope-datasets strong { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+#scope-datasets small { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.scope-summary { padding: 12px; margin-top: 16px; border-radius: 6px; background: var(--bg-2); color: var(--muted); font-size: 12px; line-height: 1.7; }
+.application-dialog-footer { position: sticky; bottom: -24px; display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 18px 0 0; margin-top: 20px; background: var(--panel); border-top: 1px solid var(--line); }
+.application-identity { display: flex; align-items: center; gap: 12px; justify-content: space-between; margin-top: 20px; padding: 14px; background: var(--bg-2); border-radius: 7px; min-width: 0; }
+.application-identity > div { display: grid; gap: 6px; min-width: 0; }
+.application-identity code { font-size: 12px; overflow-wrap: anywhere; min-width: 0; color: var(--ink); }
+.application-identity small { color: var(--muted); font-size: 12px; }
+.application-identity button { flex-shrink: 0; }
+.application-facts { margin: 20px 0; display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.application-facts div:last-child { grid-column: 1 / -1; }
+.application-facts dt { font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+.application-facts dd { margin: 0; font-size: 14px; }
+.application-granted h4 { margin: 22px 0 10px; font-size: 15px; }
+.application-granted h4 span { margin-left: 8px; color: var(--muted); font-weight: 400; }
+.application-granted ul { list-style: none; padding: 0; margin: 0; max-height: 240px; overflow: auto; }
+.application-granted li { display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--line); padding: 12px 0; font-size: 13px; }
+.application-granted li:last-child { border-bottom: 0; }
+.application-dataset-link { padding: 4px 0; border: 0; background: transparent; color: var(--cyan); font-size: inherit; text-align: left; overflow-wrap: anywhere; }
+.application-dataset-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+.application-granted li > div { min-width: 0; overflow-wrap: anywhere; }
+.application-granted li strong { font-weight: 500; }
+.application-granted li code { display: block; font-size: 11px; color: var(--muted); }
+.application-maintenance { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.application-maintenance strong { font-size: 14px; font-weight: 500; }
+.application-maintenance p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+@media (max-width: 1120px) {
+  .application-list-heading { display: none; }
+  .application-row { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr); gap: 16px 20px; padding-block: 20px; }
+  .application-name { grid-column: 1 / 3; }
+  .application-row-actions { grid-column: 3; grid-row: 1; }
+  .application-row > [data-label]::before { content: attr(data-label); display: block; color: var(--muted); font-size: 11px; margin-bottom: 5px; }
+}
+@media (max-width: 767px) {
+  .applications-panel { padding: 20px 16px; }
+  .applications-heading { align-items: flex-start; gap: 12px; }
+  .applications-heading h3 { font-size: 22px; }
+  .applications-heading .primary-button { min-height: 44px; }
+  .applications-toolbar { flex-wrap: wrap; gap: 10px; }
+  .application-search { flex-basis: 100%; max-width: none; }
+  .application-filter { flex: 1; }
+  .application-filter select { width: 100%; }
+  .application-filter > span { display: none; }
+  #application-count { font-size: 11px; }
+  .application-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+  .application-name { grid-column: 1 / -1; }
+  .application-row .application-state { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
+  .application-row .application-state::before { display: none; }
+  .application-row-actions { grid-column: 1 / -1; grid-row: auto; justify-content: flex-end; padding-top: 2px; }
+  .application-row-actions > button { min-height: 44px; }
+  dialog.application-dialog { width: calc(100% - 16px); max-width: none; max-height: calc(100dvh - 16px); padding: 20px 16px; }
+  .application-dialog h3 { font-size: 20px; }
+  .application-dialog input, .application-dialog select { font-size: 16px; }
+  .application-dialog button { min-height: 44px; }
+  .scope-settings { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .application-dialog-footer { bottom: -20px; padding-block: 12px 4px; }
+  .scope-selection-tools { gap: 4px; }
+  .scope-selection-tools > div { gap: 2px; }
+  #scope-datasets .app-dataset-option > span { display: grid; gap: 3px; }
+  .application-maintenance { align-items: flex-start; }
+  .application-maintenance .secondary-button { font-size: 12px; padding: 8px; }
+}

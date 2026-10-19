@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#071522" />
     <title>SecureVault · 动态敏感数据安全管理</title>
     <link rel="stylesheet" href="styles.css?v=20261013-workbench-v13" />
-    <link rel="stylesheet" href="workbench.css?v=20261013-workbench-v13" />
+    <link rel="stylesheet" href="workbench.css?v=20261019-applications-v15" />
   </head>
   <body>
     <div class="ambient ambient-one"></div>
@@ -18,7 +18,7 @@
         <div class="sealed-mark" aria-hidden="true"><span class="lock-shackle"></span><span class="lock-body"></span></div>
         <div class="eyebrow">SECUREVAULT / SEALED</div>
         <h1>开启你的安全数据空间</h1>
-        <p class="sealed-copy">敏感字段加密存储。解锁后，敏感查看与导出会被记录，并在空闲超时后自动封印。</p>
+        <p class="sealed-copy">敏感字段加密存储。解锁后，敏感查看与导出会被记录，连续 30 分钟无操作或解锁满 6 小时后自动封印。</p>
         <form id="unlock-form" class="unlock-form">
           <label for="master-password">主密码</label>
           <div class="password-wrap">
@@ -38,7 +38,7 @@
         <header class="topbar">
           <div class="brand-lockup"><div class="brand-icon">S<span>V</span></div><div><strong>SecureVault</strong><small id="workspace-label">检索</small></div></div>
           <div class="topbar-actions">
-            <div class="session-pill"><i class="status-dot"></i><span>已解锁</span><b id="idle-countdown">29:59</b></div>
+            <div class="session-pill"><i class="status-dot"></i><span>已解锁</span><b id="idle-countdown" hidden></b></div>
             <button id="theme-toggle" class="ghost-button" title="切换浅色/暗色主题"><span>☼</span> <b>主题</b></button><button id="lock-button" class="ghost-button" title="立即封印"><span>⌁</span> 立即封印</button>
           </div>
         </header>
@@ -65,7 +65,14 @@
             </div>
           </div>
           </div>
-      <div id="app-manager-modal" class="workspace-page" hidden><section class="workspace-panel app-manager-dialog" aria-labelledby="app-manager-title"><button id="close-app-manager" class="secondary-button workspace-back" aria-label="返回检索">返回检索</button><div class="dialog-icon">⌁</div><div class="eyebrow">API APPLICATIONS</div><h3 id="app-manager-title">接入应用</h3><p>新应用默认不可查询数据集。授权可设置为临时有效，到期后需要重新开启。</p><div class="app-create-row"><input id="app-name" placeholder="应用名称，例如：夜间同步脚本" /><select id="app-permission"><option value="search">只搜索</option><option value="secrets">可获取敏感信息</option></select><button id="create-app" class="primary-button">创建</button></div><div id="app-manager-list" class="dataset-manager-list"></div></section></div>
+      <div id="app-manager-modal" class="workspace-page" hidden>
+        <section class="workspace-panel applications-panel" aria-labelledby="app-manager-title">
+          <div class="applications-heading"><div><h3 id="app-manager-title">接入应用</h3><p>管理应用凭据、可访问的数据集和授权期限。</p></div><button id="new-app-button" class="primary-button" type="button">＋ 创建应用</button></div>
+          <div class="applications-toolbar"><label class="application-search"><span class="sr-only">搜索应用</span><input id="application-search" type="search" placeholder="搜索应用名称或 ID…" /></label><label class="application-filter"><span>状态</span><select id="application-filter" aria-label="筛选应用状态"><option value="all">全部状态</option><option value="active">可用</option><option value="expired">已到期</option><option value="disabled">已停用</option><option value="unscoped">未配置范围</option></select></label><button id="refresh-apps" class="secondary-button" type="button">刷新</button><span id="application-count" role="status"></span></div>
+          <p id="applications-error" class="inline-error" role="alert" hidden></p>
+          <div id="app-manager-list" class="applications-list"></div>
+        </section>
+      </div>
           <div id="security-workspace" class="workspace-page" hidden><section class="workspace-panel password-panel" aria-labelledby="security-title">
             <button id="close-security" class="secondary-button workspace-back">← 返回</button>
             <div class="eyebrow">VAULT SECURITY</div><h3 id="security-title">安全设置</h3>
@@ -98,7 +105,7 @@
 
       <dialog id="description-edit-modal" class="editor-drawer" aria-labelledby="description-edit-title"><header><h3 id="description-edit-title">修改描述</h3><button id="close-description" class="icon-button" aria-label="关闭描述编辑" type="button">×</button></header><label for="description-draft">Markdown 描述</label><textarea id="description-draft" rows="16" spellcheck="false"></textarea><details><summary>预览</summary><div id="description-draft-preview" class="markdown-content"></div></details><p id="description-error" role="alert" hidden></p><div class="dialog-actions"><button id="cancel-description" class="secondary-button" type="button">取消</button><button id="save-description" class="primary-button" type="button">保存描述</button></div></dialog>
       <dialog id="export-modal" class="transfer-dialog" aria-labelledby="export-title"><header><h3 id="export-title">导出数据集</h3><button id="close-export" class="icon-button" aria-label="关闭导出" type="button">×</button></header><p id="export-target"></p><fieldset><legend>导出内容</legend><div class="segmented-options"><label><input type="radio" name="export-content" value="schema" />仅结构</label><label><input type="radio" name="export-content" value="data" checked />仅数据</label><label><input type="radio" name="export-content" value="package" />结构与数据</label></div></fieldset><p id="export-content-note" class="dataset-info-note"></p><label>格式<select id="export-format"><option value="json">JSON</option><option value="csv">CSV</option><option value="xlsx">XLSX</option></select></label><label id="export-secret-wrap" class="check-line"><input id="export-with-secrets" type="checkbox" />包含机密字段（仅本次导出）</label><label id="export-supplement-wrap" class="check-line" hidden><input id="export-supplements" type="checkbox" />包含附表记录</label><label id="export-template-wrap" class="check-line" hidden><input id="export-templates" type="checkbox" />包含映射模板</label><p id="export-error" role="alert" hidden></p><div class="dialog-actions"><button id="cancel-export" class="secondary-button" type="button">取消</button><button id="confirm-export" class="primary-button" type="button">导出数据</button></div></dialog>
-      <dialog id="app-key-modal" class="transfer-dialog" aria-labelledby="app-key-title"><header><h3 id="app-key-title">保存新的应用密钥</h3><button id="close-app-key" class="icon-button" aria-label="关闭密钥" type="button">×</button></header><p>密钥只显示这一次，请保存后关闭。</p><textarea id="app-key-value" readonly rows="3" aria-label="新的应用密钥"></textarea><div class="dialog-actions"><button id="copy-app-key" class="secondary-button" type="button">复制密钥</button><button id="finish-app-key" class="primary-button" type="button">已保存，关闭</button></div></dialog>
+      <dialog id="app-key-modal" class="transfer-dialog" aria-labelledby="app-key-title"><header><h3 id="app-key-title">保存新的应用密钥</h3><button id="close-app-key" class="icon-button" aria-label="关闭密钥" type="button">×</button></header><p id="app-key-context" class="application-caption"></p><p>密钥只显示这一次，请保存后关闭。</p><div id="app-key-identity" class="application-identity" hidden><code id="app-key-id"></code><button id="copy-app-key-id" class="clear-button" type="button">复制应用 ID</button></div><textarea id="app-key-value" readonly rows="3" aria-label="新的应用密钥"></textarea><div class="dialog-actions"><button id="copy-app-key" class="secondary-button" type="button">复制密钥</button><button id="finish-app-key" class="primary-button" type="button">已保存，关闭</button></div></dialog>
     </div>
     <dialog id="directory-picker" class="directory-picker" aria-labelledby="directory-picker-title">
       <header><h3 id="directory-picker-title">分类目录</h3><button id="close-directory-picker" class="icon-button" type="button" aria-label="关闭分类目录">×</button></header>
@@ -108,21 +115,35 @@
       <p id="directory-error" class="inline-error" role="alert" hidden></p>
       <footer><div><span id="directory-selection-count" role="status"></span><button id="directory-select-all" class="clear-button" type="button">全部目录</button></div><div class="directory-picker-actions"><button id="cancel-directory-picker" class="secondary-button" type="button">取消</button><button id="apply-directory-picker" class="primary-button" type="button">应用筛选</button></div></footer>
     </dialog>
-    <dialog id="app-scope-modal" class="editor-drawer" aria-labelledby="app-scope-title">
-      <header><h3 id="app-scope-title">配置应用授权</h3><button id="close-app-scope" class="icon-button" type="button" aria-label="关闭授权编辑">×</button></header>
-      <label>访问级别<select id="scope-permission"><option value="search">只搜索</option><option value="secrets">可获取敏感信息</option></select></label>
-      <label>授权时效<select id="scope-ttl"><option value="1800">30 分钟</option><option value="7200">2 小时</option><option value="28800">8 小时</option><option value="0">长期有效</option></select></label>
-      <label>可见数据集<input id="scope-search" type="search" placeholder="按目录或环境查找…" /></label>
-      <p id="scope-count" role="status"></p><div id="scope-datasets" class="app-dataset-options"></div>
-      <p id="scope-error" role="alert" hidden></p><p class="dataset-info-note">保存后重新开启应用，并按所选时效重新授权。</p>
-      <div class="dialog-actions"><button id="cancel-app-scope" class="secondary-button" type="button">取消</button><button id="save-app-scope" class="primary-button" type="button">保存授权并重新开启</button></div>
+    <dialog id="app-details-modal" class="application-dialog" aria-labelledby="app-details-title">
+      <header><div><h3 id="app-details-title">应用详情</h3><p id="app-details-subtitle" class="application-caption"></p></div><button id="close-app-details" class="icon-button" type="button" aria-label="关闭应用详情">×</button></header>
+      <div id="app-details-content"></div><p id="app-details-error" class="inline-error" role="alert" hidden></p>
+      <div class="application-maintenance"><div><strong>应用凭据</strong><p>原密钥无法再次查看。轮换后请更新接入端配置。</p></div><button id="details-rotate" class="secondary-button" type="button">轮换密钥</button></div>
+      <footer class="application-dialog-footer"><button id="details-toggle" class="secondary-button" type="button">停用应用</button><button id="details-authorize" class="primary-button" type="button">配置授权</button></footer>
+    </dialog>
+    <dialog id="app-scope-modal" class="application-dialog application-scope-dialog" aria-labelledby="app-scope-title">
+      <form id="app-scope-form">
+        <header><div><h3 id="app-scope-title">配置应用授权</h3><p id="scope-subtitle" class="application-caption"></p></div><button id="close-app-scope" class="icon-button" type="button" aria-label="关闭授权编辑">×</button></header>
+        <div class="application-dialog-body">
+          <label id="scope-name-field" class="application-field" hidden>应用名称<input id="scope-name" maxlength="120" placeholder="例如：Raycast、夜间同步脚本" autocomplete="off" /></label>
+          <div class="scope-settings"><label class="application-field">访问级别<select id="scope-permission"><option value="search">只读检索</option><option value="secrets">敏感信息查看</option></select></label><label class="application-field">授权期限<select id="scope-ttl"><option id="scope-keep-expiry" value="keep">保持当前到期时间</option><option value="1800">从保存起 30 分钟</option><option value="7200">从保存起 2 小时</option><option value="28800">从保存起 8 小时</option><option value="0">长期有效</option></select></label></div>
+          <p id="scope-permission-note" class="application-caption"></p>
+          <section class="scope-selection" aria-labelledby="scope-datasets-title"><div class="scope-section-heading"><h4 id="scope-datasets-title">可访问的数据集</h4><span id="scope-count" role="status"></span></div>
+            <input id="scope-search" type="search" aria-label="查找授权数据集" placeholder="按目录、数据集或环境查找…" />
+            <div class="scope-selection-tools"><label><input id="scope-only-selected" type="checkbox" />只看已选</label><div><button id="scope-select-visible" class="clear-button" type="button">全选匹配项</button><button id="scope-clear-visible" class="clear-button" type="button">清空匹配项</button></div></div>
+            <div id="scope-datasets" class="scope-dataset-list"></div><p id="scope-empty" class="application-empty" hidden></p>
+          </section>
+          <div id="scope-summary" class="scope-summary" role="status"></div><p id="scope-error" class="inline-error" role="alert" hidden></p>
+        </div>
+        <footer class="application-dialog-footer"><button id="cancel-app-scope" class="secondary-button" type="button">取消</button><button id="save-app-scope" class="primary-button" type="submit">保存授权</button></footer>
+      </form>
     </dialog>
     <script src="vendor/marked.js"></script>
     <script src="vendor/dompurify.js"></script>
     <script src="markdown.js?v=20261010-dataset-fields-19"></script>
-    <script src="app.js?v=20261013-workbench-v13"></script>
+    <script src="app.js?v=20261019-applications-v15"></script>
     <script src="supplement.js?v=20261013-workbench-v13"></script>
-    <script src="workbench.js?v=20261013-workbench-v13"></script>
-    <script src="applications.js?v=20261013-workbench-v13"></script>
+    <script src="workbench.js?v=20261019-applications-v15"></script>
+    <script src="applications.js?v=20261019-applications-v15"></script>
   </body>
 </html>

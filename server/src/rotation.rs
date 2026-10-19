@@ -176,6 +176,7 @@ pub(super) fn state_for(data_dir: PathBuf) -> AppState {
             last_activity: None,
             persistent: false,
             session_hash: None,
+            session_id: None,
             unlock_failures: 0,
             unlock_after: None,
         })),

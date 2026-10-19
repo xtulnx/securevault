@@ -349,6 +349,7 @@ pub(super) async fn change_password(
     let audit_warning = connection.execute("INSERT INTO audit_events(event,field_name) VALUES('master_password_changed','key_envelope')", []).is_err();
     runtime.keys = None;
     runtime.session_hash = None;
+    runtime.session_id = None;
     runtime.unlocked_at = None;
     runtime.last_activity = None;
     runtime.persistent = false;
@@ -477,6 +478,7 @@ mod tests {
                 last_activity: None,
                 persistent: false,
                 session_hash: None,
+                session_id: None,
                 unlock_failures: 0,
                 unlock_after: None,
             })),

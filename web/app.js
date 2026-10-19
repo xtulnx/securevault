@@ -33,8 +33,17 @@ const state = {
   unlockAt: 0,
   lastActivity: 0,
   idleTimeout: 1800,
-  maxSeconds: 14400
-  ,persistent: false,
+  maxSeconds: 21600,
+  warningSeconds: 600,
+  persistent: false,
+  sessionId: null,
+  sessionEpoch: 0,
+  activityAt: -Infinity,
+  activityWallAt: 0,
+  activityReportedAt: -Infinity,
+  lastActivityReport: -Infinity,
+  lastActivityReportWallAt: 0,
+  activityRequest: false,
   theme: localStorage.getItem("securevault-theme") || "light"
 };
 
@@ -68,6 +77,7 @@ function highlightValue(value) {
 }
 
 async function api(path, options = {}) {
+  const sessionEpoch = state.sessionEpoch;
   let response;
   try {
     response = await fetch(`/api${path}`, {
@@ -81,7 +91,7 @@ async function api(path, options = {}) {
   if (response.status === 503) await handleServiceOffline();
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    if (response.status === 423 || (response.status === 401 && state.unlocked)) sealVault("会话已失效，请重新解锁", false);
+    if (sessionEpoch === state.sessionEpoch && (response.status === 423 || (response.status === 401 && state.unlocked))) sealVault("会话已失效，请重新解锁", false);
     throw new Error(body.error || `请求失败 (${response.status})`);
   }
   return body;
@@ -125,9 +135,30 @@ async function handleServiceOffline() {
   if (state.unlocked) await sealVault("服务连接已中断，数据空间已封印；服务恢复后请重新解锁", false);
 }
 
+function sessionNow() { return performance.now(); }
+
+function syncSession(status) {
+  const now = sessionNow();
+  const sessionId = status.session_id ?? null;
+  if (state.sessionId !== sessionId) {
+    state.sessionEpoch++;
+    state.activityAt = -Infinity;
+    state.activityReportedAt = -Infinity;
+    state.lastActivityReport = -Infinity;
+  }
+  state.persistent = Boolean(status.persistent);
+  state.sessionId = sessionId;
+  state.idleTimeout = status.idle_timeout_seconds ?? 1800;
+  state.maxSeconds = status.max_session_seconds ?? 21600;
+  state.warningSeconds = status.warning_seconds ?? 600;
+  state.unlockAt = now - (state.maxSeconds - (status.ttl_seconds_remaining ?? state.maxSeconds)) * 1000;
+  state.lastActivity = Math.max(state.activityAt, now - (state.idleTimeout - (status.idle_seconds_remaining ?? state.idleTimeout)) * 1000);
+}
+
 async function checkStatus() {
   if (statusCheckPending) return;
   statusCheckPending = true;
+  const sessionEpoch = state.sessionEpoch;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 3000);
   let status;
@@ -144,6 +175,7 @@ async function checkStatus() {
     clearTimeout(timeout);
     statusCheckPending = false;
   }
+  if (sessionEpoch !== state.sessionEpoch) return;
   try {
     state.canManage = Boolean(status.can_manage ?? !status.sealed);
     state.initialized = status.initialized;
@@ -158,11 +190,9 @@ async function checkStatus() {
     if (status.sealed && state.unlocked) {
       await sealVault("服务端会话已失效，请重新解锁", false);
     }
+    if (!status.sealed && state.canManage) syncSession(status);
     if (!status.sealed && state.canManage && !state.unlocked) {
       state.unlocked = true;
-      const now = Date.now();
-      state.unlockAt = now - (state.maxSeconds - (status.ttl_seconds_remaining ?? state.maxSeconds)) * 1000;
-      state.lastActivity = now - (state.idleTimeout - (status.idle_seconds_remaining ?? state.idleTimeout)) * 1000;
       $("#app").classList.remove("is-sealed");
       $("#app").classList.add("is-unsealed");
       await loadWorkspace();
@@ -177,18 +207,19 @@ async function unlockVault(event) {
   event.preventDefault();
   const password = $("#master-password").value;
   try {
+    let session;
     if (!state.initialized) {
       if ([...password].length < 12) throw new Error("主密码至少需要 12 个字符");
       if (password !== $("#confirm-password").value) throw new Error("两次输入的主密码不一致");
-      await api("/vault/setup", { method: "POST", body: JSON.stringify({ password }) });
+      session = await api("/vault/setup", { method: "POST", body: JSON.stringify({ password }) });
       state.initialized = true;
     } else {
-      await api("/vault/unlock", { method: "POST", body: JSON.stringify({ password }) });
+      session = await api("/vault/unlock", { method: "POST", body: JSON.stringify({ password }) });
     }
     state.unlocked = true;
     state.canManage = true;
-    state.unlockAt = Date.now();
-    state.lastActivity = state.unlockAt;
+    state.sessionEpoch++;
+    syncSession(session);
     $("#app").classList.remove("is-sealed");
     $("#app").classList.add("is-unsealed");
     $("#master-password").value = "";
@@ -205,6 +236,10 @@ async function unlockVault(event) {
 async function sealVault(message = "数据空间已手动封印", callServer = true) {
   clearInterval(state.timer);
   state.unlocked = false;
+  state.sessionEpoch++;
+  state.sessionId = null;
+  state.activityAt = -Infinity;
+  state.activityReportedAt = -Infinity;
   state.canManage = false;
   state.persistent = false;
   state.reveal = null;
@@ -235,15 +270,33 @@ async function sealVault(message = "数据空间已手动封印", callServer = t
   showToast(message, "info");
 }
 
+function sessionRemaining(now = sessionNow()) {
+  const idle = state.idleTimeout - Math.floor((now - state.lastActivity) / 1000);
+  const ttl = state.maxSeconds - Math.floor((now - state.unlockAt) / 1000);
+  return { seconds: Math.max(0, Math.min(idle, ttl)), hardLimit: ttl <= idle };
+}
+
+function updateSessionIndicator() {
+  const { seconds, hardLimit } = sessionRemaining();
+  const countdown = $("#idle-countdown");
+  const warning = !state.persistent && seconds <= state.warningSeconds;
+  countdown.hidden = !warning;
+  countdown.textContent = warning ? `${hardLimit ? "解锁时限" : "空闲锁定"} ${formatCountdown(seconds)}` : "";
+  const pill = countdown.closest(".session-pill");
+  pill.dataset.warning = String(warning);
+  pill.title = warning
+    ? (hardLimit ? "本次解锁已接近 6 小时上限，操作无法延长，请保存修改并重新解锁。" : "连续 30 分钟无操作将自动锁定，继续操作即可保持活跃。")
+    : "连续 30 分钟无前端操作或解锁满 6 小时后自动锁定。";
+}
+
 function startWatchdog() {
   clearInterval(state.timer);
+  updateSessionIndicator();
   state.timer = setInterval(() => {
     if (!state.unlocked) return;
     const now = Date.now();
-    const idleLeft = state.idleTimeout - Math.floor((now - state.lastActivity) / 1000);
-    const maxLeft = state.maxSeconds - Math.floor((now - state.unlockAt) / 1000);
-    const remaining = Math.min(idleLeft, maxLeft);
-    $("#idle-countdown").textContent = state.persistent ? "持续" : formatCountdown(Math.max(0, remaining));
+    updateSessionIndicator();
+    flushActivity();
     if (state.reveal && state.reveal.expiresAt <= Date.now()) {
       state.reveal = null;
     }
@@ -253,7 +306,8 @@ function startWatchdog() {
       if (!state.reveal && timer) renderDetailSecrets();
       else if (timer) timer.textContent = `${Math.max(0, Math.ceil((state.reveal.expiresAt - now) / 1000))}s`;
     }
-    if (!state.persistent && remaining <= 0) sealVault("会话已超时并自动封印");
+    // The server decides expiry across all tabs. A stale tab must never seal an active one.
+    if (!state.persistent && sessionRemaining().seconds <= 0) checkStatus();
   }, 1000);
 }
 
@@ -262,7 +316,42 @@ function formatCountdown(seconds) {
   return `${String(Math.floor(safe / 60)).padStart(2, "0")}:${String(safe % 60).padStart(2, "0")}`;
 }
 
-function touch() { if (state.unlocked) state.lastActivity = Date.now(); }
+function touch(event) {
+  if (!state.unlocked || !event?.isTrusted || document.hidden) return;
+  // High-frequency input only records time; the watchdog owns rendering and reporting.
+  state.activityAt = sessionNow();
+  state.activityWallAt = Date.now();
+  state.lastActivity = state.activityAt;
+}
+
+async function flushActivity() {
+  if (!state.unlocked || !state.sessionId || state.activityRequest || state.activityAt <= state.activityReportedAt) return;
+  const now = sessionNow();
+  if (now - state.lastActivityReport < 15000 && Date.now() - state.lastActivityReportWallAt < 15000) return;
+  const activityAt = state.activityAt;
+  // Some browser monotonic clocks pause during system sleep. Preserve the actual idle age on resume.
+  const idleMs = Math.max(0, now - activityAt, Date.now() - state.activityWallAt);
+  if (idleMs >= state.idleTimeout * 1000) return;
+  const sessionEpoch = state.sessionEpoch;
+  state.activityRequest = true;
+  state.lastActivityReport = now;
+  state.lastActivityReportWallAt = Date.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3000);
+  try {
+    const status = await api("/vault/activity", {
+      method: "POST", signal: controller.signal, body: JSON.stringify({ session_id: state.sessionId, idle_ms: Math.floor(idleMs) })
+    });
+    if (!state.unlocked || sessionEpoch !== state.sessionEpoch) return;
+    state.activityReportedAt = activityAt;
+    syncSession(status);
+  } catch {
+    // A changed session is reconciled by the regular status check; failed reports are retried.
+  } finally {
+    clearTimeout(timeout);
+    state.activityRequest = false;
+  }
+}
 
 async function loadWorkspace() {
   const [datasets, tree, summary] = await Promise.all([
@@ -546,7 +635,6 @@ function renderDetailSecrets() {
       return;
     }
     button.disabled = true;
-    touch();
     try {
       const value = await showSecret(detail.id, field);
       if (state.recordDetail !== detail || request !== state.detailRevealRequest || !state.unlocked) return;
@@ -746,7 +834,6 @@ function renderSecretFields() {
 
 async function handleSecretAction(action, field) {
   const recordId = state.secretModalRecordId;
-  touch();
   try {
     if (action === "copy") {
       const value = await showSecret(recordId, field);
@@ -1115,7 +1202,6 @@ $("#dataset-manager-button").addEventListener("click", () => openDatasetManager(
 $("#manager-new-dataset").addEventListener("click", () => $("#new-dataset-button").click());
 $("#manager-import").addEventListener("click", () => openImport());
 $("#app-manager-button").addEventListener("click", async () => { try { await loadApps(); showWorkspace("apps"); } catch (error) { showToast(error.message, "error"); } });
-$("#create-app").addEventListener("click", async () => { try { const name = $("#app-name").value.trim(); if (!name) throw new Error("请填写应用名称"); const result = await api("/apps", { method: "POST", body: JSON.stringify({ name, permission: $("#app-permission").value, datasets: [] }) }); $("#app-name").value = ""; await loadApps(); showAppKey(result.key); } catch (error) { showToast(error.message, "error"); } });
 $("#new-dataset-button").addEventListener("click", () => { state.editDatasetId = null; state.evolvedFields = []; state.currentBatchSources = []; $("#dataset-title").textContent = "定义数据集"; $("#dataset-help").textContent = "可先创建空数据集，首次导入时再定义 Schema。"; $("#dataset-category").value = ""; $("#dataset-environment").value = ""; $("#dataset-description").value = ""; updateDatasetDescriptionPreview(); renderSchemaFields([]); $("#list-config").hidden = true; $("#list-config-fields").replaceChildren(); $("#first-schema-fields").replaceChildren(); $("#first-schema").hidden = true; $("#save-dataset").innerHTML = "创建数据集 <span>↗</span>"; openDatasetEditor(); $("#dataset-category").focus(); });
 $("#edit-dataset-button").addEventListener("click", () => {
   const dataset = currentDataset();
@@ -1139,7 +1225,6 @@ $("#dataset-info-modal").addEventListener("click", (event) => {
 });
 $("#dataset-info-modal").addEventListener("close", () => $("#dataset-info-content").replaceChildren());
 $("#close-dataset-manager").addEventListener("click", () => showWorkspace("search"));
-$("#close-app-manager").addEventListener("click", () => { showWorkspace("search"); });
 $("#cancel-reveal").addEventListener("click", () => { $("#reveal-modal").hidden = true; state.pendingReveal = null; });
 $("#confirm-reveal").addEventListener("click", () => { if (state.pendingReveal) handleSecretAction("reveal", state.pendingReveal.field); $("#reveal-modal").hidden = true; });
 $("#detect-schema")?.addEventListener("click", detectSchema);
@@ -1157,7 +1242,10 @@ document.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); $("#search-input").focus(); }
 
 });
-document.addEventListener("pointerdown", touch, { passive: true });
+// Capture also covers editors/modals whose handlers stop propagation. Polling/focus never renews idle time.
+["pointerdown", "pointermove", "click", "keydown", "input", "wheel", "touchstart", "touchmove"].forEach(type => {
+  document.addEventListener(type, touch, { passive: true, capture: true });
+});
 
 const toastStyle = document.createElement("style");
 toastStyle.textContent = ".toast-region{position:fixed;z-index:20;right:20px;bottom:20px;display:grid;gap:8px}.toast{padding:11px 14px;border:1px solid var(--line-strong);border-radius:7px;background:#102c3d;color:#c8dbe3;font-size:11px;box-shadow:0 10px 30px rgba(0,0,0,.3);opacity:0;transform:translateY(8px);transition:opacity .25s,transform .25s}.toast.show{opacity:1;transform:none}.toast.success{border-color:rgba(103,216,223,.45)}.toast.error{border-color:rgba(239,126,135,.45);color:#ffc5c9}";

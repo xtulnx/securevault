@@ -1,16 +1,46 @@
 use super::*;
 
+pub(super) const SESSION_MAX_SECONDS: u64 = 6 * 60 * 60;
+pub(super) const SESSION_IDLE_SECONDS: u64 = 30 * 60;
+pub(super) const SESSION_WARNING_SECONDS: u64 = 10 * 60;
+
+// Monotonic time prevents clock rollback from extending a session; wall time also
+// accounts for system sleep on platforms whose monotonic clock pauses while asleep.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct SessionInstant {
+    tick: Instant,
+    wall: std::time::SystemTime,
+}
+
+impl SessionInstant {
+    pub(super) fn now() -> Self {
+        Self { tick: Instant::now(), wall: std::time::SystemTime::now() }
+    }
+
+    fn elapsed(self) -> Duration {
+        self.tick.elapsed().max(self.wall.elapsed().unwrap_or_default())
+    }
+}
+
+impl std::ops::Sub<Duration> for SessionInstant {
+    type Output = Self;
+    fn sub(self, age: Duration) -> Self {
+        Self { tick: self.tick - age, wall: self.wall - age }
+    }
+}
+
 pub(super) fn expire_runtime(runtime: &mut Runtime) {
     if !runtime.persistent
         && (runtime
             .unlocked_at
-            .is_some_and(|t| t.elapsed() >= Duration::from_secs(14400))
+            .is_some_and(|t| t.elapsed() >= Duration::from_secs(SESSION_MAX_SECONDS))
             || runtime
                 .last_activity
-                .is_some_and(|t| t.elapsed() >= Duration::from_secs(1800)))
+                .is_some_and(|t| t.elapsed() >= Duration::from_secs(SESSION_IDLE_SECONDS)))
     {
         runtime.keys = None;
         runtime.session_hash = None;
+        runtime.session_id = None;
         runtime.unlocked_at = None;
         runtime.last_activity = None;
     }
@@ -33,20 +63,71 @@ pub(super) fn owner_cookie(headers: &HeaderMap, runtime: &Runtime) -> bool {
         && runtime.keys.is_some()
 }
 
+// Only the authenticated browser owner receives session timing and identity.
+pub(super) fn owner_status(runtime: &Runtime, owner: bool) -> Value {
+    json!({
+        "sealed": !owner,
+        "can_manage": owner,
+        "persistent": runtime.persistent,
+        "session_id": if owner { runtime.session_id.as_deref() } else { None },
+        "idle_timeout_seconds": SESSION_IDLE_SECONDS,
+        "max_session_seconds": SESSION_MAX_SECONDS,
+        "warning_seconds": SESSION_WARNING_SECONDS,
+        "idle_seconds_remaining": if owner { runtime.last_activity.map(|t| SESSION_IDLE_SECONDS.saturating_sub(t.elapsed().as_secs())) } else { None },
+        "ttl_seconds_remaining": if owner { runtime.unlocked_at.map(|t| SESSION_MAX_SECONDS.saturating_sub(t.elapsed().as_secs())) } else { None }
+    })
+}
+
+#[derive(Deserialize)]
+pub(super) struct ActivityRequest {
+    session_id: String,
+    idle_ms: u64,
+}
+
+pub(super) async fn vault_activity(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ActivityRequest>,
+) -> ApiResult<Json<Value>> {
+    let mut runtime = state.runtime.lock().await;
+    expire_runtime(&mut runtime);
+    if runtime.keys.is_none() { return Err(locked()); }
+    // Recheck under the lock: neither expired cookies nor app credentials can renew a session.
+    if headers.contains_key("x-app-id") || headers.contains_key("x-app-key") || !owner_cookie(&headers, &runtime) {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "owner session required".into()));
+    }
+    if runtime.session_id.as_deref() != Some(request.session_id.as_str()) {
+        return Err(ApiError(StatusCode::CONFLICT, "owner session changed".into()));
+    }
+    if request.idle_ms >= SESSION_IDLE_SECONDS * 1000 {
+        return Err(bad_request("activity is too old"));
+    }
+    // Report the age of the actual interaction; a delayed/throttled flush is not new activity.
+    let activity = SessionInstant::now() - Duration::from_millis(request.idle_ms);
+    if runtime.last_activity.is_none_or(|previous| activity.tick > previous.tick) {
+        runtime.last_activity = Some(activity);
+    }
+    Ok(Json(owner_status(&runtime, true)))
+}
+
 pub(super) async fn owner_session(state: &AppState, warning: bool) -> ApiResult<Response> {
     let token = Zeroizing::new(format!(
         "{}{}",
         Uuid::new_v4().simple(),
         Uuid::new_v4().simple()
     ));
-    state.runtime.lock().await.session_hash = Some(app_key_hash(&token));
-    let mut response =
-        Json(json!({"sealed": false, "durability_warning": warning})).into_response();
+    let mut runtime = state.runtime.lock().await;
+    runtime.session_hash = Some(app_key_hash(&token));
+    runtime.session_id = Some(Uuid::new_v4().to_string());
+    let mut status = owner_status(&runtime, true);
+    status["durability_warning"] = json!(warning);
+    let mut response = Json(status).into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
         HeaderValue::from_str(&format!(
-            "vault_session={}; HttpOnly; SameSite=Strict; Path=/api; Max-Age=14400{}",
+            "vault_session={}; HttpOnly; SameSite=Strict; Path=/api; Max-Age={}{}",
             token.as_str(),
+            SESSION_MAX_SECONDS,
             if state.public_origin.is_some() {
                 "; Secure"
             } else {
@@ -252,16 +333,140 @@ mod tests {
     fn expired_sessions_drop_keys_without_request_activity() {
         let mut runtime = Runtime {
             keys: Some(random_keys()),
-            unlocked_at: Some(Instant::now()),
-            last_activity: Some(Instant::now() - Duration::from_secs(1801)),
+            unlocked_at: Some(SessionInstant::now()),
+            last_activity: Some(SessionInstant::now() - Duration::from_secs(1801)),
             persistent: false,
             session_hash: Some("token".into()),
+            session_id: Some("session".into()),
             unlock_failures: 0,
             unlock_after: None,
         };
         expire_runtime(&mut runtime);
         assert!(runtime.keys.is_none() && runtime.session_hash.is_none());
     }
+    fn active_runtime() -> Runtime {
+        Runtime {
+            keys: Some(random_keys()),
+            unlocked_at: Some(SessionInstant::now()),
+            last_activity: Some(SessionInstant::now()),
+            persistent: false,
+            session_hash: Some(app_key_hash("test-cookie")),
+            session_id: Some("test-session".into()),
+            unlock_failures: 0,
+            unlock_after: None,
+        }
+    }
+
+    fn owner_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, HeaderValue::from_static("vault_session=test-cookie"));
+        headers
+    }
+
+    fn activity(idle_ms: u64) -> Json<ActivityRequest> {
+        Json(ActivityRequest { session_id: "test-session".into(), idle_ms })
+    }
+
+    #[test]
+    fn sessions_expire_at_idle_and_absolute_limits_but_active_sessions_survive_four_hours() {
+        for (age, idle, expired) in [(21600, 0, true), (0, 1800, true), (21599, 1799, false), (18000, 0, false)] {
+            let mut runtime = active_runtime();
+            runtime.unlocked_at = Some(SessionInstant::now() - Duration::from_secs(age));
+            runtime.last_activity = Some(SessionInstant::now() - Duration::from_secs(idle));
+            expire_runtime(&mut runtime);
+            assert_eq!(runtime.keys.is_none(), expired, "age={age}, idle={idle}");
+            if expired {
+                assert!(runtime.session_hash.is_none() && runtime.session_id.is_none());
+                assert!(runtime.unlocked_at.is_none() && runtime.last_activity.is_none());
+            }
+        }
+        let mut persistent = active_runtime();
+        persistent.persistent = true;
+        persistent.unlocked_at = Some(SessionInstant::now() - Duration::from_secs(21601));
+        persistent.last_activity = persistent.unlocked_at;
+        expire_runtime(&mut persistent);
+        assert!(persistent.keys.is_some());
+    }
+
+    #[test]
+    fn system_sleep_counts_toward_both_limits_and_clock_rollback_cannot_extend_them() {
+        for hard_limit in [false, true] {
+            let mut runtime = active_runtime();
+            let age = Duration::from_secs(if hard_limit { SESSION_MAX_SECONDS } else { SESSION_IDLE_SECONDS });
+            let timestamp = if hard_limit { runtime.unlocked_at.as_mut().unwrap() } else { runtime.last_activity.as_mut().unwrap() };
+            timestamp.wall = timestamp.wall - age;
+            expire_runtime(&mut runtime);
+            assert!(runtime.keys.is_none(), "wall time must expire a session even when the monotonic clock paused");
+        }
+        let mut runtime = active_runtime();
+        runtime.last_activity = Some(SessionInstant::now() - Duration::from_secs(SESSION_IDLE_SECONDS));
+        runtime.last_activity.as_mut().unwrap().wall = std::time::SystemTime::now() + Duration::from_secs(3600);
+        expire_runtime(&mut runtime);
+        assert!(runtime.keys.is_none(), "clock rollback must not extend the monotonic deadline");
+    }
+
+    #[tokio::test]
+    async fn activity_requires_current_owner_and_preserves_absolute_expiry_and_actual_event_age() {
+        let state = rotation::state_for(PathBuf::new());
+        *state.runtime.lock().await = active_runtime();
+        let unlocked_at = state.runtime.lock().await.unlocked_at;
+        state.runtime.lock().await.last_activity = Some(SessionInstant::now() - Duration::from_secs(1500));
+        let original = state.runtime.lock().await.last_activity;
+        for headers in [HeaderMap::new(), {
+            let mut headers = owner_headers();
+            headers.insert("x-app-id", HeaderValue::from_static("app"));
+            headers
+        }] {
+            assert!(matches!(vault_activity(State(state.clone()), headers, activity(0)).await, Err(ApiError(StatusCode::UNAUTHORIZED, _))));
+            assert_eq!(state.runtime.lock().await.last_activity, original);
+        }
+        assert!(matches!(vault_activity(State(state.clone()), owner_headers(), Json(ActivityRequest { session_id: "old-session".into(), idle_ms: 0 })).await, Err(ApiError(StatusCode::CONFLICT, _))));
+        assert!(matches!(vault_activity(State(state.clone()), owner_headers(), activity(1800000)).await, Err(ApiError(StatusCode::BAD_REQUEST, _))));
+        let Json(status) = vault_activity(State(state.clone()), owner_headers(), activity(12000)).await.unwrap();
+        assert!((1787..=1788).contains(&status["idle_seconds_remaining"].as_u64().unwrap()));
+        let renewed = state.runtime.lock().await.last_activity;
+        let _ = vault_activity(State(state.clone()), owner_headers(), activity(60000)).await.unwrap();
+        let runtime = state.runtime.lock().await;
+        assert_eq!(runtime.unlocked_at, unlocked_at);
+        assert_eq!(runtime.last_activity, renewed, "late reports from another tab cannot shorten the idle deadline");
+    }
+
+    #[tokio::test]
+    async fn expired_activity_cannot_resurrect_a_session_and_status_expires_without_renewing() {
+        for hard_limit in [false, true] {
+            let state = rotation::state_for(PathBuf::new());
+            let mut runtime = active_runtime();
+            if hard_limit { runtime.unlocked_at = Some(SessionInstant::now() - Duration::from_secs(21600)); }
+            else { runtime.last_activity = Some(SessionInstant::now() - Duration::from_secs(1800)); }
+            *state.runtime.lock().await = runtime;
+            assert!(matches!(vault_activity(State(state.clone()), owner_headers(), activity(0)).await, Err(ApiError(StatusCode::LOCKED, _))));
+            assert!(state.runtime.lock().await.keys.is_none());
+        }
+        let state = rotation::state_for(PathBuf::new());
+        *state.runtime.lock().await = active_runtime();
+        let original = state.runtime.lock().await.last_activity;
+        let Json(status) = vault_status(State(state.clone()), owner_headers()).await;
+        assert_eq!(status["sealed"], false);
+        assert_eq!(state.runtime.lock().await.last_activity, original);
+        let Json(anonymous) = vault_status(State(state.clone()), HeaderMap::new()).await;
+        assert!(anonymous["session_id"].is_null() && anonymous["ttl_seconds_remaining"].is_null());
+        state.runtime.lock().await.last_activity = Some(SessionInstant::now() - Duration::from_secs(1800));
+        let Json(status) = vault_status(State(state.clone()), owner_headers()).await;
+        assert_eq!(status["sealed"], true);
+        assert!(state.runtime.lock().await.keys.is_none());
+    }
+
+    #[tokio::test]
+    async fn session_cookie_matches_the_six_hour_hard_limit_and_rotates_identity() {
+        let state = rotation::state_for(PathBuf::new());
+        *state.runtime.lock().await = active_runtime();
+        let response = owner_session(&state, false).await.unwrap();
+        assert!(response.headers()[header::SET_COOKIE].to_str().unwrap().contains("Max-Age=21600"));
+        let old_id = state.runtime.lock().await.session_id.clone();
+        let _ = owner_session(&state, false).await.unwrap();
+        assert_ne!(state.runtime.lock().await.session_id, old_id);
+    }
+
     #[test]
     fn app_routes_exclude_management_and_csv_formulas_are_neutralized() {
         use axum::http::Method;
@@ -276,6 +481,7 @@ mod tests {
             (Method::POST, "/datasets/ds_1/supplement/cleanup"),
             (Method::POST, "/datasets"),
             (Method::POST, "/vault/seal"),
+            (Method::POST, "/vault/activity"),
             (Method::PATCH, "/datasets/ds_1"),
         ] {
             assert!(!app_route(&method, path));
