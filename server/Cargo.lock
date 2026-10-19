@@ -1795,6 +1795,7 @@ dependencies = [
  "tokio",
  "tower-http",
  "uuid",
+ "windows-sys",
  "zeroize",
  "zip 2.4.2",
 ]

@@ -438,10 +438,7 @@ fn restore(input: &FsPath, output: &FsPath, password: &str, master: &str) -> Api
         check_integrity(&reopened)?;
         validate_relations(&reopened)?;
         drop(reopened);
-        fs::File::open(database_path(&state))
-            .map_err(internal)?
-            .sync_all()
-            .map_err(internal)?;
+        sync_file(&database_path(&state)).map_err(internal)?;
         sync_directory(&temp.join("vault")).map_err(internal)?;
         sync_directory(&temp).map_err(internal)?;
         publish_directory(&temp, &output)?;

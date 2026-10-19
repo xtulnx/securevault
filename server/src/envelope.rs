@@ -248,6 +248,11 @@ pub(super) fn sync_directory(path: &FsPath) -> std::io::Result<()> {
     }
 }
 
+pub(super) fn sync_file(path: &FsPath) -> std::io::Result<()> {
+    // Windows FlushFileBuffers requires a handle opened with write access.
+    OpenOptions::new().read(true).write(true).open(path)?.sync_all()
+}
+
 pub(super) fn initialize_vault(state: &AppState, password: &str) -> ApiResult<(KeySet, bool)> {
     if state.data_dir.join("vault").exists() {
         return Err(ApiError(
@@ -274,10 +279,7 @@ pub(super) fn initialize_vault(state: &AppState, password: &str) -> ApiResult<(K
         let connection = open_database(&db, &keys.db)?;
         initialize_schema(&connection)?;
         drop(connection);
-        File::open(&db)
-            .map_err(internal)?
-            .sync_all()
-            .map_err(internal)?;
+        sync_file(&db).map_err(internal)?;
         atomic_meta(&staging.join("vault.meta.json"), &meta)?;
         sync_directory(&staging).map_err(internal)?;
         fs::rename(&staging, state.data_dir.join("vault")).map_err(internal)?;

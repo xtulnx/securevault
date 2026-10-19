@@ -163,7 +163,7 @@ pub(super) fn hidden_password(prompt: &str) -> ApiResult<String> {
 }
 #[cfg(not(unix))]
 pub(super) fn hidden_password(_prompt: &str) -> ApiResult<String> {
-    Err(bad_request("交互式密码输入需要 macOS 或 Linux"))
+    Err(bad_request("此平台请使用 -s / --passwords-stdin 从标准输入提供密码 JSON"))
 }
 
 pub(super) fn state_for(data_dir: PathBuf) -> AppState {
@@ -191,9 +191,9 @@ fn rotate(
     old_password: &str,
     new_password: &str,
 ) -> ApiResult<bool> {
-    #[cfg(not(unix))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     return Err(bad_request(
-        "离线密钥轮换目前需要 macOS 或 Linux 本地文件系统",
+        "离线密钥轮换需要 macOS、Linux 或 Windows 本地文件系统",
     ));
     validate_new_password(new_password)?;
     let source = fs::canonicalize(source).map_err(internal)?;
@@ -385,10 +385,7 @@ fn rotate(
             for id in ids {let id=id.map_err(internal)?;if supplement::values(&connection,&old_keys,&id)? != supplement::values(&reopened,&checked,&id)? {return Err(internal("supplement verification failed"));}}
         }
         drop(reopened);
-        fs::File::open(&db)
-            .map_err(internal)?
-            .sync_all()
-            .map_err(internal)?;
+        sync_file(&db).map_err(internal)?;
         if atomic_meta(&vault.join("vault.meta.json"), &replacement)? {
             return Err(internal("metadata durability failed"));
         }
@@ -495,11 +492,24 @@ pub(super) fn publish_directory(source: &FsPath, destination: &FsPath) -> ApiRes
         }
         Ok(())
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+        let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+        let destination: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
+        // Omit REPLACE_EXISTING and COPY_ALLOWED: publication stays on the same
+        // volume and must refuse even an empty destination created concurrently.
+        if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), MOVEFILE_WRITE_THROUGH) } == 0 {
+            return Err(internal(std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = (source, destination);
         Err(bad_request(
-            "离线原子发布需要 macOS 或 Linux",
+            "离线原子发布需要 macOS、Linux 或 Windows",
         ))
     }
 }
@@ -558,6 +568,18 @@ mod tests {
         assert!(publish_directory(&staging, &target).is_err());
         assert!(staging.exists());
         assert_eq!(fs::read(target.join("marker")).unwrap(), b"original");
+        fs::remove_file(target.join("marker")).unwrap();
+        assert!(publish_directory(&staging, &target).is_err());
+        assert!(staging.exists());
+        fs::remove_dir(&target).unwrap();
+        fs::write(&target, b"existing file").unwrap();
+        assert!(publish_directory(&staging, &target).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"existing file");
+        fs::remove_file(&target).unwrap();
+        fs::write(staging.join("完整数据.txt"), b"ready").unwrap();
+        publish_directory(&staging, &target).unwrap();
+        assert!(!staging.exists());
+        assert_eq!(fs::read(target.join("完整数据.txt")).unwrap(), b"ready");
         fs::remove_dir_all(&scratch).unwrap();
     }
     #[test]

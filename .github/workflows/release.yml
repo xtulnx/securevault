@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -12,54 +13,119 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify release version before building
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          args=()
+          if [[ "$REF_TYPE" == tag ]]; then
+            args=(--tag "$RELEASE_TAG")
+          fi
+          version=$(python scripts/release.py version "${args[@]}")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Test release tooling
+        run: python -m unittest discover -s scripts -p 'test_*.py' -v
+
   build:
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
           - runner: macos-15
             target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            rustflags: -C target-feature=+crt-static
     runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/server/target
+      RUSTFLAGS: ${{ matrix.rustflags || '' }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Set up Windows OpenSSL build tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install strawberryperl nasm --no-progress -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          'C:\Program Files\NASM' >> $env:GITHUB_PATH
+          'C:\Strawberry\perl\bin' >> $env:GITHUB_PATH
       - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustup target add "${{ matrix.target }}"
-      - name: Verify release version
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' server/Cargo.toml | head -n 1)
-          test "$RELEASE_TAG" = "v$version" || {
-            echo "Tag $RELEASE_TAG must match Cargo.toml version v$version"
-            exit 1
-          }
       - name: Test
-        run: make test TARGET=${{ matrix.target }}
+        run: cargo test --locked --manifest-path server/Cargo.toml --target "${{ matrix.target }}"
+      - name: Build release
+        run: cargo build --locked --release --manifest-path server/Cargo.toml --target "${{ matrix.target }}"
+      - name: Smoke test release binary
+        run: |
+          binary="server/target/${{ matrix.target }}/release/securevault"
+          if [[ "$RUNNER_OS" == Windows ]]; then binary="$binary.exe"; fi
+          "$binary" --help
+          python scripts/smoke_release.py --binary "$binary"
       - name: Package
-        run: make package TARGET=${{ matrix.target }}
+        run: python scripts/release.py package --target "${{ matrix.target }}"
       - uses: actions/upload-artifact@v4
         with:
           name: securevault-${{ matrix.target }}
-          path: dist/*.tar.gz
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
           if-no-files-found: error
 
   release:
-    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: [prepare, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: actions/download-artifact@v4
         with:
           pattern: securevault-*
           merge-multiple: true
           path: dist
+      - name: Verify all five platform assets and generate checksums
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: python scripts/release.py checksums --version "$RELEASE_VERSION"
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -67,14 +133,14 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           cd dist
-          sha256sum *.tar.gz > SHA256SUMS
+          assets=(*.tar.gz *.zip SHA256SUMS)
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" *.tar.gz SHA256SUMS --clobber
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
           else
             prerelease=()
             if [[ "$RELEASE_TAG" == *-* ]]; then
               prerelease=(--prerelease)
             fi
-            gh release create "$RELEASE_TAG" *.tar.gz SHA256SUMS \
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
               --verify-tag --generate-notes "${prerelease[@]}"
           fi

@@ -117,7 +117,7 @@ python3 samples/scripts/api_demo.py  # 验证应用检索范围与解密权限
 
 ## 构建与运行
 
-需要 Rust stable（支持 edition 2024）、Make、C/C++ 编译工具及 Perl；SQLCipher 与 OpenSSL 从源码构建。
+需要 Rust stable（支持 edition 2024）、C/C++ 编译工具及 Perl；SQLCipher 与 OpenSSL 从源码构建。使用 `make` 命令需要 Make，打包还需要 Python 3。Windows 使用 MSVC 工具链、Strawberry Perl 和 NASM，并在 Visual Studio 开发者终端运行 Cargo。
 
 ```sh
 make             # 编译 release 二进制
@@ -126,13 +126,22 @@ make test        # 运行测试
 make test-web    # 前端回归测试（首次运行前执行 npm ci）
 make run         # 从源码运行
 make run ARGS='--port 8080'
-make package     # 生成 dist/securevault-<版本>-<平台>.tar.gz
+make package     # 生成 dist/securevault-<版本>-<平台>.tar.gz（Windows 为 .zip）
 make clean       # 清理构建产物和 dist
 ```
 
-默认构建本机平台，可通过 `make package TARGET=x86_64-unknown-linux-gnu` 指定 Rust target（须自行安装对应工具链与链接器）。Makefile 使用已提交的 `server/Cargo.lock` 固定依赖版本。
+默认构建本机平台，可通过 `make package TARGET=x86_64-unknown-linux-gnu` 指定下表中的 Rust target（须自行安装对应工具链与链接器）。Makefile 使用已提交的 `server/Cargo.lock` 固定依赖版本。Windows 可直接执行以下命令，无需安装 Make：
+
+```powershell
+$env:RUSTFLAGS = '-C target-feature=+crt-static'
+cargo test --locked --manifest-path server/Cargo.toml --target x86_64-pc-windows-msvc
+cargo build --locked --release --manifest-path server/Cargo.toml --target x86_64-pc-windows-msvc
+python scripts/release.py package --target x86_64-pc-windows-msvc
+```
 
 发布包仅包含 `securevault` 单个二进制，HTML、CSS、JavaScript 及其他 `web/` 资源在构建时自动嵌入，无需额外分发前端目录。解压后执行 `./securevault`，访问 `http://127.0.0.1:4173`，默认将数据写入二进制同目录的 `data/`。`make run` / debug 构建仍直接读取项目的 `web/`，便于修改前端后刷新调试；release 构建始终使用嵌入资源，更新前端后需要重新构建并替换二进制。构建脚本会监测 `web/` 的文件变化及新增、删除，自动重新生成嵌入资源。可用 `-d, --data-dir PATH`、`-p, --port PORT`、`-a, --addr HOST:PORT` 覆盖默认设置，或使用 `SECUREVAULT_DATA_DIR`、`SECUREVAULT_ADDR` 环境变量。
+
+Windows 压缩包内为 `securevault.exe`，在 PowerShell 中执行 `.\securevault.exe`。Windows 的备份、恢复及离线密钥轮换使用 `-s / --passwords-stdin`，从标准输入提供 UTF-8 密码 JSON；字段格式见各命令的 `--help`。避免将真实密码直接写入命令历史或脚本。Windows 会同步文件内容，目录同步目前仅在 Unix 平台执行。
 
 CLI 支持长短参数名称，长名称保持兼容：
 
@@ -169,7 +178,7 @@ python3 samples/scripts/security_check.py  # 先构建 release；临时数据库
 
 ## 自动发布
 
-将 `server/Cargo.toml` 的版本号更新为目标版本；如果依赖或包版本有变化，运行 `cargo check --manifest-path server/Cargo.toml` 更新锁文件，并一并提交。
+将 `server/Cargo.toml` 的版本号更新为目标版本；如果依赖或包版本有变化，运行 `cargo check --manifest-path server/Cargo.toml` 更新锁文件，并一并提交。推送前可用 `python3 scripts/release.py version --tag v0.1.0` 检查目标 tag 是否与版本一致。
 
 推送与 Cargo 版本一致的 `v` 标签即可触发 GitHub Actions，例如版本 `0.1.0`：
 
@@ -178,4 +187,20 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-工作流测试并构建 Linux x86_64（Ubuntu 24.04）与 macOS Apple Silicon 的发布包，全部成功后创建 GitHub Release，附带自动生成的版本说明、压缩包和 `SHA256SUMS`。Linux 包使用 glibc，运行环境需兼容 Ubuntu 24.04 的系统库。含 `-` 的版本标签（如 `v0.2.0-rc.1`）标记为预发布；重跑工作流会更新已有 Release 的附件。无需额外 Token，发布任务使用仓库的 `GITHUB_TOKEN`。
+工作流先检查 tag 与 Cargo 版本是否一致，再在各平台的原生 runner 上运行测试、构建 release、执行二进制 `--help` 检查并打包。每个平台还会用临时数据验证嵌入前端、保险库初始化、更换主密码、备份恢复和完整密钥轮换：
+
+| 平台 | Rust target | GitHub runner | 压缩格式 |
+| --- | --- | --- | --- |
+| Linux x86_64 | `x86_64-unknown-linux-gnu` | `ubuntu-24.04` | `.tar.gz` |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` | `ubuntu-24.04-arm` | `.tar.gz` |
+| macOS Apple Silicon | `aarch64-apple-darwin` | `macos-15` | `.tar.gz` |
+| macOS Intel | `x86_64-apple-darwin` | `macos-15-intel` | `.tar.gz` |
+| Windows x86_64 | `x86_64-pc-windows-msvc` | `windows-2022` | `.zip` |
+
+runner 标签见 [GitHub 官方说明](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)。
+
+五个平台全部成功且附件齐全后才创建 GitHub Release，附带自动生成的版本说明、五个压缩包和覆盖全部压缩包的 `SHA256SUMS`。Linux 包使用 glibc，运行环境需兼容 Ubuntu 24.04 的系统库。Windows 包静态链接 MSVC 运行时及源码构建的 OpenSSL、SQLCipher。
+
+含 `-` 的版本标签（如 `v0.2.0-rc.1`）标记为预发布；重跑工作流会更新已有 Release 的附件。也可在 Actions 页面手动运行 Release 工作流，验证全部平台并下载构建附件；手动运行不会创建或修改 GitHub Release。无需额外 Token，发布任务使用仓库的 `GITHUB_TOKEN`。
+
+tag 固定指向创建时的提交；版本不匹配或构建配置修复后，重跑旧 tag 不会使用新代码。当前 Cargo 版本为 `0.1.0` 时，应先提交并推送修复，再在该提交上创建、推送 `v0.1.0`。以后每次发布先同步 Cargo.toml 与 Cargo.lock 的版本，再创建对应的新 tag。
