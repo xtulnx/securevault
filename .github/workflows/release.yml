@@ -44,6 +44,10 @@ jobs:
 
   build:
     needs: prepare
+    defaults:
+      run:
+        # Git Bash prepends /usr/bin, whose link.exe shadows the MSVC linker.
+        shell: ${{ matrix.runner == 'windows-2022' && 'pwsh' || 'bash' }}
     strategy:
       fail-fast: false
       matrix:
@@ -91,6 +95,7 @@ jobs:
       - name: Build release
         run: cargo build --locked --release --manifest-path server/Cargo.toml --target "${{ matrix.target }}"
       - name: Smoke test release binary
+        shell: bash
         run: |
           binary="server/target/${{ matrix.target }}/release/securevault"
           if [[ "$RUNNER_OS" == Windows ]]; then binary="$binary.exe"; fi
