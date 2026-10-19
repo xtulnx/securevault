@@ -24,7 +24,37 @@ loadWorkspace = async function() {
   if (!state.unlocked || request !== state.workspaceRequest) return;
   renderCategoryTree(); renderFilters(); renderIndexReference(); renderStats();
   for (const id of ['manager-new-dataset', 'manager-import', 'import-button', 'app-manager-button', 'security-settings-button']) $(`#${id}`).hidden = !state.canManage;
+  await openLinkedRecord();
 };
+
+// Record links retain their target while locked, then use the normal detail
+// flow after the workspace has loaded. Links never carry credentials or values.
+let linkedRecordRequest = 0;
+async function openLinkedRecord() {
+  const hash = window.location.hash;
+  if (!hash.startsWith('#record=') || !state.unlocked) return;
+  const id = new URLSearchParams(hash.slice(1)).get('record');
+  if (!id || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) {
+    showToast('记录链接无效', 'error');
+    window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    return;
+  }
+  const request = ++linkedRecordRequest;
+  showWorkspace('search');
+  if (state.workspace !== 'search') return;
+  closeRecordDetail();
+  await openRecordDetail(id);
+  if (request !== linkedRecordRequest || window.location.hash !== hash || !state.unlocked) return;
+  window.history.replaceState(null, '', window.location.pathname + window.location.search);
+}
+window.addEventListener('hashchange', event => {
+  linkedRecordRequest++;
+  // Invalidate an in-flight record-link request even if the new hash is empty.
+  if (window.location.hash.startsWith('#record=') || (event.oldURL && new URL(event.oldURL).hash.startsWith('#record='))) closeRecordDetail();
+  if (window.location.hash.startsWith('#record=')) {
+    if (state.unlocked) openLinkedRecord();
+  }
+});
 
 function hasDisplayValue(value) {
   return value !== undefined && value !== null && (typeof value !== 'string' || value.trim().length > 0);

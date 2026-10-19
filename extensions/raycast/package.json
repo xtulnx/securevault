@@ -1,0 +1,80 @@
+{
+  "name": "securevault",
+  "title": "SecureVault",
+  "version": "0.1.0",
+  "description": "搜索 SecureVault，查看主表和附表的非敏感信息。",
+  "icon": "icon.png",
+  "author": "xtulnx",
+  "platforms": [
+    "macOS"
+  ],
+  "categories": [
+    "Productivity",
+    "Developer Tools"
+  ],
+  "license": "UNLICENSED",
+  "commands": [
+    {
+      "name": "search",
+      "title": "Search SecureVault",
+      "description": "搜索主表和附表、查看并复制非敏感字段，打开对应的 SecureVault 记录。",
+      "mode": "view",
+      "keywords": [
+        "vault",
+        "保险库",
+        "配置",
+        "附表"
+      ]
+    }
+  ],
+  "preferences": [
+    {
+      "name": "serverUrl",
+      "title": "服务地址",
+      "description": "SecureVault 的网页地址，本机默认 http://127.0.0.1:4173。远程服务使用 HTTPS。",
+      "type": "textfield",
+      "required": true,
+      "default": "http://127.0.0.1:4173"
+    },
+    {
+      "name": "appId",
+      "title": "应用 ID",
+      "description": "在 SecureVault 的接入应用中创建只搜索应用，并授权需要查询的数据集。",
+      "type": "textfield",
+      "required": true
+    },
+    {
+      "name": "appKey",
+      "title": "应用密钥",
+      "description": "该应用的密钥。无需提供保险库主密码。",
+      "type": "password",
+      "required": true
+    }
+  ],
+  "scripts": {
+    "build": "ray build -e dist -o dist",
+    "dev": "ray develop",
+    "lint": "eslint src tests --max-warnings=0 && prettier --check src tests",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "@raycast/api": "2.7.2"
+  },
+  "devDependencies": {
+    "@raycast/eslint-config": "2.2.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-test-renderer": "^19.0.0",
+    "eslint": "^9.0.0",
+    "esbuild": "^0.28.0",
+    "prettier": "^3.0.0",
+    "react-test-renderer": "19.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=22.22.2"
+  },
+  "private": true
+}

@@ -142,6 +142,7 @@ pub(super) async fn owner_session(state: &AppState, warning: bool) -> ApiResult<
 fn app_route(method: &axum::http::Method, path: &str) -> bool {
     if method == axum::http::Method::GET {
         return path == "/records/search"
+            || path == "/client/datasets"
             || (path.starts_with("/records/") && path.split('/').count() == 3)
             || (path.starts_with("/datasets/") && path.ends_with("/export"));
     }
@@ -471,10 +472,14 @@ mod tests {
     fn app_routes_exclude_management_and_csv_formulas_are_neutralized() {
         use axum::http::Method;
         assert!(app_route(&Method::GET, "/records/search"));
+        assert!(app_route(&Method::GET, "/client/datasets"));
         assert!(app_route(&Method::POST, "/supplement/sup_1/secrets/reveal"));
         assert!(app_route(&Method::POST, "/records/rec_1/secrets/reveal"));
         for (method, path) in [
             (Method::GET, "/apps"),
+            (Method::GET, "/datasets"),
+            (Method::GET, "/datasets/tree"),
+            (Method::POST, "/client/datasets"),
             (Method::GET, "/datasets/ds_1/supplement"),
             (Method::PATCH, "/records/rec_1"),
             (Method::POST, "/datasets/ds_1/records"),

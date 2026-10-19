@@ -3,9 +3,9 @@ const path = require('node:path');
 const { JSDOM } = require('jsdom');
 
 const web = path.join(__dirname, '../../web');
-function page(t, app = false) {
+function page(t, app = false, url = 'http://127.0.0.1:4180/') {
   const dom = new JSDOM(fs.readFileSync(path.join(web, 'index.html'), 'utf8'), {
-    url: 'http://127.0.0.1:4180/', runScripts: 'outside-only',
+    url, runScripts: 'outside-only',
   });
   t.after(() => dom.window.close());
   const { window } = dom;

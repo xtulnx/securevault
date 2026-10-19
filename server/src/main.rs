@@ -36,6 +36,7 @@ mod supplement;
 mod search_rank;
 mod transfer;
 mod security;
+mod client;
 use security::*;
 mod backup;
 mod rotation;
@@ -572,6 +573,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .route("/datasets/transfer/import", post(transfer::import).layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)))
         .route("/records/import/preview", post(preview_import))
         .route("/datasets", get(list_datasets).post(create_dataset))
+        .route("/client/datasets", get(client::datasets))
         .route("/datasets/{id}", axum::routing::patch(update_dataset))
         .route("/datasets/{id}/export", get(export_dataset))
         .route("/datasets/{id}/templates", get(list_import_templates))
