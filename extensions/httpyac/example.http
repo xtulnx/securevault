@@ -1,0 +1,29 @@
+# 将 securevault.mjs 与本文件一起复制到使用方项目。
+# 修改 host、接口、数据集和字段后执行；应用凭据通过进程环境提供：
+# SECUREVAULT_APP_ID / SECUREVAULT_APP_KEY，可选 SECUREVAULT_URL。
+@host = http://127.0.0.1:8080
+
+### 请求前按需取值
+{{
+  const { loadFields } = require('./securevault.mjs');
+  exports.vault = loadFields({
+    // 使用 httpyac 环境变量时，可显式传入：
+    // baseUrl: vaultUrl, appId: vaultAppId, appKey: vaultAppKey,
+    datasetId: '替换为数据集 ID',
+    environment: '正式',
+    query: 'gid:=2001 platform:=Android',
+    fields: {
+      gid: 'gid',
+      appSecret: 'secrets.app_secret',
+      // channel: 'supplement.channel',
+      // token: 'supplement.secrets.token',
+    },
+  });
+}}
+POST {{host}}/your-api
+Content-Type: application/json
+
+{
+  "gid": {{JSON.stringify(vault.gid)}},
+  "secret": {{JSON.stringify(vault.appSecret)}}
+}
