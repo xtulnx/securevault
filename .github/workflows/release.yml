@@ -77,14 +77,22 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
-      - name: Set up Windows OpenSSL build tools
+      - name: Install NASM for Windows OpenSSL
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+        with:
+          version: '2.16.01'
+          from-source: false
+      - name: Configure native Windows Perl
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install strawberryperl nasm --no-progress -y
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          'C:\Program Files\NASM' >> $env:GITHUB_PATH
-          'C:\Strawberry\perl\bin' >> $env:GITHUB_PATH
+          $perlDirectory = 'C:\Strawberry\perl\bin'
+          if (!(Test-Path "$perlDirectory\perl.exe")) {
+            throw 'Native Strawberry Perl is required by the vendored OpenSSL build.'
+          }
+          $perlDirectory >> $env:GITHUB_PATH
+          & "$perlDirectory\perl.exe" -V:osname
       - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal

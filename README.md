@@ -143,6 +143,8 @@ python scripts/release.py package --target x86_64-pc-windows-msvc
 
 Windows 压缩包内为 `securevault.exe`，在 PowerShell 中执行 `.\securevault.exe`。Windows 的备份、恢复及离线密钥轮换使用 `-s / --passwords-stdin`，从标准输入提供 UTF-8 密码 JSON；字段格式见各命令的 `--help`。避免将真实密码直接写入命令历史或脚本。Windows 会同步文件内容，目录同步目前仅在 Unix 平台执行。
 
+Windows CI 在 MSVC 环境中使用 PowerShell 执行 Cargo，避免 Git Bash 的 `link.exe` 覆盖 MSVC 链接器；复用 runner 自带的 Strawberry Perl，并通过 `ilammy/setup-nasm@v1` 安装固定版本 NASM，不依赖 Chocolatey 软件源。构建依据见 [Rust 静态运行库说明](https://doc.rust-lang.org/reference/linkage.html#static-and-dynamic-c-runtimes)、[OpenSSL Windows 汇编构建说明](https://github.com/alexcrichton/openssl-src-rs#windows-msvc-assembly) 和 [NASM 安装 Action](https://github.com/ilammy/setup-nasm)。
+
 CLI 支持长短参数名称，长名称保持兼容：
 
 | 参数 | 短名称 | 适用命令 |
