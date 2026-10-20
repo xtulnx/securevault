@@ -148,6 +148,7 @@ impl FieldValue<'_> {
 pub(super) struct RecordView<'a> {
     pub category: &'a str,
     pub environment: Option<&'a str>,
+    pub environments: &'a [String],
     pub dataset_id: &'a str,
     pub indexes: &'a Value,
     pub display: &'a Value,
@@ -173,7 +174,7 @@ fn candidates<'a>(
                 result.push((Cow::Borrowed("category"), FieldValue::Text(record.category)))
             }
             Some("env" | "environment") => {
-                if let Some(env) = record.environment {
+                for env in record.environments.iter().map(String::as_str).chain(record.environment) {
                     result.push((Cow::Borrowed("environment"), FieldValue::Text(env)));
                 }
             }
@@ -201,7 +202,7 @@ fn candidates<'a>(
             }
             None => {
                 result.push((Cow::Borrowed("category"), FieldValue::Text(record.category)));
-                if let Some(env) = record.environment {
+                for env in record.environments.iter().map(String::as_str).chain(record.environment) {
                     result.push((Cow::Borrowed("environment"), FieldValue::Text(env)));
                 }
                 for map in [record.indexes, record.display] {
@@ -557,6 +558,7 @@ mod tests {
             let view = RecordView {
                 category: record["category"].as_str().unwrap_or_default(),
                 environment: record["environment"].as_str(),
+                environments: &[],
                 dataset_id: record["dataset_id"].as_str().unwrap_or_default(),
                 indexes: &record["indexes"],
                 display: &record["display"],

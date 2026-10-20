@@ -10,7 +10,8 @@ const configuration = {
 const filters = {
   datasetId: "ds",
   category: "业务/支付",
-  environment: "正式",
+  tags: ["客户A", "生产"],
+  schemaId: "model-1",
   includeExpired: false,
 };
 
@@ -44,6 +45,9 @@ test("requests use app headers, no-store, reject redirects, and preserve query/f
   assert.equal(request.url.searchParams.get("q"), "附表.alias:=华东 A&B");
   assert.equal(request.url.searchParams.get("category"), "业务/支付");
   assert.equal(request.url.searchParams.get("page"), "2");
+  assert.deepEqual(JSON.parse(request.url.searchParams.get("environment_tags")!), ["客户A", "生产"]);
+  assert.equal(request.url.searchParams.get("schema_id"), "model-1");
+  assert.equal(request.url.searchParams.has("environment"), false);
   assert.equal(request.url.searchParams.has("include_expired"), false);
   assert.deepEqual(request.init.headers, {
     "X-App-Id": "APP_ID",

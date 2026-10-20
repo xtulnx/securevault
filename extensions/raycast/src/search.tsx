@@ -16,6 +16,9 @@ import {
   categories,
   datasetChoiceLabel,
   datasetLabel,
+  datasetEnvironments,
+  datasetMarkdown,
+  matchesFilters,
   escapeMarkdown,
   publicFields,
   recordIdentity,
@@ -31,7 +34,8 @@ import { useResource } from "./use-resource";
 const emptyFilters: Filters = {
   datasetId: "",
   category: "",
-  environment: "",
+  tags: [],
+  schemaId: "",
   includeExpired: false,
 };
 
@@ -120,17 +124,11 @@ function FieldCopies({ fields }: { fields: PublicField[] }) {
 }
 
 function DescriptionAction({ dataset }: { dataset: Dataset }) {
-  if (!dataset.description.trim()) return null;
   return (
     <Action.Push
-      title="查看数据集说明"
+      title="查看数据集信息"
       icon={Icon.Document}
-      target={
-        <Detail
-          navigationTitle="数据集说明"
-          markdown={`### ${escapeMarkdown(datasetLabel(dataset))}\n\n${valueBlock(dataset.description)}`}
-        />
-      }
+      target={<Detail navigationTitle="数据集信息" markdown={datasetMarkdown(dataset)} />}
     />
   );
 }
@@ -207,13 +205,10 @@ function FilterForm({
 }) {
   const { pop } = useNavigation();
   const [values, setValues] = useState(filters);
-  const candidates = datasets.filter(
-    (dataset) =>
-      (!values.category ||
-        dataset.category_path === values.category ||
-        dataset.category_path.startsWith(`${values.category}/`)) &&
-      (!values.environment || dataset.environment === values.environment),
-  );
+  const candidates = datasets.filter((dataset) => matchesFilters(dataset, values));
+  const models = datasets
+    .filter((dataset) => dataset.schema_id)
+    .filter((dataset, index, all) => all.findIndex((item) => item.schema_id === dataset.schema_id) === index);
   return (
     <Form
       navigationTitle="筛选 SecureVault"
@@ -249,24 +244,31 @@ function FilterForm({
         ))}
       </Form.Dropdown>
       <Form.Dropdown
-        id="environment"
-        title="环境"
-        value={values.environment}
-        onChange={(environment) => setValues({ ...values, environment, datasetId: "" })}
+        id="schema"
+        title="数据模型"
+        value={values.schemaId}
+        onChange={(schemaId) => setValues({ ...values, schemaId, datasetId: "" })}
       >
-        <Form.Dropdown.Item value="" title="全部环境" />
-        {[
-          ...new Set(
-            datasets
-              .map((dataset) => dataset.environment)
-              .filter((value): value is string => value !== null && value !== ""),
-          ),
-        ]
-          .sort()
-          .map((environment) => (
-            <Form.Dropdown.Item key={environment} value={environment} title={environment} />
-          ))}
+        <Form.Dropdown.Item value="" title="全部模型" />
+        {models.map((dataset) => (
+          <Form.Dropdown.Item
+            key={dataset.schema_id}
+            value={dataset.schema_id!}
+            title={`${dataset.schema_name || "未命名模型"}${models.some((other) => other.schema_id !== dataset.schema_id && other.schema_name === dataset.schema_name) ? ` · ${dataset.schema_id}` : ""}`}
+          />
+        ))}
       </Form.Dropdown>
+      <Form.TagPicker
+        id="tags"
+        title="标签"
+        info="同时满足全部所选标签，例如客户A + 生产。"
+        value={values.tags}
+        onChange={(tags) => setValues({ ...values, tags, datasetId: "" })}
+      >
+        {[...new Set([...values.tags, ...datasets.flatMap(datasetEnvironments)])].sort().map((tag) => (
+          <Form.TagPicker.Item key={tag} value={tag} title={tag} />
+        ))}
+      </Form.TagPicker>
       <Form.Dropdown
         id="dataset"
         title="数据集"
@@ -316,13 +318,7 @@ function Search({ client }: { client: VaultClient }) {
   const visibleRecords = error
     ? []
     : records.filter((record) => availableDatasets.some((dataset) => dataset.id === record.dataset_id));
-  const filteredDatasets = availableDatasets.filter(
-    (dataset) =>
-      (!filters.category ||
-        dataset.category_path === filters.category ||
-        dataset.category_path.startsWith(`${filters.category}/`)) &&
-      (!filters.environment || dataset.environment === filters.environment),
-  );
+  const filteredDatasets = availableDatasets.filter((dataset) => matchesFilters(dataset, filters));
   const datasetState =
     metadata.error || accessError
       ? { value: "__unavailable", title: "数据集加载失败" }
@@ -346,7 +342,12 @@ function Search({ client }: { client: VaultClient }) {
     results.refresh();
     preview.refresh();
   };
-  const activeFilters = [filters.category, filters.environment, filters.includeExpired ? "包含过期记录" : ""]
+  const activeFilters = [
+    filters.category,
+    datasets.find((dataset) => dataset.schema_id === filters.schemaId)?.schema_name || filters.schemaId,
+    ...filters.tags,
+    filters.includeExpired ? "包含过期记录" : "",
+  ]
     .filter(Boolean)
     .join(" · ");
   const total = error ? 0 : results.value?.total || 0;
@@ -355,7 +356,7 @@ function Search({ client }: { client: VaultClient }) {
     <>
       {availableDatasets.length > 0 && (
         <Action.Push
-          title="筛选目录和环境"
+          title="筛选目录、标签和模型"
           icon={Icon.Filter}
           shortcut={{ modifiers: ["cmd", "shift"], key: "f" }}
           target={<FilterForm datasets={datasets} filters={filters} apply={apply} />}

@@ -1,4 +1,4 @@
-import type { Dataset, Field, PublicField, VaultRecord } from "./types";
+import type { Dataset, Field, Filters, PublicField, VaultRecord } from "./types";
 
 export function hasValue(value: unknown): boolean {
   return value !== undefined && value !== null && (typeof value !== "string" || value.trim().length > 0);
@@ -8,14 +8,44 @@ export function valueText(value: unknown, pretty = false): string {
   return typeof value === "object" ? JSON.stringify(value, null, pretty ? 2 : undefined) : String(value ?? "");
 }
 
+export function datasetEnvironments(dataset: Dataset): string[] {
+  return dataset.environments ?? (dataset.environment ? [dataset.environment] : []);
+}
+
+export function modelLabel(dataset: Dataset): string {
+  if (!dataset.schema_name) return dataset.schema_id ? `模型 #${dataset.schema_id}` : "";
+  return `${dataset.schema_name}${dataset.schema_version ? ` · v${dataset.schema_version}` : ""}`;
+}
+
+export function matchesFilters(dataset: Dataset, filters: Filters): boolean {
+  return (
+    (!filters.category ||
+      dataset.category_path === filters.category ||
+      dataset.category_path.startsWith(`${filters.category}/`)) &&
+    (!filters.schemaId || dataset.schema_id === filters.schemaId) &&
+    filters.tags.every((tag) => datasetEnvironments(dataset).includes(tag))
+  );
+}
+
+export function datasetMarkdown(dataset: Dataset): string {
+  return [
+    `### ${escapeMarkdown(datasetLabel(dataset))}`,
+    modelLabel(dataset) ? `数据模型：${escapeMarkdown(modelLabel(dataset))}` : "",
+    dataset.description.trim() ? valueBlock(dataset.description) : "暂无数据集说明。",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
 export function datasetLabel(dataset: Dataset): string {
-  return `${dataset.category_path} · ${dataset.environment || "未设置环境"}`;
+  const location = dataset.name?.trim() ? `${dataset.name.trim()} · ${dataset.category_path}` : dataset.category_path;
+  return `${location} · ${datasetEnvironments(dataset).join(" / ") || "未设置标签"}`;
 }
 
 export function datasetChoiceLabel(dataset: Dataset, datasets: Dataset[]): string {
   const label = datasetLabel(dataset);
   if (datasets.filter((item) => datasetLabel(item) === label).length < 2) return label;
-  // Only identical directory/environment pairs need a system-ID suffix.
+  // Only identical name/directory/tag combinations need a system-ID suffix.
   let size = 8;
   while (
     size < dataset.id.length &&
@@ -169,6 +199,7 @@ export function recordMarkdown(record: VaultRecord, dataset: Dataset, detail = f
   const intro = `### ${escapeMarkdown(recordIdentity(record, dataset))}\n\n${escapeMarkdown(datasetLabel(dataset))}${record.expired ? " · 已过期" : ""}`;
   return [
     intro,
+    modelLabel(dataset) ? `数据模型：${escapeMarkdown(modelLabel(dataset))}` : "",
     ...(["main", "supplement"] as const).map((section) => {
       const rows = fields.filter((field) => field.section === section);
       if (!rows.length) return "";

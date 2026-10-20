@@ -13,7 +13,8 @@ records: 主表记录数组
 supplements: 附表记录数组
 templates: 可选导入映射模板数组
 
-schema 保留 category_path、environment、description（完整 Markdown）、fields、identity_fields、conflict_strategy、list_fields、display_config、supplement_fields、supplement_link_version。
+schema 可选携带 name（数据集显示名称，最多 120 个字符，空字符串表示随目录末级名称显示）；旧包省略 name 时，新建实例使用空名称，导入已有实例保留原名称；显式提供 name 的更新会在确认前列出名称变化。schema 保留 category_path、environment（兼容第一个标签）、environments（全部标签名称数组，可选）、description（完整 Markdown）、fields、identity_fields、conflict_strategy、list_fields、display_config、supplement_fields、supplement_link_version。
+schema 可选携带 schema_name（模型名称）与 schema_description（模型说明，Markdown 原文）。新建导入保留模型说明；导入现有数据集不会用来源说明覆盖其共享模型说明。新建导入保留模型名称及全部标签；旧文件的 customer 名称转成额外标签。标签按名称复用或新建，未修改兼容 environment 字段时保留原文件中的全部标签。导入请求可用 environments 数组整体设置标签；旧单 environment 字段修改表示单标签覆盖。不按名称自动合并数据模型，每次新建导入仍创建独立模型，需在管理界面手动合并。已有字段的结构变更不能绕过模型发布：若现有结构被多个实例引用且有差异，拒绝本次导入，需先在数据模型管理中预览并发布。
 fields 保留 source_key、display_name、zone、unique、position。display_config.identifier_fields 只能引用索引或展示字段，density 为 summary 或 full。记录标识不等同于逻辑唯一 KEY。
 
 记录
@@ -35,3 +36,5 @@ POST /datasets/transfer/import
 
 兼容性
 仅结构不能夹带记录；版本或未知属性不受支持时拒绝导入。若旧数据包含未声明字段，原生包导出会拒绝并提示先补全字段定义，避免静默丢失；常规数据导出仍可用于取出旧数据。文件为明文 JSON，机密是否包含由每次导出明确选择，选择不会沿用上一次。
+
+普通 JSON/CSV/XLSX 导入也将业务字段 id 与系统记录 ID 分离；新记录由服务生成系统 ID，按目标数据集与逻辑 KEY 匹配现有记录时保留其原系统 ID。映射模板名已属于其他数据集时拒绝提交，不移动或覆盖模板，整个导入事务回滚。

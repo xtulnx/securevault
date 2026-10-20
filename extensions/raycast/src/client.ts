@@ -123,7 +123,8 @@ export class VaultClient {
     });
     if (filters.datasetId) params.set("dataset_id", filters.datasetId);
     if (filters.category) params.set("category", filters.category);
-    if (filters.environment) params.set("environment", filters.environment);
+    if (filters.tags.length) params.set("environment_tags", JSON.stringify(filters.tags));
+    if (filters.schemaId) params.set("schema_id", filters.schemaId);
     if (filters.includeExpired) params.set("include_expired", "true");
     const result = await this.get<SearchResult>(`records/search?${params}`, signal);
     if (!Array.isArray(result.records) || !Number.isFinite(result.total)) {

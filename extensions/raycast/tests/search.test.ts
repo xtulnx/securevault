@@ -12,10 +12,12 @@ const requireDependency = createRequire(__filename);
 type Props = { children?: ReactNode; searchBarAccessory?: ReactNode; [key: string]: unknown };
 const host = (name: string) => (props: Props) => createElement(name, props, props.children);
 const item = Object.assign(
-  (props: Props) => createElement("list-item", props, props.detail as ReactNode, props.children),
+  (props: Props) =>
+    createElement("list-item", props, props.detail as ReactNode, props.children, props.actions as ReactNode),
   { Detail: host("item-detail") },
 );
 const dropdown = Object.assign(host("dropdown"), { Item: host("dropdown-item") });
+const tagPicker = Object.assign(host("tag-picker"), { Item: host("tag-item") });
 const api = {
   List: Object.assign(
     (props: Props) =>
@@ -35,7 +37,11 @@ const api = {
   }),
   ActionPanel: Object.assign(host("actions"), { Section: host("action-section"), Submenu: host("submenu") }),
   Detail: host("detail"),
-  Form: Object.assign(host("form"), { Dropdown: dropdown, Checkbox: host("checkbox") }),
+  Form: Object.assign((props: Props) => createElement("form", props, props.children, props.actions as ReactNode), {
+    Dropdown: dropdown,
+    TagPicker: tagPicker,
+    Checkbox: host("checkbox"),
+  }),
   Icon: {},
   Keyboard: { Shortcut: { Common: { Refresh: {}, Open: {} } } },
   getPreferenceValues: () => ({ serverUrl: "http://127.0.0.1:4173", appId: "TEST_APP", appKey: "TEST_KEY" }),
@@ -198,4 +204,91 @@ test("connection diagnostics report the configured address and authorization wit
   assert.match(markdown, /没有可访问的数据集/);
   assert.doesNotMatch(markdown, /TEST_KEY|TEST_APP/);
   assert.ok(requests.every((pathname) => pathname === "/api/client/datasets"));
+});
+
+test("tag picker applies all tags with model ID and exposes only authorized matching datasets", async (t) => {
+  const requests: URL[] = [];
+  const datasets = [
+    {
+      ...dataset,
+      id: "a-prod",
+      name: "商户凭据",
+      environments: ["客户A", "生产"],
+      schema_id: "model-a",
+      schema_name: "商户模型",
+      schema_version: 2,
+    },
+    { ...dataset, id: "a-test", environments: ["客户A", "测试"], schema_id: "model-a", schema_name: "商户模型" },
+    { ...dataset, id: "b-prod", environments: ["客户B", "生产"], schema_id: "model-b", schema_name: "商户模型" },
+  ];
+  const renderer = await render(t, async (input) => {
+    const url = new URL(String(input));
+    requests.push(url);
+    return Response.json(url.pathname.endsWith("client/datasets") ? { datasets } : { records: [], total: 0 });
+  });
+  await settled(renderer);
+  const filterTarget = () =>
+    findAll(renderer, "push").find((action) => action.props.title === "筛选目录、标签和模型")!.props.target;
+  let form!: ReactTestRenderer;
+  await act(async () => {
+    form = create(filterTarget());
+  });
+  t.after(async () => {
+    await act(async () => form.unmount());
+  });
+  assert.deepEqual(
+    findAll(form, "tag-item")
+      .map((option) => option.props.value)
+      .sort(),
+    ["客户A", "客户B", "测试", "生产"].sort(),
+  );
+  assert.ok(findAll(form, "dropdown-item").some((option) => option.props.title === "商户模型 · model-a"));
+  await act(async () => {
+    find(form, "tag-picker").props.onChange(["客户A", "生产"]);
+  });
+  await act(async () => {
+    findAll(form, "dropdown")
+      .find((node) => node.props.id === "schema")!
+      .props.onChange("model-a");
+  });
+  const ids = findAll(form, "dropdown")
+    .find((node) => node.props.id === "dataset")!
+    .findAll((node) => String(node.type) === "dropdown-item")
+    .map((node) => node.props.value);
+  assert.deepEqual(ids, ["", "a-prod"]);
+  await act(async () => {
+    find(form, "submit").props.onSubmit();
+  });
+  await settled(renderer);
+  const search = requests.filter((url) => url.pathname.endsWith("records/search")).at(-1)!;
+  assert.deepEqual(JSON.parse(search.searchParams.get("environment_tags")!), ["客户A", "生产"]);
+  assert.equal(search.searchParams.get("schema_id"), "model-a");
+  assert.ok(!requests.some((url) => url.pathname.endsWith("catalog")));
+});
+
+test("dataset information remains available without notes and displays model metadata", async (t) => {
+  const current = {
+    ...dataset,
+    name: "商户凭据",
+    environments: ["客户A", "生产"],
+    schema_name: "商户模型",
+    schema_id: "model-a",
+    schema_version: 2,
+  };
+  const renderer = await render(t, async (input) => {
+    const pathname = new URL(String(input)).pathname;
+    return Response.json(
+      pathname.endsWith("client/datasets")
+        ? { datasets: [current] }
+        : pathname.endsWith("records/search")
+          ? { records: [record], total: 1 }
+          : record,
+    );
+  });
+  await settled(renderer);
+  const info = findAll(renderer, "push").find((action) => action.props.title === "查看数据集信息")!.props.target;
+  assert.match(info.props.markdown, /商户凭据/);
+  assert.match(info.props.markdown, /客户A \/ 生产/);
+  assert.match(info.props.markdown, /商户模型 · v2/);
+  assert.match(info.props.markdown, /暂无数据集说明/);
 });

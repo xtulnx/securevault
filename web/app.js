@@ -450,7 +450,7 @@ function renderDatasetActions() {
     import: '<path d="M12 16V3m-5 5 5-5 5 5M4 15v6h16v-6"/>',
   };
   const actions = [{ action: "view", label: "查看数据集" }, ...(state.canManage ? [{ action: "edit", label: "编辑数据集" }, { action: "import", label: "导入到此数据集" }, { action: "new", label: "新增主表记录" }, { action: "supplement", label: "管理数据集附表" }] : [])];
-  const chooser = candidates.length > 1 || !dataset ? `<select id="search-dataset-select" aria-label="选择具体数据集"><option value="">当前目录全部数据集</option>${candidates.map((item) => `<option value="${escapeHtml(item.id)}" ${dataset?.id === item.id ? "selected" : ""}>${escapeHtml(item.category_path)} · ${escapeHtml(item.environment || "无环境")}</option>`).join("")}</select>` : "";
+  const chooser = candidates.length > 1 || !dataset ? `<select id="search-dataset-select" aria-label="选择具体数据集"><option value="">当前目录全部数据集</option>${candidates.map((item) => `<option value="${escapeHtml(item.id)}" ${dataset?.id === item.id ? "selected" : ""}>${escapeHtml(datasetLocator(item))} · ${escapeHtml(datasetLabelText(item))}</option>`).join("")}</select>` : "";
   container.innerHTML = chooser + (dataset ? actions.map(({ action, label }) => `<button type="button" class="icon-button dataset-context-action" data-action="${action}" title="${label}" aria-label="${label}"><svg viewBox="0 0 24 24" aria-hidden="true">${icons[action]}</svg></button>`).join("") : "");
   $("#search-dataset-select")?.addEventListener("change", async (event) => {
     state.selectedDatasetId = event.target.value || null;
@@ -560,7 +560,7 @@ function renderStats() {
 }
 
 function datasetOptions() {
-  $("#import-dataset-select").innerHTML = state.datasets.map((dataset) => `<option value="${escapeHtml(dataset.id)}">${escapeHtml(dataset.category_path)}${dataset.environment ? ` · ${escapeHtml(dataset.environment)}` : ""}</option>`).join("");
+  $("#import-dataset-select").innerHTML = state.datasets.map((dataset) => `<option value="${escapeHtml(dataset.id)}">${escapeHtml(datasetLocator(dataset))} · ${escapeHtml(datasetLabelText(dataset))}</option>`).join("");
   $("#import-button").disabled = state.datasets.length === 0;
 }
 
@@ -747,6 +747,7 @@ function openDatasetEdit(datasetId) {
   $("#dataset-title").textContent = "编辑数据集属性";
   $("#dataset-help").textContent = "编辑目录、描述和字段性质。Schema 可在导入时继续演进。";
   $("#dataset-category").value = dataset.category_path;
+  $("#dataset-name").value = dataset.name || "";
   $("#dataset-environment").value = dataset.environment || "";
   $("#dataset-description").value = dataset.description || "";
   updateDatasetDescriptionPreview();
@@ -788,7 +789,7 @@ function openDatasetInfo(datasetId) {
   const identity = new Set(dataset.identity_fields || []);
   const fields = [...dataset.fields].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
   const visible = (dataset.list_fields?.length ? dataset.list_fields : fields.filter((field) => ["indexes", "display"].includes(field.zone))).filter((field) => field.visible !== false && fields.some((definition) => definition.source_key === field.source_key && ["indexes", "display"].includes(definition.zone))).sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
-  $("#dataset-info-content").innerHTML = `<dl class="dataset-info-summary"><div><dt>目录路径</dt><dd>${escapeHtml(dataset.category_path)}</dd></div><div><dt>环境标签</dt><dd>${escapeHtml(dataset.environment || "未设置")}</dd></div><div><dt>记录数量</dt><dd>${dataset.record_count} 条</dd></div><div><dt>字段数量</dt><dd>${fields.length} 个</dd></div><div><dt>逻辑唯一 KEY</dt><dd>${escapeHtml([...identity].join(" + ") || "未设置")}</dd></div><div><dt>重复处理</dt><dd>${dataset.conflict_strategy === "allow_mark" ? "允许导入并标记重复" : escapeHtml(dataset.conflict_strategy)}</dd></div></dl><section class="dataset-description-section"><h4>数据集描述</h4><div class="markdown-content">${dataset.description?.trim() ? renderMarkdown(dataset.description) : '<p class="dataset-info-note">暂无描述，可在编辑数据集中添加。</p>'}</div></section><h4>字段定义</h4><div class="dataset-info-table-wrap"><table class="dataset-info-table"><thead><tr><th>源字段</th><th>可读名称</th><th>数据区域</th><th>唯一 KEY</th></tr></thead><tbody>${fields.map((field) => `<tr><td>${escapeHtml(field.source_key)}</td><td>${escapeHtml(field.display_name || field.source_key)}</td><td>${escapeHtml(zones[field.zone] || field.zone)}</td><td>${identity.has(field.source_key) ? "是" : "—"}</td></tr>`).join("") || '<tr><td colspan="4">尚未定义字段</td></tr>'}</tbody></table></div><h4>检索列表展示</h4><p class="dataset-info-note">按展示顺序排列；普通、敏感、隐藏和忽略字段不会直接显示在检索列表中。</p><div class="dataset-info-table-wrap"><table class="dataset-info-table"><thead><tr><th>字段</th><th>展示名称</th><th>展示形式</th></tr></thead><tbody>${visible.map((field) => `<tr><td>${escapeHtml(field.source_key)}</td><td>${escapeHtml(field.display_name || field.source_key)}</td><td>${escapeHtml(formats[field.format || "single_line"] || field.format)}</td></tr>`).join("") || '<tr><td colspan="3">未配置可见字段</td></tr>'}</tbody></table></div>`;
+  $("#dataset-info-content").innerHTML = `<dl class="dataset-info-summary"><div><dt>名称</dt><dd>${escapeHtml(datasetName(dataset))}</dd></div><div><dt>目录路径</dt><dd>${escapeHtml(dataset.category_path)}</dd></div><div><dt>标签</dt><dd>${escapeHtml(datasetLabelText(dataset))}</dd></div><div><dt>记录数量</dt><dd>${dataset.record_count} 条</dd></div><div><dt>字段数量</dt><dd>${fields.length} 个</dd></div><div><dt>逻辑唯一 KEY</dt><dd>${escapeHtml([...identity].join(" + ") || "未设置")}</dd></div><div><dt>重复处理</dt><dd>${dataset.conflict_strategy === "allow_mark" ? "允许导入并标记重复" : escapeHtml(dataset.conflict_strategy)}</dd></div></dl><section class="dataset-description-section"><h4>数据集描述</h4><div class="markdown-content">${dataset.description?.trim() ? renderMarkdown(dataset.description) : '<p class="dataset-info-note">暂无描述，可在编辑数据集中添加。</p>'}</div></section><h4>字段定义</h4><div class="dataset-info-table-wrap"><table class="dataset-info-table"><thead><tr><th>源字段</th><th>可读名称</th><th>数据区域</th><th>唯一 KEY</th></tr></thead><tbody>${fields.map((field) => `<tr><td>${escapeHtml(field.source_key)}</td><td>${escapeHtml(field.display_name || field.source_key)}</td><td>${escapeHtml(zones[field.zone] || field.zone)}</td><td>${identity.has(field.source_key) ? "是" : "—"}</td></tr>`).join("") || '<tr><td colspan="4">尚未定义字段</td></tr>'}</tbody></table></div><h4>检索列表展示</h4><p class="dataset-info-note">按展示顺序排列；普通、敏感、隐藏和忽略字段不会直接显示在检索列表中。</p><div class="dataset-info-table-wrap"><table class="dataset-info-table"><thead><tr><th>字段</th><th>展示名称</th><th>展示形式</th></tr></thead><tbody>${visible.map((field) => `<tr><td>${escapeHtml(field.source_key)}</td><td>${escapeHtml(field.display_name || field.source_key)}</td><td>${escapeHtml(formats[field.format || "single_line"] || field.format)}</td></tr>`).join("") || '<tr><td colspan="3">未配置可见字段</td></tr>'}</tbody></table></div>`;
   closeDatasetDownloads();
   $("#dataset-info-modal").showModal();
 }
@@ -1037,7 +1038,7 @@ async function createDataset() {
       const editedId = state.editDatasetId;
       const fields = $$("#schema-fields .schema-field").map((row, position) => { const sourceKey = row.querySelector(".schema-source-key-input").value.trim(); const original = row.dataset.originalSource; return { source_key: sourceKey, previous_source_key: original !== sourceKey ? original : null, display_name: row.querySelector(".schema-field-label").value.trim(), zone: row.querySelector(".schema-field-zone").value, unique: row.querySelector(".schema-field-unique").checked, position }; });
       const identityFields = fields.filter((field) => field.unique).map((field) => field.source_key);
-      await api(`/datasets/${encodeURIComponent(state.editDatasetId)}`, { method: "PATCH", body: JSON.stringify({ category_path: categoryPath, description: $("#dataset-description").value, environment: $("#dataset-environment").value.trim() || null, clear_environment: !$("#dataset-environment").value.trim(), fields, identity_fields: identityFields, list_fields: readListConfig() }) });
+      await api(`/datasets/${encodeURIComponent(state.editDatasetId)}`, { method: "PATCH", body: JSON.stringify({ name: $("#dataset-name").value.trim(), category_path: categoryPath, description: $("#dataset-description").value, environment: $("#dataset-environment").value.trim() || null, clear_environment: !$("#dataset-environment").value.trim(), fields, identity_fields: identityFields, list_fields: readListConfig() }) });
       if (state.editorReturn === "search") {
         state.category = categoryPath;
         state.environment = $("#dataset-environment").value.trim() || "all";
@@ -1052,6 +1053,7 @@ async function createDataset() {
     }
     const result = await api("/datasets", { method: "POST", body: JSON.stringify({
       category_path: categoryPath,
+      name: $("#dataset-name").value.trim(),
       description: $("#dataset-description").value,
       environment: $("#dataset-environment").value.trim() || null,
       fields: [],
@@ -1188,6 +1190,7 @@ $("#search-input").addEventListener("input", (event) => {
   state.searchTimer = setTimeout(() => fetchRecords().catch((error) => showToast(error.message, "error")), 180);
 });
 $("#clear-filters").addEventListener("click", async () => {
+  state.environmentTags = []; state.schemaFilter = "";
   state.query = ""; state.selectedDatasetId = null; state.category = "all"; state.categories = []; state.environment = "all"; state.includeExpired = false; state.page = 1;
   $("#include-expired").checked = false;
   $("#search-input").value = "";
@@ -1202,7 +1205,7 @@ $("#dataset-manager-button").addEventListener("click", () => openDatasetManager(
 $("#manager-new-dataset").addEventListener("click", () => $("#new-dataset-button").click());
 $("#manager-import").addEventListener("click", () => openImport());
 $("#app-manager-button").addEventListener("click", async () => { try { await loadApps(); showWorkspace("apps"); } catch (error) { showToast(error.message, "error"); } });
-$("#new-dataset-button").addEventListener("click", () => { state.editDatasetId = null; state.evolvedFields = []; state.currentBatchSources = []; $("#dataset-title").textContent = "定义数据集"; $("#dataset-help").textContent = "可先创建空数据集，首次导入时再定义 Schema。"; $("#dataset-category").value = ""; $("#dataset-environment").value = ""; $("#dataset-description").value = ""; updateDatasetDescriptionPreview(); renderSchemaFields([]); $("#list-config").hidden = true; $("#list-config-fields").replaceChildren(); $("#first-schema-fields").replaceChildren(); $("#first-schema").hidden = true; $("#save-dataset").innerHTML = "创建数据集 <span>↗</span>"; openDatasetEditor(); $("#dataset-category").focus(); });
+$("#new-dataset-button").addEventListener("click", () => { state.editDatasetId = null; state.evolvedFields = []; state.currentBatchSources = []; $("#dataset-title").textContent = "定义数据集"; $("#dataset-help").textContent = "可先创建空数据集，首次导入时再定义 Schema。"; $("#dataset-category").value = ""; $("#dataset-name").value = ""; $("#dataset-environment").value = ""; $("#dataset-description").value = ""; updateDatasetDescriptionPreview(); renderSchemaFields([]); $("#list-config").hidden = true; $("#list-config-fields").replaceChildren(); $("#first-schema-fields").replaceChildren(); $("#first-schema").hidden = true; $("#save-dataset").innerHTML = "创建数据集 <span>↗</span>"; openDatasetEditor(); $("#dataset-category").focus(); });
 $("#edit-dataset-button").addEventListener("click", () => {
   const dataset = currentDataset();
   if (dataset) openDatasetEdit(dataset.id);

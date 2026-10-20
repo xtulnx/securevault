@@ -9,8 +9,13 @@ export interface Field {
 
 export interface Dataset {
   id: string;
+  name?: string;
   category_path: string;
+  schema_id?: string | null;
+  schema_name?: string | null;
+  schema_version?: number | null;
   environment: string | null;
+  environments?: string[];
   fields: Field[];
   supplement_fields: Field[];
   identity_fields: string[];
@@ -30,6 +35,7 @@ export interface VaultRecord {
   dataset_id: string;
   category: string;
   environment: string | null;
+  environments?: string[];
   indexes?: Values;
   display?: Values;
   normal?: Values;
@@ -54,7 +60,8 @@ export interface SearchResult {
 export interface Filters {
   datasetId: string;
   category: string;
-  environment: string;
+  tags: string[];
+  schemaId: string;
   includeExpired: boolean;
 }
 

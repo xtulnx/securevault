@@ -35,6 +35,11 @@ pub(super) async fn search(
         let mut sql = String::from("SELECT id,dataset_id,category_path,environment,indexes_json,display_json,updated_at,duplicate_of,(SELECT COUNT(*) FROM protected_fields p WHERE p.record_id=r.id AND p.zone='secrets'),(SELECT json_group_array(source_key) FROM protected_fields p WHERE p.record_id=r.id AND p.zone='secrets'),expired FROM records r WHERE 1=1");
         let mut values: Vec<rusqlite::types::Value> = Vec::new();
         if let Some(dataset_id) = query.dataset_id.as_ref() { sql.push_str(" AND r.dataset_id=?"); values.push(dataset_id.clone().into()); }
+        for (column, filter) in [("schema_id",&query.schema_id)] {
+            if let Some(id)=filter {sql.push_str(&format!(" AND r.dataset_id IN (SELECT id FROM datasets WHERE {column}=?)"));values.push(id.clone().into());}
+        }
+        apply_environment_filters(&mut sql,&mut values,&query)?;
+        let environment_map=catalog::environment_map(connection)?;
         if !query.include_expired { sql.push_str(" AND expired=0"); }
         if let Some(category) = query.category.as_ref() { sql.push_str(" AND (category_path=? OR category_path LIKE ? ESCAPE '\\')"); values.push(category.clone().into()); values.push(format!("{}/%", category.replace('\\',"\\\\").replace('%',"\\%").replace('_',"\\_")).into()); }
         if !categories.is_empty() {
@@ -47,7 +52,6 @@ pub(super) async fn search(
             }
             sql.push(')');
         }
-        if let Some(environment) = query.environment.as_ref() { sql.push_str(" AND environment=?"); values.push(environment.clone().into()); }
         let mut statement=connection.prepare(&sql).map_err(internal)?;
         let rows=statement.query_map(rusqlite::params_from_iter(values), |row| {
             let category = row.get::<_,String>(2)?;
@@ -60,9 +64,17 @@ pub(super) async fn search(
             if dataset_scope.as_ref().is_some_and(|allowed| !allowed.iter().any(|candidate| candidate == &dataset_id)) { return Ok(None); }
             let id=row.get::<_,String>(0)?;
             let extension=supplements.get(&id).cloned().unwrap_or(Value::Null);
-            let (matches,matched)=combined_search(&clauses,&category,environment.as_deref(),&dataset_id,&indexes,&display,&extension);
+            let tags=environment_map.get(&dataset_id).cloned().unwrap_or_default();
+            let mut matched=Vec::new();
+            let matches=clauses.iter().all(|clause| {
+                let mut fields=combined_clause_fields(clause,&category,environment.as_deref(),&dataset_id,&indexes,&display,&extension);
+                if clause.field.is_none() || matches!(clause.field.as_deref(),Some("env"|"environment")) {fields.extend(tags.iter().map(|v|("environment".to_owned(),json!(v))));}
+                let hits=fields.into_iter().filter(|(field,value)|clause_matches(field,value,clause)).map(|(field,_)|field).collect::<Vec<_>>();
+                let found=!hits.is_empty();matched.extend(hits);found
+            });
+            matched.sort();matched.dedup();
             if !matches {return Ok(None);}
-            Ok(Some(json!({"id":row.get::<_,String>(0)?,"dataset_id":dataset_id,"category":category,"environment":environment,"indexes":indexes,"display":display,"updated":row.get::<_,String>(6)?,"duplicate_of":row.get::<_,Option<String>>(7)?,"secret_count":row.get::<_,i64>(8)?,"secret_fields":secret_fields,"matched_fields":matched,"supplement":extension,"expired":row.get::<_,bool>(10)?})))
+            Ok(Some(json!({"id":row.get::<_,String>(0)?,"dataset_id":dataset_id,"category":category,"environment":environment,"environments":tags,"indexes":indexes,"display":display,"updated":row.get::<_,String>(6)?,"duplicate_of":row.get::<_,Option<String>>(7)?,"secret_count":row.get::<_,i64>(8)?,"secret_fields":secret_fields,"matched_fields":matched,"supplement":extension,"expired":row.get::<_,bool>(10)?})))
         }).map_err(internal)?;
         let mut all_records: Vec<Value> = rows.filter_map(|row| row.map_err(internal).transpose()).collect::<ApiResult<Vec<_>>>()?;
         reference::sort(&mut all_records, &clauses, &definitions);

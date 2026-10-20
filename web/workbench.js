@@ -3,7 +3,7 @@ Object.assign(state, {
   searchRequest: 0, workspaceRequest: 0, viewDensity: 'default', managedDatasetId: null,
   datasetTab: 'fields', editorMode: 'all', editorDirty: false,
   importStep: 1, importBusy: false, transferPackage: null, importPreview: null,
-  exportDatasetId: null, descriptionTarget: null, detailTab: 'overview', categories: [], directoryDraft: []
+  environmentTags: [], managerTags: [], environmentDraft: [], transferEnvironmentDraft: [], exportDatasetId: null, descriptionTarget: null, detailTab: 'overview', categories: [], directoryDraft: []
 });
 
 const fieldZones = { indexes: '索引', display: '展示', normal: '普通', secrets: '敏感', hidden: '隐藏加密', ignore: '忽略' };
@@ -20,6 +20,8 @@ loadWorkspace = async function() {
   const [datasets, tree, summary] = await Promise.all([api('/datasets'), api('/datasets/tree'), api('/vault/summary')]);
   if (!state.unlocked || request !== state.workspaceRequest) return;
   state.datasets = datasets.datasets; state.directories = tree.directories; state.summary = summary;
+  renderDimensionFilters();
+  if (state.environment !== 'all' && !environments().includes(state.environment)) state.environment = 'all';
   await fetchRecords();
   if (!state.unlocked || request !== state.workspaceRequest) return;
   renderCategoryTree(); renderFilters(); renderIndexReference(); renderStats();
@@ -196,16 +198,134 @@ function selectedCategories() {
 }
 
 function datasetInCategoryScope(dataset) {
+  if (state.schemaFilter && dataset.schema_id !== state.schemaFilter) return false;
   const paths = selectedCategories();
   return !paths.length || paths.some(path => dataset.category_path === path || dataset.category_path.startsWith(`${path}/`));
 }
 
+function datasetName(dataset) { return dataset?.name?.trim() || dataset?.category_path?.split('/').at(-1) || '未命名数据集'; }
+function datasetLocator(dataset) { return dataset?.name?.trim() ? `${datasetName(dataset)} · ${dataset.category_path}` : dataset?.category_path || ''; }
+function updateDatasetNamePlaceholder() {
+  const fallback = $('#dataset-category').value.trim().split('/').at(-1);
+  $('#dataset-name').placeholder = fallback ? `留空时显示“${fallback}”` : '留空时使用目录末级名称';
+}
+$('#dataset-category').addEventListener('input', updateDatasetNamePlaceholder);
+
+// Reference views use metadata snapshots only; opening them never changes editor or import drafts.
+function referencedModel(dataset) {
+  const model = state.canManage ? state.catalog.schemas.find(item => item.id === dataset?.schema_id) : null;
+  return { name: model?.name || dataset?.schema_name || '独立模型', version: model?.version || dataset?.schema_version,
+    description: model?.description || '', definition: model?.definition || dataset || {},
+    available: Boolean(model), error: !model && dataset?.schema_id
+      ? state.referenceCatalogError || (state.referenceCatalogLoaded ? '未找到此数据模型，请重新加载。' : '正在加载模型说明…') : '' };
+}
+function fileDatasetReference() {
+  const pack = state.transferPackage, schema = pack?.schema;
+  if (!schema) return null;
+  const environments = [...datasetLabels(schema)];
+  if (schema.customer && !environments.includes(schema.customer)) environments.push(schema.customer);
+  return { ...schema, environments, record_count: pack.records?.length || 0 };
+}
+function fileModelReference(dataset) {
+  return { name: dataset?.schema_name || dataset?.category_path || '新建独立模型', description: dataset?.schema_description || '',
+    definition: dataset || {}, available: true, note: '文件中的模型定义；新建导入会建立独立模型。' };
+}
+function referenceCard(kind, value, key, caption) {
+  const model = kind === 'model', description = value.description || '';
+  const title = model ? value.name : datasetName(value);
+  const definition = model ? value.definition : value;
+  const metadata = model ? [value.version ? `v${value.version}` : '', `${definition.fields?.length || 0} 个字段`].filter(Boolean).join(' · ')
+    : `${value.category_path || ''} · ${value.record_count || 0} 条记录`;
+  return `<article class="reference-card"><div class="section-heading"><span class="reference-caption">${caption}</span><button type="button" class="clear-button" data-reference="${key}" aria-label="查看${model ? '模型' : '数据集'}详情：${escapeHtml(title)}">查看详情</button></div><h4>${escapeHtml(title)}</h4><p class="reference-meta">${escapeHtml(metadata)}</p>${model ? '' : `<div class="dataset-dimensions">${datasetLabelBadges(value)}</div>`}<p class="description-summary">${escapeHtml(description.trim() ? descriptionSummary(description) : value.error || (model ? '暂无模型说明，可在模型中记录取数步骤或 SQL。' : '暂无数据集描述'))}</p>${value.note ? `<p class="security-note">${escapeHtml(value.note)}</p>` : ''}</article>`;
+}
+function bindReferenceCards(container, entries) {
+  container.querySelectorAll('[data-reference]').forEach(button => button.addEventListener('click', () => {
+    const entry = entries[button.dataset.reference];
+    if (entry) openReferenceDetails(entry.kind, entry.value, entry.caption);
+  }));
+  container.querySelector('[data-retry-reference]')?.addEventListener('click', reloadReferenceCatalog);
+}
+function openReferenceDetails(kind, value, caption) {
+  if (!state.unlocked || !state.canManage || !value) return;
+  const model = kind === 'model', definition = model ? value.definition : value;
+  state.referenceDetails = { kind, value };
+  $('#reference-info-title').textContent = model ? value.name : datasetName(value);
+  const summary = model
+    ? `<div><dt>版本</dt><dd>${value.version ? `v${escapeHtml(value.version)}` : '未提供版本'}</dd></div><div><dt>主表 / 附表字段</dt><dd>${definition.fields?.length || 0} / ${definition.supplement_fields?.length || 0}</dd></div><div><dt>逻辑唯一 KEY</dt><dd>${escapeHtml(definition.identity_fields?.join(' + ') || '未设置')}</dd></div>`
+    : `<div><dt>目录</dt><dd>${escapeHtml(value.category_path || '')}</dd></div><div><dt>标签</dt><dd>${datasetLabelBadges(value)}</dd></div><div><dt>记录 / 字段</dt><dd>${value.record_count || 0} / ${value.fields?.length || 0}</dd></div><div><dt>数据模型</dt><dd>${escapeHtml(value.schema_name || '独立模型')}${value.schema_version ? ` · v${escapeHtml(value.schema_version)}` : ''}</dd></div>`;
+  $('#reference-info-content').innerHTML = `<p class="reference-caption">${escapeHtml(caption)}</p><dl class="dataset-info-summary">${summary}</dl><section class="reference-description"><h4>${model ? '模型说明 / 数据获取方法' : '数据集描述'}</h4>${value.description?.trim() ? `<div class="markdown-content">${renderMarkdown(value.description)}</div>` : `<p class="security-note">${escapeHtml(value.error || '暂无描述')}</p>`}</section>${value.note ? `<p class="security-note">${escapeHtml(value.note)}</p>` : ''}<details class="reference-fields"><summary>字段定义 · ${definition.fields?.length || 0}</summary>${schemaTable(definition)}</details>${model && definition.supplement_fields?.length ? `<details class="reference-fields"><summary>附表字段 · ${definition.supplement_fields.length}</summary>${schemaTable({ fields: definition.supplement_fields, identity_fields: [], list_fields: [] })}</details>` : ''}`;
+  openDialog('reference-info-modal');
+}
+$('#close-reference-info').addEventListener('click', () => $('#reference-info-modal').close());
+$('#reference-info-modal').addEventListener('close', () => { state.referenceDetails = null; $('#reference-info-content').replaceChildren(); $('#reference-info-title').textContent = '查看详情'; });
+
+function renderEditorModelReference() {
+  const container = $('#editor-model-reference');
+  const dataset = state.datasets.find(item => item.id === state.editDatasetId);
+  const selected = $('#dataset-schema').value;
+  container.hidden = !state.canManage || $('#dataset-basic-fields').hidden || !dataset?.schema_id && !selected;
+  if (container.hidden) { container.replaceChildren(); return; }
+  const value = referencedModel(dataset?.schema_id ? dataset : { schema_id: selected });
+  container.innerHTML = referenceCard('model', value, 'model', dataset?.schema_id ? '引用的数据模型' : '将引用的数据模型') + (state.referenceCatalogError ? '<button type="button" class="clear-button" data-retry-reference>重新加载模型说明</button>' : '');
+  bindReferenceCards(container, { model: { kind: 'model', value, caption: '引用的数据模型' } });
+}
+function renderImportContext() {
+  const container = $('#import-context');
+  container.hidden = !state.canManage || !state.unlocked;
+  if (container.hidden) { container.replaceChildren(); return; }
+  const source = fileDatasetReference();
+  const id = source ? $('#transfer-target').value : $('#import-dataset-select').value;
+  const target = state.datasets.find(item => item.id === id);
+  const entries = {};
+  let html = '';
+  if (target) {
+    const model = referencedModel(target);
+    entries.dataset = { kind: 'dataset', value: target, caption: '当前目标数据集' };
+    entries.model = { kind: 'model', value: model, caption: '当前引用的数据模型' };
+    html = `<h4 class="reference-group-title">${source ? '当前目标信息' : '目标信息'}</h4><div class="reference-grid">${referenceCard('dataset', target, 'dataset', '数据集')}${referenceCard('model', model, 'model', '数据模型')}</div>`;
+  } else if (source) {
+    const next = { ...source, category_path: $('#transfer-category').value || source.category_path, environments: [...state.transferEnvironmentDraft], record_count: 0 };
+    const model = fileModelReference({ ...source, schema_name: source.schema_name || next.category_path });
+    next.schema_name = model.name;
+    next.note = `文件包含 ${source.record_count} 条记录，预览确认后导入。`;
+    entries.dataset = { kind: 'dataset', value: next, caption: '将新建的数据集' };
+    entries.model = { kind: 'model', value: model, caption: '将新建的独立数据模型' };
+    html = `<h4 class="reference-group-title">将新建的数据集与模型</h4><div class="reference-grid">${referenceCard('dataset', next, 'dataset', '数据集')}${referenceCard('model', model, 'model', '数据模型')}</div>`;
+  } else html = '<p class="security-note">请先选择目标数据集；原生数据集文件也可直接导入并新建数据集。</p>';
+  if (source && target) {
+    const model = fileModelReference(source);
+    entries.source = { kind: 'dataset', value: source, caption: '文件中的数据集' };
+    entries.sourceModel = { kind: 'model', value: model, caption: '文件中的模型说明' };
+    html += `<details class="import-source-details"><summary>查看文件中的数据集与模型信息</summary><div class="reference-grid">${referenceCard('dataset', source, 'source', '文件中的数据集')}${referenceCard('model', model, 'sourceModel', '文件中的数据模型')}</div><p class="security-note">文件与目标的结构差异将在确认导入前列出；目标共享模型的说明保留。</p></details>`;
+  }
+  if (state.referenceCatalogError && target?.schema_id) html += '<p class="security-note">模型说明未能加载。<button type="button" class="clear-button" data-retry-reference>重新加载</button></p>';
+  container.innerHTML = html;
+  bindReferenceCards(container, entries);
+}
+async function reloadReferenceCatalog() {
+  if (!state.canManage || !state.unlocked) return;
+  const epoch = state.sessionEpoch;
+  state.referenceCatalogError = null;
+  try { await loadCatalog(); }
+  catch (error) {
+    if (state.unlocked && epoch === state.sessionEpoch) state.referenceCatalogError = '模型说明加载失败，请重试。';
+  }
+  if (state.unlocked && epoch === state.sessionEpoch && typeof document !== 'undefined') { renderEditorModelReference(); renderImportContext(); }
+}
+
+function datasetLabels(dataset) {
+  return Array.isArray(dataset?.environments) ? dataset.environments : dataset?.environment ? [dataset.environment] : [];
+}
+function datasetLabelText(dataset) { return datasetLabels(dataset).join(' / ') || '未指定标签'; }
+function selectedEnvironmentTags() { return state.environmentTags.length ? state.environmentTags : state.environment !== 'all' ? [state.environment] : []; }
+function datasetMatchesLabels(dataset) { return selectedEnvironmentTags().every(label => datasetLabels(dataset).includes(label)); }
+function datasetLabelBadges(dataset) { return datasetLabels(dataset).map(label => datasetDimensionBadge('environment', label)).join('') || datasetDimensionBadge('environment', null); }
 environments = function() {
-  return [...new Set(state.datasets.filter(datasetInCategoryScope).map(dataset => dataset.environment).filter(Boolean))].sort();
+  return [...new Set(state.datasets.filter(datasetInCategoryScope).flatMap(datasetLabels))].sort();
 };
 datasetCandidates = function() {
   if (!selectedCategories().length) return [];
-  return state.datasets.filter(dataset => datasetInCategoryScope(dataset) && (state.environment === 'all' || dataset.environment === state.environment));
+  return state.datasets.filter(dataset => datasetInCategoryScope(dataset) && datasetMatchesLabels(dataset));
 };
 datasetsInCurrentDirectory = function() {
   const selected = currentDataset();
@@ -260,8 +380,14 @@ function singleDatasetInSearchScope() {
   if (selected) return selected;
   const candidates = state.datasets.filter(dataset =>
     datasetInCategoryScope(dataset) &&
-    (state.environment === 'all' || dataset.environment === state.environment));
+    datasetMatchesLabels(dataset));
   return candidates.length === 1 ? candidates[0] : null;
+}
+
+function datasetDimensionBadge(kind, value) {
+  const label = '标签';
+  const text = escapeHtml(value || '未指定');
+  return `<span class="tag dimension-badge ${kind}${value ? '' : ' unspecified'}" title="${label}：${text}" aria-label="${label}：${text}"><b>${text}</b></span>`;
 }
 
 recordCard = function(record) {
@@ -281,7 +407,7 @@ recordCard = function(record) {
   const remaining = ordered.slice(limit);
   const scopedDataset = singleDatasetInSearchScope();
   const singleDataset = scopedDataset?.id === record.dataset_id;
-  const source = singleDataset ? '' : `<div class="record-tags"><span>${escapeHtml(record.category)}</span><span class="tag environment ${/^(正式|prod|production)$/i.test(record.environment || '') ? 'production' : ''}">${escapeHtml(record.environment || '未设置')}</span></div>`;
+  const source = singleDataset ? '' : `<div class="record-tags"><span>${escapeHtml(dataset ? datasetLocator(dataset) : record.category)}</span>${datasetLabelBadges(dataset || record)}</div>`;
   const expired = record.expired ? '<span class="tag expired-tag">已过期</span>' : '';
   const primaryAction = record.secret_count
     ? `<button class="reveal-secrets-button" data-action="open-secrets" data-record="${escapeHtml(record.id)}">按需查看</button>`
@@ -300,7 +426,7 @@ renderRecords = function() {
   const scopedDataset = singleDatasetInSearchScope();
   $('#search-workspace').classList.toggle('has-single-dataset-scope', Boolean(scopedDataset));
   $('#search-workspace').classList.toggle('has-directory-scope', selectedCategories().length > 0);
-  $('#search-scope-label').textContent = scopedDataset ? `${scopedDataset.category_path} · ${scopedDataset.environment || '未设置'}` : selectedCategories().length > 1 ? `${selectedCategories().length} 个目录` : '跨数据集查找';
+  $('#search-scope-label').textContent = scopedDataset ? `${datasetLocator(scopedDataset)} · ${datasetLabelText(scopedDataset)}` : selectedCategories().length > 1 ? `${selectedCategories().length} 个目录` : '跨数据集查找';
   $$('.record-card').forEach(card => card.addEventListener('click', event => {
     if (!event.target.closest('button, summary, details, a, input') && !window.getSelection()?.toString()) openRecordDetail(card.dataset.recordId);
   }));
@@ -357,7 +483,9 @@ fetchRecords = async function() {
   const categories = selectedCategories();
   if (categories.length === 1) params.set('category', categories[0]);
   else if (categories.length > 1) params.set('categories', JSON.stringify(categories));
-  if (state.environment !== 'all') params.set('environment', state.environment);
+  const labels = selectedEnvironmentTags();
+  if (labels.length) params.set('environment_tags', JSON.stringify(labels));
+  if (state.schemaFilter) params.set('schema_id', state.schemaFilter);
   if (state.includeExpired) params.set('include_expired', 'true');
   const status = $('#search-status');
   status.hidden = false; status.textContent = '正在更新检索结果…';
@@ -438,38 +566,83 @@ updateDatasetDescriptionPreview = function() {
 
 function openDescription(target = null) {
   const dataset = target ? state.datasets.find(item => item.id === target) : null;
-  state.descriptionTarget = { id: target || state.editDatasetId || null, editor: !target, initial: target ? dataset.description || '' : $('#dataset-description').value };
-  $('#description-draft').value = state.descriptionTarget.initial;
+  showDescriptionEditor({ kind: 'dataset', id: target || state.editDatasetId || null, editor: !target, initial: target ? dataset.description || '' : $('#dataset-description').value });
+}
+
+function showDescriptionEditor(target) {
+  state.descriptionTarget = { ...target, epoch: state.sessionEpoch };
+  $('#description-edit-title').textContent = target.kind === 'model' ? '修改模型描述' : '修改数据集描述';
+  $('#description-edit-context').textContent = target.kind === 'model'
+    ? `${target.name} · ${target.editor ? '保存到模型草稿，随模型发布生效。' : '保存后所有引用此模型的数据集共用此描述。'}`
+    : '描述仅属于此数据集，支持 Markdown 和 SQL 代码块。';
+  $('#description-draft').value = target.initial;
+  $('#description-draft').placeholder = target.kind === 'model' ? '记录用途、数据来源、提取步骤或 SQL…' : '记录此数据集的说明…';
   $('#description-error').hidden = true;
-  $('#description-draft-preview').innerHTML = renderMarkdown($('#description-draft').value);
+  $('#save-description').disabled = false;
+  $('#description-preview-panel').open = false;
+  $('#description-draft-preview').innerHTML = renderMarkdown(target.initial);
   openDialog('description-edit-modal');
 }
 
+function openModelDescription(id, editor = false) {
+  if (!state.canManage) return;
+  const model = state.catalog.schemas.find(item => item.id === id);
+  if ((editor && !state.schemaDraft) || (!editor && !model)) return;
+  showDescriptionEditor({ kind: 'model', id, editor, draft: editor ? state.schemaDraft : null,
+    name: editor ? $('#shared-schema-name').value || '新数据模型' : model.name,
+    initial: (editor ? state.schemaDraft.description : model.description) || '' });
+}
+
 function closeDescription(force = false) {
+  if (!force && state.descriptionSaving) return;
   if (!force && state.descriptionTarget && $('#description-draft').value !== state.descriptionTarget.initial && !window.confirm('放弃未保存的描述修改？')) return;
   $('#description-edit-modal').close();
   $('#description-draft').value = ''; $('#description-draft-preview').replaceChildren();
+  $('#description-edit-context').textContent = '';
   state.descriptionTarget = null;
 }
 
 async function saveDescription() {
   const target = state.descriptionTarget;
-  if (!target || !state.canManage) return;
+  if (!target || !state.canManage || state.descriptionSaving) return;
+  const current = () => state.unlocked && state.sessionEpoch === target.epoch && state.descriptionTarget === target;
   const value = $('#description-draft').value;
-  $('#save-description').disabled = true;
+  state.descriptionSaving = true; $('#save-description').disabled = true;
   try {
-    if (target.id) {
-      await api(`/datasets/${encodeURIComponent(target.id)}`, { method: 'PATCH', body: JSON.stringify({ description: value }) });
-      if (!state.unlocked || state.descriptionTarget !== target) return;
-      const dataset = state.datasets.find(item => item.id === target.id);
-      if (dataset) dataset.description = value;
+    if (target.kind === 'model') {
+      if (target.editor) {
+        if (state.schemaDraft !== target.draft) return;
+        state.schemaDraft.description = value;
+        updateModelDescriptionPreview();
+      } else {
+        const request = { schema_id: target.id, description: value };
+        const preview = await api('/schemas/preview', { method: 'POST', body: JSON.stringify(request) });
+        if (!current()) return;
+        await api('/schemas/publish', { method: 'POST', body: JSON.stringify({ ...request, confirmation_token: preview.confirmation_token }) });
+        if (!current()) return;
+        await refreshAfterWrite();
+        if (!current()) return;
+        if (await loadCatalog() && current()) {
+          renderCatalog(); renderSchemaView();
+          if (state.managedDatasetId) renderManagedDataset();
+          renderDatasetManager();
+        }
+      }
+    } else {
+      if (target.id) {
+        await api(`/datasets/${encodeURIComponent(target.id)}`, { method: 'PATCH', body: JSON.stringify({ description: value }) });
+        if (!current()) return;
+        const dataset = state.datasets.find(item => item.id === target.id);
+        if (dataset) dataset.description = value;
+      }
+      if (target.editor) { $('#dataset-description').value = value; updateDatasetDescriptionPreview(); if (!target.id) state.editorDirty = true; }
+      if (state.managedDatasetId === target.id) renderManagedDataset();
     }
-    if (target.editor) { $('#dataset-description').value = value; updateDatasetDescriptionPreview(); if (!target.id) state.editorDirty = true; }
-    if (state.managedDatasetId === target.id) renderManagedDataset();
+    if (!current()) return;
     closeDescription(true);
-    showToast(target.id ? '描述已保存' : '描述已加入新数据集草稿', 'success');
-  } catch (error) { $('#description-error').textContent = error.message; $('#description-error').hidden = false; }
-  finally { $('#save-description').disabled = false; }
+    showToast(target.kind === 'model' && target.editor ? '描述已加入模型草稿' : target.id ? '描述已保存' : '描述已加入新数据集草稿', 'success');
+  } catch (error) { if (current()) { $('#description-error').textContent = error.message; $('#description-error').hidden = false; } }
+  finally { if (state.descriptionTarget === target || !state.descriptionTarget) { state.descriptionSaving = false; $('#save-description').disabled = false; } }
 }
 
 renderListConfig = function(fields, configured = []) {
@@ -498,6 +671,9 @@ function renderListPreview() {
 }
 
 openDatasetEdit = function(datasetId, mode = 'all') {
+  const shared = state.datasets.find(dataset => dataset.id === datasetId);
+  if (shared?.schema_id && ['fields', 'list'].includes(mode)) { openSharedSchemaEditor(shared.schema_id); return; }
+  if (shared?.schema_id && mode === 'all') mode = 'basic';
   state.editorMode = mode;
   state.identifierEditing = false;
   $('#record-identifier-fields').replaceChildren();
@@ -508,17 +684,21 @@ openDatasetEdit = function(datasetId, mode = 'all') {
   $('#list-config').hidden = mode === 'basic' || mode === 'fields' || !$('#list-config-fields').children.length;
   const titles = { all: '修改数据集', fields: '修改结构', list: '修改展示规则', basic: '修改基本信息' };
   $('#dataset-title').textContent = titles[mode];
+  if (mode === 'basic') $('#dataset-help').textContent = '编辑名称、目录与标签，数据集描述可单独维护。';
   $('#save-dataset').textContent = mode === 'list' ? '保存展示规则' : mode === 'fields' ? '保存结构' : '保存数据集';
   state.editorDirty = false;
+  loadDatasetDimensions(datasetId);
 };
 
 openDatasetEditor = function() {
   legacy.openDatasetEditor();
+  updateDatasetNamePlaceholder();
   $('#dataset-description-preview-panel').open = false;
   if (!state.editDatasetId) {
     state.editorMode = 'all'; state.identifierEditing = false;
     $('#dataset-basic-fields').hidden = false; $('.dataset-description-editor').hidden = false;
     $('#schema-preview').hidden = true; state.editorDirty = false;
+    loadDatasetDimensions(null);
   }
 };
 
@@ -562,7 +742,9 @@ createDataset = async function() {
       return { source_key, previous_source_key: row.dataset.originalSource !== source_key ? row.dataset.originalSource : null, display_name: row.querySelector('.schema-field-label').value.trim(), zone: row.querySelector('.schema-field-zone').value, unique: row.querySelector('.schema-field-unique').checked, position };
     });
     const id = state.editDatasetId;
-    let body = { category_path: category, environment: $('#dataset-environment').value.trim() || null, clear_environment: !$('#dataset-environment').value.trim() };
+    const name = $('#dataset-name').value.trim();
+    if ([...name].length > 120 || /[\u0000-\u001f\u007f-\u009f]/.test(name)) throw new Error('数据集名称最多 120 个字符，不能包含控制字符');
+    let body = { name, category_path: category, ...readDatasetEnvironments() };
     if (id) {
       const old = state.datasets.find(item => item.id === id);
       if (['fields', 'all'].includes(state.editorMode)) {
@@ -575,11 +757,11 @@ createDataset = async function() {
       await api(`/datasets/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) });
       if (state.editorReturn === 'search') {
         state.category = body.category_path || old.category_path;
-        state.environment = body.clear_environment ? 'all' : body.environment || old.environment || 'all';
+        state.environment = 'all'; state.environmentTags = [];
         state.selectedDatasetId = id;
       }
     } else {
-      const result = await api('/datasets', { method: 'POST', body: JSON.stringify({ ...body, description: $('#dataset-description').value, fields: [], identity_fields: [], conflict_strategy: 'allow_mark' }) });
+      const result = await api('/datasets', { method: 'POST', body: JSON.stringify({ ...body, description: $('#dataset-description').value, schema_id: $('#dataset-schema').value || null, fields: [], identity_fields: [], conflict_strategy: 'allow_mark' }) });
       state.managedDatasetId = result.dataset_id;
     }
     state.editorDirty = false;
@@ -592,32 +774,53 @@ createDataset = async function() {
 
 renderDatasetManager = function() {
   const filter = $('#manager-search').value.trim().toLowerCase();
-  const environment = $('#manager-environment').value;
-  const environments = [...new Set(state.datasets.map(dataset => dataset.environment).filter(Boolean))].sort();
-  $('#manager-environment').innerHTML = '<option value="">全部环境</option>' + environments.map(value => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join('');
-  $('#manager-environment').value = environments.includes(environment) ? environment : '';
-  const datasets = state.datasets.filter(dataset => (!environment || dataset.environment === environment) && `${dataset.category_path} ${dataset.description || ''} ${(dataset.fields || []).map(field => `${field.source_key} ${field.display_name}`).join(' ')}`.toLowerCase().includes(filter));
-  $('#dataset-manager-list').innerHTML = `<div class="dataset-table-header"><span>数据集 / 目录</span><span>环境</span><span>记录</span><span>字段</span><span>逻辑唯一 KEY</span><span>操作</span></div>` + datasets.map(dataset => `<div class="dataset-manager-row"><div class="dataset-manager-name"><strong>${escapeHtml(dataset.category_path.split('/').at(-1))}</strong><span>${escapeHtml(dataset.category_path)}</span></div><span class="tag environment ${/^(正式|prod|production)$/i.test(dataset.environment || '') ? 'production' : ''}">${escapeHtml(dataset.environment || '未设置')}</span><span>${dataset.record_count || 0}</span><span>${dataset.fields?.length || 0}</span><code>${escapeHtml(dataset.identity_fields?.join(' + ') || '未设置')}</code><div class="row-actions"><button class="clear-button dataset-manage-button" data-dataset-id="${escapeHtml(dataset.id)}">管理</button><button class="clear-button dataset-export-open" data-dataset-id="${escapeHtml(dataset.id)}">导出</button><details class="row-menu"><summary aria-label="更多数据集操作">⋯</summary><div><button class="dataset-view-button" data-dataset-id="${escapeHtml(dataset.id)}">查看信息</button>${state.canManage ? `<button class="dataset-edit-button" data-dataset-id="${escapeHtml(dataset.id)}">修改数据集</button><button class="dataset-new-record-button" data-dataset-id="${escapeHtml(dataset.id)}">新增记录</button><button class="dataset-supplement-button" data-dataset-id="${escapeHtml(dataset.id)}">管理附表</button>` : ''}</div></details></div></div>`).join('') + (!datasets.length ? '<p class="detail-empty">没有匹配的数据集</p>' : '');
+  const labels = [...new Set(state.datasets.flatMap(datasetLabels))].sort();
+  state.managerTags = state.managerTags.filter(label => labels.includes(label));
+  $('#manager-environment').innerHTML = labelFilterButtons(labels, state.managerTags);
+  $$('#manager-environment [data-environment]').forEach(button => button.addEventListener('click', () => {
+    state.managerTags = toggleLabel(state.managerTags, button.dataset.environment);
+    renderDatasetManager();
+  }));
+  const datasets = state.datasets.filter(dataset => (!$('#manager-schema').value || dataset.schema_id === $('#manager-schema').value) && state.managerTags.every(label => datasetLabels(dataset).includes(label)) && `${datasetLabelText(dataset)} ${dataset.name || ''} ${dataset.schema_name || ''} ${dataset.category_path} ${dataset.description || ''} ${(dataset.fields || []).map(field => `${field.source_key} ${field.display_name}`).join(' ')}`.toLowerCase().includes(filter));
+  $('#dataset-manager-list').innerHTML = `<div class="dataset-table-header"><span>数据集 / 目录</span><span>标签</span><span>数据模型</span><span>记录</span><span>字段</span><span>逻辑唯一 KEY</span><span>操作</span></div>` + datasets.map(dataset => {
+    const id = escapeHtml(dataset.id), path = escapeHtml(dataset.category_path);
+    const action = (css, text) => `<button class="clear-button ${css}" data-dataset-id="${id}">${text}</button>`;
+    const model = state.canManage && dataset.schema_id ? `<button class="dataset-model-button" data-dataset-id="${id}" title="查看数据模型">${escapeHtml(dataset.schema_name || '独立模型')}</button>` : `<span>${escapeHtml(dataset.schema_name || '独立模型')}</span>`;
+    return `<div class="dataset-manager-row"><div class="dataset-manager-name"><button class="dataset-name-link dataset-records-button" data-dataset-id="${id}" title="查看此数据集的记录"><strong>${escapeHtml(datasetName(dataset))}</strong></button><span class="dataset-directory"><small>目录</small> ${path}</span></div><span class="dataset-row-labels">${datasetLabelBadges(dataset)}</span><div class="dataset-manager-model">${model}</div><button class="dataset-record-count dataset-records-button" data-dataset-id="${id}" title="查看记录">${dataset.record_count || 0}</button><button class="dataset-field-count dataset-fields-button" data-dataset-id="${id}" title="查看字段定义">${dataset.fields?.length || 0}</button><code class="dataset-key">${escapeHtml(dataset.identity_fields?.join(' + ') || '未设置')}</code><div class="row-actions dataset-row-actions">${action('dataset-manage-button', '信息')}${state.canManage ? `${action('dataset-edit-button', '编辑')}${action('dataset-import-button', '导入')}${action('dataset-new-record-button', '新增')}` : ''}${action('dataset-supplement-button', '附表')}${action('dataset-export-open', '导出')}</div></div>`;
+  }).join('') + (!datasets.length ? '<p class="detail-empty">没有匹配的数据集</p>' : '');
   const bind = (selector, action) => $$(selector).forEach(button => button.addEventListener('click', () => action(button.dataset.datasetId)));
-  bind('.dataset-manage-button', openManagedDataset); bind('.dataset-export-open', openExport);
-  bind('.dataset-view-button', openDatasetInfo); bind('.dataset-edit-button', openDatasetEdit);
-  bind('.dataset-new-record-button', id => openManualRecord('main', id)); bind('.dataset-supplement-button', openSupplement);
+  bind('.dataset-manage-button', id => openManagedDataset(id, 'basic'));
+  bind('.dataset-records-button', openDatasetRecords);
+  bind('.dataset-fields-button', id => { const dataset = state.datasets.find(item => item.id === id); if (state.canManage && dataset?.schema_id) openSharedSchemaView(dataset.schema_id); else openManagedDataset(id, 'fields'); });
+  bind('.dataset-model-button', id => openSharedSchemaView(state.datasets.find(item => item.id === id).schema_id));
+  bind('.dataset-export-open', openExport); bind('.dataset-edit-button', openDatasetEdit);
+  bind('.dataset-import-button', openImport); bind('.dataset-new-record-button', id => openManualRecord('main', id)); bind('.dataset-supplement-button', openSupplement);
 };
 
-function openManagedDataset(id) {
-  state.managedDatasetId = id; state.datasetTab = 'fields';
+async function openDatasetRecords(id) {
+  const dataset = state.datasets.find(item => item.id === id);
+  if (!dataset) return;
+  state.category = dataset.category_path; state.categories = []; state.environment = 'all'; state.environmentTags = [];
+  state.schemaFilter = ''; state.query = ''; $('#search-input').value = ''; state.selectedDatasetId = id; state.page = 1;
+  showWorkspace('search'); renderDimensionFilters(); renderCategoryTree(); renderFilters(); renderIndexReference();
+  try { await fetchRecords(); } catch (error) { showToast(error.message, 'error'); }
+}
+
+function openManagedDataset(id, tab = 'fields') {
+  state.managedDatasetId = id; state.datasetTab = tab;
   renderManagedDataset(); showWorkspace('dataset');
+  if (state.canManage) loadCatalog().then(loaded => { if (loaded && state.managedDatasetId === id && state.workspace === 'dataset') renderManagedDataset(); }).catch(error => { if (state.unlocked) showToast(error.message, 'error'); });
 }
 
 function schemaTable(dataset, fields = dataset.fields || []) {
   const keys = new Set(dataset.identity_fields || []);
-  return `<div class="dataset-info-table-wrap"><table class="dataset-info-table"><thead><tr><th>源字段</th><th>显示名称</th><th>用途</th><th>唯一 KEY</th><th>列表展示</th><th>顺序</th></tr></thead><tbody>${fields.map(field => `<tr><td><code>${escapeHtml(field.source_key)}</code></td><td>${escapeHtml(field.display_name || field.source_key)}</td><td><span class="tag">${escapeHtml(fieldZones[field.zone] || field.zone)}</span></td><td>${keys.has(field.source_key) ? '是' : '—'}</td><td>${dataset.display_config?.identifier_fields?.includes(field.source_key) ? '记录标识' : dataset.list_fields?.find(item => item.source_key === field.source_key && item.visible !== false) ? { single_line: '单行', multiline: '多行', json: 'JSON' }[dataset.list_fields.find(item => item.source_key === field.source_key).format] || '单行' : '不展示'}</td><td>${(field.position || 0) + 1}</td></tr>`).join('') || '<tr><td colspan="6">暂无字段，可在首次导入时定义结构。</td></tr>'}</tbody></table></div>`;
+  return `<div class="dataset-info-table-wrap"><table class="dataset-info-table"><thead><tr><th>源字段</th><th>显示名称</th><th>用途</th><th>唯一 KEY</th><th>列表展示</th><th>顺序</th></tr></thead><tbody>${fields.map(field => `<tr><td><code>${escapeHtml(field.source_key)}</code></td><td>${escapeHtml(field.display_name || field.source_key)}</td><td><span class="tag">${escapeHtml(fieldZones[field.zone] || field.zone)}</span></td><td>${keys.has(field.source_key) ? '是' : '—'}</td><td>${dataset.display_config?.identifier_fields?.includes(field.source_key) ? '记录标识' : dataset.list_fields?.find(item => item.source_key === field.source_key && item.visible !== false) ? { single_line: '单行', multiline: '多行', json: 'JSON' }[dataset.list_fields.find(item => item.source_key === field.source_key).format] || '单行' : '不展示'}</td><td>${(Number.isInteger(field.position) && field.position >= 0 ? field.position : 0) + 1}</td></tr>`).join('') || '<tr><td colspan="6">暂无字段，可在首次导入时定义结构。</td></tr>'}</tbody></table></div>`;
 }
 
 function renderManagedDataset() {
   const dataset = state.datasets.find(item => item.id === state.managedDatasetId);
   if (!dataset) return;
-  $('#dataset-detail-heading').innerHTML = `<div class="workspace-heading"><div><p>${escapeHtml(dataset.category_path)}</p><h2>${escapeHtml(dataset.category_path.split('/').at(-1))}</h2><span class="tag environment">${escapeHtml(dataset.environment || '未设置')}</span><span>${dataset.record_count || 0} 条记录 · ${dataset.fields.length} 个字段</span></div><div class="heading-actions"><button id="managed-view-records" class="secondary-button">查看记录</button>${state.canManage ? '<button id="managed-import" class="secondary-button">导入…</button>' : ''}<button id="managed-export" class="secondary-button">导出…</button></div></div>`;
+  $('#dataset-detail-heading').innerHTML = `<div class="workspace-heading"><div><p>${escapeHtml(dataset.category_path)}</p><h2>${escapeHtml(datasetName(dataset))}</h2><div class="dataset-dimensions">${datasetLabelBadges(dataset)}</div><span>${dataset.record_count || 0} 条记录 · ${dataset.fields.length} 个字段</span><p>${escapeHtml(dataset.schema_name || '独立模型')}${dataset.schema_version ? ` · v${dataset.schema_version}` : ''}</p></div><div class="heading-actions"><button id="managed-view-records" class="secondary-button">查看记录</button>${state.canManage ? '<button id="managed-import" class="secondary-button">导入…</button>' : ''}<button id="managed-export" class="secondary-button">导出…</button></div></div>`;
   const description = descriptionText(dataset.description);
   $('#dataset-detail-description').hidden = !description && !state.canManage;
   $('#dataset-detail-description').classList.toggle('empty-description', !description);
@@ -629,24 +832,30 @@ function renderManagedDataset() {
   let content = '';
   if (state.datasetTab === 'fields') content = `<div class="section-heading"><h3>字段定义</h3>${state.canManage ? '<button id="managed-edit" class="secondary-button">修改结构</button>' : ''}</div><input id="managed-field-search" type="search" placeholder="查找字段…" aria-label="查找字段" /><div id="managed-fields">${schemaTable(dataset)}</div>`;
   if (state.datasetTab === 'list') content = `<div class="section-heading"><h3>列表显示</h3>${state.canManage ? '<button id="managed-edit" class="secondary-button">修改展示</button>' : ''}</div><p>记录标识：${escapeHtml(dataset.display_config?.identifier_fields?.join(' + ') || '使用公开逻辑 KEY 或系统 ID')}</p><p>默认密度：${dataset.display_config?.density === 'full' ? '完整' : '摘要'} · 查询命中字段临时前置</p>${schemaTable(dataset, dataset.fields.filter(field => ['indexes', 'display'].includes(field.zone)))}`;
-  if (state.datasetTab === 'basic') content = `<div class="section-heading"><h3>基本信息</h3>${state.canManage ? '<button id="managed-edit" class="secondary-button">修改基本信息</button>' : ''}</div><dl class="dataset-info-summary"><div><dt>目录</dt><dd>${escapeHtml(dataset.category_path)}</dd></div><div><dt>环境</dt><dd>${escapeHtml(dataset.environment || '未设置')}</dd></div><div><dt>逻辑唯一 KEY</dt><dd>${escapeHtml(dataset.identity_fields.join(' + ') || '未设置')}</dd></div><div><dt>重复处理</dt><dd>以逻辑 KEY 匹配；导入时选择更新或跳过</dd></div></dl>`;
+  if (state.datasetTab === 'basic') content = `<div class="section-heading"><h3>基本信息</h3>${state.canManage ? '<button id="managed-edit" class="secondary-button">修改基本信息</button>' : ''}</div><dl class="dataset-info-summary"><div><dt>名称</dt><dd>${escapeHtml(datasetName(dataset))}${dataset.name?.trim() ? '' : '<small class="security-note">（随目录末级名称显示）</small>'}</dd></div><div><dt>目录</dt><dd>${escapeHtml(dataset.category_path)}</dd></div><div><dt>标签</dt><dd>${datasetLabelBadges(dataset)}</dd></div><div><dt>数据模型</dt><dd>${state.canManage && dataset.schema_id ? `<button id="managed-model-details" class="clear-button">${escapeHtml(dataset.schema_name || '独立模型')}${dataset.schema_version ? ` · v${dataset.schema_version}` : ''}</button>` : escapeHtml(dataset.schema_name || '独立模型')}</dd></div><div><dt>逻辑唯一 KEY</dt><dd>${escapeHtml(dataset.identity_fields.join(' + ') || '未设置')}</dd></div><div><dt>重复处理</dt><dd>以逻辑 KEY 匹配；导入时选择更新或跳过</dd></div></dl>`;
+  if (state.datasetTab === 'basic' && state.canManage && dataset.schema_id) {
+    const model = state.catalog.schemas.find(item => item.id === dataset.schema_id);
+    content += `<section class="dataset-model-note"><div class="section-heading"><h4>模型说明</h4><button id="managed-model-note" class="clear-button">编辑模型说明</button></div>${model?.description ? `<div class="markdown-content">${renderMarkdown(model.description)}</div>` : '<p class="security-note">可在模型中记录共用的数据来源、提取步骤或 SQL。</p>'}</section>`;
+  }
   if (state.datasetTab === 'supplement') content = `<div class="section-heading"><h3>附表结构</h3><button id="managed-supplement" class="secondary-button">${state.canManage ? '管理附表' : '查看附表'}</button></div><p>附表与主记录一对一关联，主表导入不会覆盖附表。</p>${schemaTable({ ...dataset, identity_fields: [], list_fields: [] }, dataset.supplement_fields || [])}`;
   $('#dataset-detail-body').innerHTML = content;
   $('#managed-field-search')?.addEventListener('input', event => { $('#managed-fields').innerHTML = schemaTable(dataset, dataset.fields.filter(field => `${field.source_key} ${field.display_name}`.toLowerCase().includes(event.target.value.toLowerCase()))); });
   $$('#dataset-detail-tabs button').forEach(button => button.addEventListener('click', () => { state.datasetTab = button.dataset.datasetTab; renderManagedDataset(); $(`#dataset-tab-${state.datasetTab}`).focus(); }));
+  $('#managed-model-details')?.addEventListener('click', () => openReferenceDetails('model', referencedModel(dataset), '引用的数据模型'));
+  $('#managed-model-note')?.addEventListener('click', () => openModelDescription(dataset.schema_id));
   $('#managed-edit')?.addEventListener('click', () => openDatasetEdit(dataset.id, state.datasetTab));
   $('#managed-edit-description')?.addEventListener('click', () => openDescription(dataset.id));
   $('#managed-supplement')?.addEventListener('click', () => openSupplement(dataset.id));
   $('#managed-import')?.addEventListener('click', () => openImport(dataset.id));
   $('#managed-export').addEventListener('click', () => openExport(dataset.id));
-  $('#managed-view-records').addEventListener('click', async () => {
-    state.category = dataset.category_path; state.environment = dataset.environment || 'all'; state.selectedDatasetId = dataset.id; state.page = 1;
-    showWorkspace('search'); await fetchRecords(); renderCategoryTree(); renderFilters(); renderIndexReference();
-  });
+  $('#managed-view-records').addEventListener('click', () => openDatasetRecords(dataset.id));
 }
 
 openDatasetInfo = function(id) {
   legacy.renderDatasetInfo(id);
+  const dataset = state.datasets.find(item => item.id === id);
+  const summary = $('#dataset-info-content .dataset-info-summary');
+  if (summary && dataset?.schema_id) summary.insertAdjacentHTML('beforeend', `<div><dt>数据模型</dt><dd>${escapeHtml(dataset.schema_name || '')}</dd></div>`);
   const description = $('#dataset-info-content .dataset-description-section');
   if (description && !descriptionText(state.datasets.find(item => item.id === id)?.description)) { description.remove(); return; }
   if (description) {
@@ -673,6 +882,8 @@ openRecordDetail = async function(id) {
   await legacy.openRecordDetail(id);
   if (state.recordDetail?.id !== id) return;
   $('#record-detail-title').textContent = recordIdentity(state.recordDetail);
+  const sourceDataset = state.datasets.find(item => item.id === state.recordDetail.dataset_id);
+  if (sourceDataset) $('#record-detail-meta').textContent = `${datasetLocator(sourceDataset)} · ${datasetLabelText(sourceDataset)}${state.recordDetail.expired ? ' · 已过期' : ''}`;
   const tabs = { overview: '概览', ...(state.recordDetail.protected_fields?.length ? { secrets: '敏感字段' } : {}), ...(state.canManage || state.recordDetail.supplement_records?.length ? { supplement: '附表' } : {}) };
   $('#record-detail-tabs').innerHTML = Object.entries(tabs).map(([tab, label]) => `<button data-detail-tab="${tab}" role="tab" aria-controls="record-detail-content" aria-selected="${tab === state.detailTab}">${label}</button>`).join('');
   $$('#record-detail-tabs button').forEach(button => button.addEventListener('click', () => selectDetailTab(button.dataset.detailTab)));
@@ -735,7 +946,7 @@ function openExport(id) {
   const dataset = state.datasets.find(item => item.id === id);
   if (!dataset) return;
   state.exportDatasetId = id;
-  $('#export-target').textContent = `${dataset.category_path} · ${dataset.environment || '未设置'}`;
+  $('#export-target').textContent = `${datasetLocator(dataset)} · ${datasetLabelText(dataset)}`;
   $('#export-with-secrets').checked = false; $('#export-supplements').checked = false; $('#export-templates').checked = false;
   $('#export-format').value = 'json'; $('#export-error').hidden = true;
   $('#export-record-scope').value = 'all';
@@ -783,12 +994,15 @@ function setImportStep(step) {
   $('#transfer-options').hidden = step !== 2 || !state.transferPackage;
   $('#import-confirmation').hidden = step !== 3;
   $('#ordinary-import-target').hidden = Boolean(state.transferPackage) || step === 3;
+  $('#native-import-target').hidden = !state.transferPackage || step === 3;
   $('.import-file-row').hidden = step === 3;
+  renderImportContext();
 }
 
 function resetImport() {
   state.transferPackage = null; state.transferRaw = null; state.importPreview = null; state.pendingBatchId = null;
   state.currentBatchSources = []; $('#mapping-list').replaceChildren();
+  state.transferEnvironmentDraft = []; $('#transfer-environment').value = ''; renderTransferEnvironmentDraft();
   $('#batch-summary').hidden = true; $('#import-result').hidden = true;
   $('#import-action-error').hidden = true; $('#import-confirm-summary').replaceChildren();
   $('#skip-existing').checked = false; $('#delete-missing').checked = false;
@@ -804,6 +1018,7 @@ openImport = function(id = null) {
   const preferred = typeof id === 'string' ? id : currentDataset()?.id;
   if (preferred) $('#import-dataset-select').value = preferred;
   resetImport(); showWorkspace('import');
+  reloadReferenceCatalog();
 };
 
 importFile = async function(file) {
@@ -814,20 +1029,20 @@ importFile = async function(file) {
       const raw = await file.text();
       const parsed = JSON.parse(raw);
       if (parsed?.format === 'securevault-dataset') {
-        if (parsed.version !== 1 || !['schema', 'package'].includes(parsed.mode) || !parsed.schema) throw new Error('不支持的数据集文件版本或结构');
+        if (parsed.version !== 1 || !['schema', 'package'].includes(parsed.mode) || !parsed.schema || !Array.isArray(parsed.schema.fields) || (parsed.schema.supplement_fields !== undefined && !Array.isArray(parsed.schema.supplement_fields)) || (parsed.records !== undefined && !Array.isArray(parsed.records))) throw new Error('不支持的数据集文件版本或结构');
         state.transferPackage = parsed; state.transferRaw = raw;
         $('#transfer-skip').closest('label').hidden = parsed.mode === 'schema';
         $('#batch-summary').hidden = false;
         $('#batch-summary').textContent = `${file.name} · ${parsed.mode === 'schema' ? '仅结构' : '结构与数据'} · ${parsed.records?.length || 0} 条记录`;
-        $('#transfer-target').innerHTML = '<option value="">新建数据集</option>' + state.datasets.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.category_path)} · ${escapeHtml(item.environment || '未设置')}</option>`).join('');
+        $('#transfer-target').innerHTML = '<option value="">新建数据集</option>' + state.datasets.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(datasetLocator(item))} · ${escapeHtml(datasetLabelText(item))}</option>`).join('');
         $('#transfer-category').value = parsed.schema.category_path || '';
-        $('#transfer-environment').value = parsed.schema.environment || '';
-        $('#transfer-schema-preview').innerHTML = `<h4>结构预览</h4>${schemaTable({ ...parsed.schema, fields: parsed.schema.fields || [] })}`;
+        state.transferEnvironmentDraft = [...datasetLabels(fileDatasetReference())]; renderTransferEnvironmentDraft();
+        $('#transfer-schema-preview').innerHTML = `<h4>结构预览</h4>${parsed.schema.name ? `<p>数据集名称：${escapeHtml(parsed.schema.name)}</p>` : ''}${schemaTable({ ...parsed.schema, fields: parsed.schema.fields || [] })}`;
         if (parsed.templates?.length) $('#transfer-schema-preview').insertAdjacentHTML('beforeend', `<details class="transfer-templates"><summary>映射模板 · ${parsed.templates.length} 个</summary>${parsed.templates.map((template, index) => `<label>导入模板名称<input data-transfer-template-name="${index}" value="${escapeHtml(template.name)}" /></label>`).join('')}<p>若名称与已有模板冲突，可在这里修改，不影响记录值。</p></details>`);
         setImportStep(2); return;
       }
     } catch (error) {
-      if (state.transferPackage || /不支持/.test(error.message)) { state.transferPackage = null; showToast(error.message, 'error'); return; }
+      if (state.transferPackage || /不支持/.test(error.message)) { resetImport(); showToast(error.message, 'error'); return; }
       // The ordinary uploader supplies precise JSON validation errors.
     }
   }
@@ -875,7 +1090,8 @@ function buildImportRequest() {
 
 function buildTransferRequest() {
   if (!$('#transfer-category').value.trim()) throw new Error('请填写目标目录');
-  const request = { package: state.transferRaw || state.transferPackage, dataset_id: $('#transfer-target').value || null, category_path: $('#transfer-category').value.trim(), environment: $('#transfer-environment').value.trim() || null, skip_existing: $('#transfer-skip').checked, template_names: $$('[data-transfer-template-name]').map(input => input.value.trim()) };
+  commitTransferEnvironmentInput();
+  const request = { package: state.transferRaw || state.transferPackage, dataset_id: $('#transfer-target').value || null, category_path: $('#transfer-category').value.trim(), environments: [...state.transferEnvironmentDraft], skip_existing: $('#transfer-skip').checked, template_names: $$('[data-transfer-template-name]').map(input => input.value.trim()) };
   if (new Blob([JSON.stringify(request)]).size > 16 * 1024 * 1024) throw new Error('单次原生导入超过 16 MiB，请拆分数据集包');
   return request;
 }
@@ -891,7 +1107,7 @@ commitImport = async function() {
     state.importPreview = { transfer, request, preview, mode: state.transferPackage?.mode };
     const stats = transfer ? preview.result : preview;
     const dataset = state.datasets.find(item => item.id === request.dataset_id);
-    const target = transfer ? `${request.category_path} · ${request.environment || '未设置'}` : `${dataset.category_path} · ${dataset.environment || '未设置'}`;
+    const target = transfer ? `${request.category_path} · ${datasetLabelText(request)}` : `${datasetLocator(dataset)} · ${datasetLabelText(dataset)}`;
     $('#import-confirm-summary').innerHTML = `<dl class="dataset-info-summary"><div><dt>目标</dt><dd>${escapeHtml(target)}</dd></div><div><dt>导入内容</dt><dd>${transfer ? state.transferPackage?.mode === 'schema' ? '仅结构' : '结构与数据' : '记录数据'}</dd></div><div><dt>新增 / 更新 / 跳过</dt><dd>${stats.imported || 0} / ${stats.updated || 0} / ${stats.skipped || 0}</dd></div><div><dt>删除旧记录</dt><dd>${stats.deleted_missing || 0}</dd></div></dl>${transfer && preview.changes.length ? `<h4>结构变更</h4><ul>${preview.changes.map(change => `<li>${escapeHtml(change)}</li>`).join('')}</ul>` : ''}<p>以上为当前预检结果。确认前尚未写入数据。</p>`;
     $('#confirm-structure-wrap').hidden = !transfer || !preview.changes.length;
     $('#confirm-structure-changes').checked = false; $('#import-action-error').hidden = true;
@@ -912,9 +1128,10 @@ async function confirmImport() {
     await refreshAfterWrite();
     $('#import-confirmation').hidden = true; $('#import-result').hidden = false;
     const structureOnly = pending.transfer && pending.mode === 'schema';
-    $('#import-result').innerHTML = `<h3>${structureOnly ? '结构已导入' : '导入完成'}</h3>${pending.transfer ? `<p>${escapeHtml(pending.request.category_path)} · ${escapeHtml(pending.request.environment || '未设置')}</p>` : ''}<p>${structureOnly ? `${pending.request.dataset_id ? '已更新结构，保留已有记录' : '已创建空数据集'} · ${pending.preview.field_count} 个字段` : `新增 ${result.imported || 0} 条 · 更新 ${result.updated || 0} 条 · 跳过 ${result.skipped || 0} 条${result.deleted_missing ? ` · 删除 ${result.deleted_missing} 条` : ''}`}</p><button id="import-finish" class="primary-button">返回数据集</button>`;
+    $('#import-result').innerHTML = `<h3>${structureOnly ? '结构已导入' : '导入完成'}</h3>${pending.transfer ? `<p>${escapeHtml(pending.request.category_path)} · ${escapeHtml(datasetLabelText(pending.request))}</p>` : ''}<p>${structureOnly ? `${pending.request.dataset_id ? '已更新结构，保留已有记录' : '已创建空数据集'} · ${pending.preview.field_count} 个字段` : `新增 ${result.imported || 0} 条 · 更新 ${result.updated || 0} 条 · 跳过 ${result.skipped || 0} 条${result.deleted_missing ? ` · 删除 ${result.deleted_missing} 条` : ''}`}</p><button id="import-finish" class="primary-button">返回数据集</button>`;
     $('#import-finish').addEventListener('click', () => pending.transfer ? openManagedDataset(result.dataset_id) : showWorkspace(state.importReturn));
     state.pendingBatchId = null; state.transferPackage = null; state.transferRaw = null; state.importPreview = null;
+    $('#import-context').hidden = true;
   } catch (error) { $('#import-action-error').textContent = error.message; $('#import-action-error').hidden = false; }
   finally { state.importBusy = false; $('#confirm-import').disabled = false; }
 }
@@ -967,6 +1184,7 @@ function closeTopOverlay() {
 }
 
 sealVault = async function(...args) {
+  clearCatalogState();
   state.searchRequest++; state.workspaceRequest++; state.editorDirty = false; state.importPreview = null; state.transferPackage = null; state.transferRaw = null;
   state.descriptionTarget = null; state.exportDatasetId = null; state.categories = []; state.directoryDraft = [];
   state.scopeEditing = null; state.appViewing = null; state.appDetailBusy = null; state.apps = [];
@@ -975,6 +1193,7 @@ sealVault = async function(...args) {
   $('#app-scope-modal').close(); $('#scope-datasets').replaceChildren(); $('#app-manager-list').replaceChildren();
   for (const dialog of $$('dialog[open]')) dialog.close();
   $('#description-draft').value = ''; $('#description-draft-preview').replaceChildren(); $('#app-key-value').value = '';
+  $('#dataset-name').value = ''; $('#dataset-name').placeholder = '留空时使用目录末级名称';
   $('#dataset-description').value = ''; $('#dataset-description-preview').replaceChildren();
   $('#dataset-manager-list').replaceChildren(); $('#dataset-detail-body').replaceChildren(); $('#dataset-detail-description').replaceChildren(); $('#dataset-detail-heading').replaceChildren();
   $('#transfer-schema-preview').replaceChildren(); $('#import-confirm-summary').replaceChildren();
@@ -995,7 +1214,7 @@ $('#directory-picker').addEventListener('close', () => { state.directoryDraft = 
 $('#view-density').addEventListener('change', event => { state.viewDensity = event.target.value; renderRecords(); });
 $('#retry-search').addEventListener('click', () => fetchRecords().catch(() => {}));
 $('#manager-search').addEventListener('input', renderDatasetManager);
-$('#manager-environment').addEventListener('change', renderDatasetManager);
+$('#manager-schema').addEventListener('change', renderDatasetManager);
 $('#close-dataset-detail').addEventListener('click', openDatasetManager);
 $('#dataset-modal').addEventListener('input', event => { if (!event.target.matches('.schema-position')) state.editorDirty = true; });
 $('#dataset-modal').addEventListener('change', event => { if (!event.target.matches('.schema-position')) state.editorDirty = true; });
@@ -1020,8 +1239,11 @@ $('#import-dataset-select').addEventListener('change', resetImport);
 $('#transfer-target').addEventListener('change', event => {
   const dataset = state.datasets.find(item => item.id === event.target.value);
   $('#transfer-category').value = dataset?.category_path || state.transferPackage?.schema.category_path || '';
-  $('#transfer-environment').value = dataset?.environment || (dataset ? '' : state.transferPackage?.schema.environment || '');
+  state.transferEnvironmentDraft = [...datasetLabels(dataset || fileDatasetReference())];
+  $('#transfer-environment').value = ''; renderTransferEnvironmentDraft();
+  renderImportContext();
 });
+for (const id of ['transfer-category', 'transfer-environment']) $('#' + id).addEventListener('input', renderImportContext);
 for (const id of ['close-app-key', 'finish-app-key']) $(`#${id}`).addEventListener('click', () => $('#app-key-modal').close());
 $('#app-key-modal').addEventListener('close', () => { $('#app-key-value').value = ''; $('#app-key-context').textContent = ''; $('#app-key-id').textContent = ''; });
 $('#copy-app-key').addEventListener('click', async () => { try { await navigator.clipboard.writeText($('#app-key-value').value); showToast('应用密钥已复制', 'success'); } catch { showToast('剪贴板不可用', 'error'); } });
@@ -1083,27 +1305,28 @@ renderCategoryTree = function() {
 $('.brand-icon').textContent = 'SV';
 
 $('#export-secret-wrap').insertAdjacentHTML('beforebegin', '<label id="export-record-scope-wrap">记录范围<select id="export-record-scope"><option value="all">全部记录（含过期）</option><option value="active">仅有效记录</option></select></label>');
-const legacyFilters = renderFilters;
+function toggleLabel(selected, value) { return value === '' ? [] : selected.includes(value) ? selected.filter(label => label !== value) : [...selected, value]; }
+function labelFilterButtons(labels, selected) {
+  const button = (value, text, active) => `<button class="filter-chip ${active ? 'selected' : ''}" data-environment="${escapeHtml(value)}" aria-pressed="${active}">${escapeHtml(text)}</button>`;
+  return button('', '全部标签', !selected.length) + labels.map(label => button(label, label, selected.includes(label))).join('');
+}
 renderFilters = function() {
-  legacyFilters();
+  const selected = selectedEnvironmentTags();
+  $('#environment-filters').innerHTML = labelFilterButtons(environments(), selected);
+  $$('#environment-filters [data-environment]').forEach(button => button.addEventListener('click', async () => {
+    state.environmentTags = toggleLabel(selectedEnvironmentTags(), button.dataset.environment);
+    state.environment = state.environmentTags.length === 1 ? state.environmentTags[0] : 'all';
+    state.selectedDatasetId = null; state.page = 1;
+    try { await fetchRecords(); renderFilters(); renderIndexReference(); } catch (error) { showToast(error.message, 'error'); }
+  }));
   const scope = $('#global-dataset-scope');
-  scope.innerHTML = '<option value="">全部数据集</option>' + state.datasets.filter(dataset => state.environment === 'all' || dataset.environment === state.environment).map(dataset => `<option value="${escapeHtml(dataset.id)}">${escapeHtml(dataset.category_path)} · ${escapeHtml(dataset.environment || '未设置')}</option>`).join('');
+  scope.innerHTML = '<option value="">全部数据集</option>' + state.datasets.filter(dataset => (!state.schemaFilter || dataset.schema_id === state.schemaFilter) && datasetMatchesLabels(dataset)).map(dataset => `<option value="${escapeHtml(dataset.id)}">${escapeHtml(datasetLocator(dataset))} · ${escapeHtml(datasetLabelText(dataset))}</option>`).join('');
   scope.value = currentDataset()?.id || '';
-  $('#mobile-environment').innerHTML = ['all', ...environments()].map(value => `<option value="${escapeHtml(value)}">${value === 'all' ? '全部环境' : escapeHtml(value)}</option>`).join('');
-  $('#mobile-environment').value = state.environment;
 };
 const scopeLabel = document.createElement('label');
 scopeLabel.className = 'dataset-scope-select';
 scopeLabel.innerHTML = '<select id="global-dataset-scope" aria-label="数据集范围"><option value="">全部数据集</option></select>';
 $('.filter-row').insertBefore(scopeLabel, $('#clear-filters'));
-const mobileEnvironment = document.createElement('label');
-mobileEnvironment.className = 'mobile-environment-select';
-mobileEnvironment.innerHTML = '<select id="mobile-environment" aria-label="检索环境"><option value="all">全部环境</option></select>';
-$('.filter-row').insertBefore(mobileEnvironment, scopeLabel);
-$('#mobile-environment').addEventListener('change', async event => {
-  state.environment = event.target.value; state.selectedDatasetId = null; state.page = 1;
-  try { await fetchRecords(); renderFilters(); renderIndexReference(); } catch (error) { showToast(error.message, 'error'); }
-});
 $('#global-dataset-scope').addEventListener('change', async event => {
   const dataset = state.datasets.find(item => item.id === event.target.value);
   state.category = dataset?.category_path || 'all'; state.categories = []; state.selectedDatasetId = dataset?.id || null; state.page = 1;
@@ -1151,3 +1374,349 @@ applyTheme = function(theme = state.theme) {
 };
 $('#lock-button span').innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M6 10V7a6 6 0 0 1 12 0v3M4 10h16v12H4zM12 15v3"/></svg>';
 applyTheme();
+
+// Shared definitions and independent instance dimensions.
+Object.assign(state, { catalog: { schemas: [], environments: [] }, schemaFilter: '', catalogTab: 'schemas', schemaDraft: null, schemaPublication: null, catalogBusy: false });
+function dimensionOptions(items, selected, empty) {
+  items = items.map(item => {
+    if (!item.dataset_ids || items.filter(other => other.name === item.name).length < 2) return item;
+    const instance = state.datasets.find(dataset => item.dataset_ids.includes(dataset.id));
+    return { ...item, name: `${item.name} · ${instance ? datasetLabelText(instance) || instance.id.slice(-8) : item.id.slice(-8)}` };
+  });
+  return `<option value="">${empty}</option>` + items.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === selected ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('');
+}
+function renderDimensionFilters() {
+  for (const [kind, property, label] of [['schema', 'schema_name', '模型']]) {
+    const entries = [...new Map(state.datasets.filter(d => d[`${kind}_id`]).map(d => [d[`${kind}_id`], { id: d[`${kind}_id`], name: d[property] || d[`${kind}_id`] }])).values()];
+    for (const prefix of ['manager', 'search']) {
+      const select = $(`#${prefix}-${kind}`);
+      const selected = prefix === 'search' ? state[`${kind}Filter`] : select.value;
+      select.innerHTML = dimensionOptions(entries, selected, `全部${label}`);
+      if (prefix === 'search' && selected && !entries.some(e => e.id === selected)) state[`${kind}Filter`] = '';
+    }
+  }
+  for (const id of ['manage-schemas', 'manage-environments']) $(`#${id}`).hidden = !state.canManage;
+}
+async function loadCatalog() {
+  const epoch = state.sessionEpoch;
+  const result = await api('/catalog');
+  if (!state.unlocked || epoch !== state.sessionEpoch || typeof document === 'undefined') return false;
+  state.catalog = { schemas: result.schemas || [], environments: result.environments || [] };
+  state.referenceCatalogLoaded = true; state.referenceCatalogError = null;
+  renderEditorModelReference(); renderImportContext(); renderTransferEnvironmentDraft();
+  return true;
+}
+function renderEnvironmentSuggestions() {
+  const labels = [...new Set([...state.catalog.environments.map(item => item.name), ...state.datasets.flatMap(datasetLabels)])];
+  $('#dataset-environment-options').innerHTML = labels.filter(label => !state.environmentDraft.includes(label)).map(label => `<option value="${escapeHtml(label)}"></option>`).join('');
+}
+function renderEnvironmentDraft() {
+  $('#dataset-environment-tags').innerHTML = state.environmentDraft.map((label, index) => `<span class="selected-label" role="listitem"><span>${escapeHtml(label)}</span><button type="button" class="remove-label" data-label-index="${index}" aria-label="移除标签：${escapeHtml(label)}">×</button></span>`).join('');
+  $$('#dataset-environment-tags button').forEach(button => button.addEventListener('click', () => {
+    state.environmentDraft.splice(Number(button.dataset.labelIndex), 1); state.editorDirty = true;
+    renderEnvironmentDraft(); $('#dataset-environment-select').focus();
+  }));
+  renderEnvironmentSuggestions();
+}
+function appendLabelInput(draft, value) {
+  // An exact existing suggestion is one literal label. Other input supports batch entry.
+  const known = [...draft, ...state.catalog.environments.map(item => item.name), ...state.datasets.flatMap(datasetLabels)];
+  const labels = known.includes(value) ? [value] : value.split(/[,，;；\r\n]+/).map(label => label.trim()).filter(Boolean);
+  for (const label of labels) {
+    if (!known.includes(label) && ([...label].length > 120 || /[\p{Cc}]/u.test(label))) throw new Error('标签名称需为 1 至 120 个字符，不能包含控制字符');
+  }
+  const next = [...new Set([...draft, ...labels])];
+  if (next.length > 64) throw new Error('最多添加 64 个标签');
+  return next;
+}
+function commitEnvironmentInput() {
+  const input = $('#dataset-environment-select');
+  state.environmentDraft = appendLabelInput(state.environmentDraft, input.value);
+  input.value = ''; renderEnvironmentDraft();
+}
+function renderTransferEnvironmentDraft() {
+  $('#transfer-environment-tags').innerHTML = state.transferEnvironmentDraft.map((label, index) => `<span class="selected-label" role="listitem"><span>${escapeHtml(label)}</span><button type="button" class="remove-label" data-label-index="${index}" aria-label="移除标签：${escapeHtml(label)}">×</button></span>`).join('');
+  $$('#transfer-environment-tags button').forEach(button => button.addEventListener('click', () => {
+    state.transferEnvironmentDraft.splice(Number(button.dataset.labelIndex), 1);
+    renderTransferEnvironmentDraft(); renderImportContext(); $('#transfer-environment').focus();
+  }));
+  const labels = [...new Set([...state.catalog.environments.map(item => item.name), ...state.datasets.flatMap(datasetLabels)])];
+  $('#transfer-environment-options').innerHTML = labels.filter(label => !state.transferEnvironmentDraft.includes(label)).map(label => `<option value="${escapeHtml(label)}"></option>`).join('');
+}
+function commitTransferEnvironmentInput() {
+  const input = $('#transfer-environment');
+  state.transferEnvironmentDraft = appendLabelInput(state.transferEnvironmentDraft, input.value);
+  input.value = ''; renderTransferEnvironmentDraft(); renderImportContext();
+}
+$('#add-transfer-environment').addEventListener('click', () => {
+  try { commitTransferEnvironmentInput(); $('#transfer-environment').focus(); } catch (error) { showToast(error.message, 'error'); }
+});
+$('#transfer-environment').addEventListener('keydown', event => {
+  if (event.key === 'Enter' && !event.isComposing) { event.preventDefault(); try { commitTransferEnvironmentInput(); } catch (error) { showToast(error.message, 'error'); } }
+});
+function readDatasetEnvironments() {
+  commitEnvironmentInput();
+  // Send names as the authoritative selection. The server reuses existing labels.
+  return { environment_names: [...state.environmentDraft] };
+}
+async function loadDatasetDimensions(id) {
+  const dataset = state.datasets.find(d => d.id === id);
+  state.environmentDraft = [...datasetLabels(dataset)];
+  $('#dataset-environment-select').value = ''; renderEnvironmentDraft();
+  $('#dataset-schema').innerHTML = dimensionOptions(state.catalog.schemas, null, '新建独立模型');
+  $('#dataset-schema').dataset.touched = '';
+  $('#dataset-schema-label').hidden = Boolean(id);
+  renderEditorModelReference();
+  try {
+    if (!await loadCatalog() || state.editDatasetId !== id) return;
+    renderEnvironmentSuggestions();
+    if (!$('#dataset-schema').dataset.touched) $('#dataset-schema').innerHTML = dimensionOptions(state.catalog.schemas, null, '新建独立模型');
+  } catch (error) { if (state.unlocked && state.editDatasetId === id && typeof document !== 'undefined') { state.referenceCatalogError = '模型说明加载失败，请重试。'; renderEditorModelReference(); showToast(error.message, 'error'); } }
+}
+$('#add-dataset-environment').addEventListener('click', () => { try { commitEnvironmentInput(); state.editorDirty = true; $('#dataset-environment-select').focus(); } catch (error) { showToast(error.message, 'error'); } });
+$('#dataset-environment-select').addEventListener('keydown', event => {
+  if (event.key === 'Enter' && !event.isComposing) { event.preventDefault(); try { commitEnvironmentInput(); state.editorDirty = true; } catch (error) { showToast(error.message, 'error'); } }
+});
+$('#dataset-environment-select').addEventListener('input', () => { state.editorDirty = true; });
+$('#dataset-schema').addEventListener('change', event => { event.target.dataset.touched = 'true'; renderEditorModelReference(); });
+for (const kind of ['schema']) $('#search-' + kind).addEventListener('change', async event => {
+  state[kind + 'Filter'] = event.target.value; state.selectedDatasetId = null; state.page = 1;
+  try { await fetchRecords(); renderFilters(); renderIndexReference(); } catch (error) { showToast(error.message, 'error'); }
+});
+$('#clear-filters').addEventListener('click', () => { state.environmentTags = []; state.environment = 'all'; state.schemaFilter = ''; renderDimensionFilters(); });
+async function openCatalog(tab = 'schemas') {
+  if (!state.canManage) return;
+  state.catalogTab = tab; $('#catalog-error').hidden = true;
+  openDialog('catalog-modal');
+  try { if (await loadCatalog()) renderCatalog(); }
+  catch (error) { catalogError('catalog-error', error); }
+}
+function catalogError(id, error) { const node = $('#' + id); node.textContent = error.message; node.hidden = false; }
+function renderCatalog() {
+  const kind = state.catalogTab;
+  const title = { schemas: '数据模型', environments: '标签' }[kind];
+  $('#catalog-title').textContent = title;
+  $('#catalog-name').hidden = kind === 'schemas';
+  $('#catalog-create').textContent = `＋ 新建${title}`;
+  $('#catalog-note').textContent = kind === 'schemas' ? '结构统一维护；数据、导入和应用授权按数据集实例独立管理。已有数据集需手动选择合并。' : '标签可在数据集中直接添加，保存时创建或复用。仍被引用的标签不能删除。';
+  $$('[data-catalog-tab]').forEach(button => button.setAttribute('aria-selected', String(button.dataset.catalogTab === kind)));
+  $('#catalog-list').innerHTML = state.catalog[kind].map(item => kind === 'schemas'
+    ? `<article class="catalog-item"><div><button class="catalog-model-link" data-view-schema="${escapeHtml(item.id)}">${escapeHtml(item.name)}</button><small>v${item.version} · ${item.definition.fields.length} 个字段 · ${item.dataset_ids.length} 个数据集</small><small>${escapeHtml(item.dataset_ids.slice(0, 3).map(id => { const d = state.datasets.find(dataset => dataset.id === id); return d ? [d.category_path, datasetLabelText(d)].filter(Boolean).join(' · ') : id; }).join('；'))}${item.dataset_ids.length > 3 ? '…' : ''}</small>${item.description ? `<details class="catalog-model-note"><summary>模型说明</summary><div class="markdown-content">${renderMarkdown(item.description)}</div></details>` : ''}</div><div class="row-actions"><button class="secondary-button" data-edit-schema="${escapeHtml(item.id)}">编辑模型</button><button class="secondary-button" data-merge-schema="${escapeHtml(item.id)}">合并数据集</button>${!item.dataset_ids.length ? `<button class="clear-button" data-delete-catalog="${escapeHtml(item.id)}">删除</button>` : ''}</div></article>`
+    : `<article class="catalog-item"><label class="catalog-rename"><span class="sr-only">${title}名称</span><input value="${escapeHtml(item.name)}" maxlength="120" data-name-catalog="${escapeHtml(item.id)}" /></label><div class="row-actions"><button class="secondary-button" data-rename-catalog="${escapeHtml(item.id)}">保存名称</button><button class="clear-button" data-delete-catalog="${escapeHtml(item.id)}">删除</button></div></article>`).join('') || '<p class="detail-empty">暂无项目</p>';
+  $$('[data-view-schema]').forEach(b => b.addEventListener('click', () => openSharedSchemaView(b.dataset.viewSchema)));
+  $$('[data-edit-schema]').forEach(b => b.addEventListener('click', () => openSharedSchemaEditor(b.dataset.editSchema)));
+  $$('[data-merge-schema]').forEach(b => b.addEventListener('click', () => openSchemaMerge(b.dataset.mergeSchema)));
+  $$('[data-rename-catalog]').forEach(b => b.addEventListener('click', () => mutateCatalog(async () => {
+    const input = [...$$('[data-name-catalog]')].find(i => i.dataset.nameCatalog === b.dataset.renameCatalog);
+    await api(`/catalog/${kind}/${encodeURIComponent(b.dataset.renameCatalog)}`, { method: 'PATCH', body: JSON.stringify({ name: input.value }) });
+  })));
+  $$('[data-delete-catalog]').forEach(b => b.addEventListener('click', () => {
+    const item = state.catalog[kind].find(item => item.id === b.dataset.deleteCatalog);
+    if (!window.confirm(`删除${title}「${item?.name || ''}」？此操作无法撤销。`)) return;
+    mutateCatalog(async () => {
+      await api(kind === 'schemas' ? `/schemas/${encodeURIComponent(b.dataset.deleteCatalog)}` : `/catalog/${kind}/${encodeURIComponent(b.dataset.deleteCatalog)}`, { method: 'DELETE' });
+    });
+  }));
+}
+async function mutateCatalog(operation) {
+  if (state.catalogBusy) return;
+  const epoch = state.sessionEpoch;
+  state.catalogBusy = true; $('#catalog-error').hidden = true;
+  try {
+    await operation();
+    if (!state.unlocked || epoch !== state.sessionEpoch) return;
+    await refreshAfterWrite();
+    if (await loadCatalog()) renderCatalog();
+    $('#catalog-name').value = '';
+  } catch (error) { if (state.unlocked && epoch === state.sessionEpoch) catalogError('catalog-error', error); }
+  finally { state.catalogBusy = false; }
+}
+$('#catalog-create').addEventListener('click', () => {
+  if (state.catalogTab === 'schemas') { openSharedSchemaEditor(null); return; }
+  mutateCatalog(() => api(`/catalog/${state.catalogTab}`, { method: 'POST', body: JSON.stringify({ name: $('#catalog-name').value }) }));
+});
+$$('[data-catalog-tab]').forEach(b => b.addEventListener('click', () => { state.catalogTab = b.dataset.catalogTab; $('#catalog-error').hidden = true; renderCatalog(); }));
+for (const kind of ['schemas', 'environments']) $('#manage-' + kind).addEventListener('click', () => openCatalog(kind));
+$('#close-catalog').addEventListener('click', () => $('#catalog-modal').close());
+
+function sharedFieldRow(field, d, supplement = false) {
+  const list = d.list_fields?.find(f => f.source_key === field.source_key);
+  const publicField = ['indexes', 'display'].includes(field.zone || 'indexes');
+  const label = (text, control, check = false) => `<label${check ? ' class="model-check"' : ''}><span class="model-control-caption">${text}</span>${control}</label>`;
+  return `<div class="catalog-field-row${supplement ? ' supplement-field-row' : ''}" data-original="${escapeHtml(field.source_key || '')}" data-list-position="${list?.position ?? ''}" data-list-present="${Boolean(list)}">
+    <span class="model-field-number" aria-hidden="true"></span>
+    ${label('源字段', `<input class="shared-source" value="${escapeHtml(field.source_key || '')}" />`)}
+    ${label('显示名称', `<input class="shared-label" value="${escapeHtml(field.display_name || '')}" />`)}
+    ${label('用途', `<select class="shared-zone">${fieldZoneOptions(field.zone || 'indexes')}</select>`)}
+    ${supplement ? '' : `${label('唯一 KEY', `<input type="checkbox" class="shared-key" ${field.zone === 'ignore' ? 'disabled' : ''} ${d.identity_fields?.includes(field.source_key) ? 'checked' : ''} />`, true)}${label('记录标识', `<input type="checkbox" class="shared-identifier" ${publicField ? '' : 'disabled'} ${d.display_config?.identifier_fields?.includes(field.source_key) ? 'checked' : ''} />`, true)}${label('列表展示', `<input type="checkbox" class="shared-visible" ${publicField ? '' : 'disabled'} ${publicField && (Array.isArray(d.list_fields) ? Boolean(list && list.visible !== false) : true) ? 'checked' : ''} />`, true)}${label('展示形式', `<select class="shared-format">${Object.entries({ single_line: '单行', multiline: '多行', json: 'JSON' }).map(([value, text]) => `<option value="${value}" ${list?.format === value ? 'selected' : ''}>${text}</option>`).join('')}</select>`)}`}
+    <div class="row-actions"><button type="button" class="clear-button shared-up" aria-label="上移字段">↑</button><button type="button" class="clear-button shared-down" aria-label="下移字段">↓</button>${!field.source_key ? '<button type="button" class="clear-button shared-remove" aria-label="移除新增字段">×</button>' : ''}</div>
+  </div>`;
+}
+function bindSharedFieldRow(row) {
+  row.querySelector('.shared-remove')?.addEventListener('click', () => row.remove());
+  row.querySelector('.shared-up').addEventListener('click', () => { if (row.previousElementSibling) row.parentElement.insertBefore(row, row.previousElementSibling); });
+  row.querySelector('.shared-down').addEventListener('click', () => { if (row.nextElementSibling) row.parentElement.insertBefore(row.nextElementSibling, row); });
+  row.querySelector('.shared-zone').addEventListener('change', () => {
+    const zone = row.querySelector('.shared-zone').value;
+    for (const selector of ['.shared-identifier', '.shared-visible']) { const input = row.querySelector(selector); if (input) { input.disabled = !['indexes', 'display'].includes(zone); if (input.disabled) input.checked = false; } }
+    const key = row.querySelector('.shared-key'); if (key) { key.disabled = zone === 'ignore'; if (key.disabled) key.checked = false; }
+  });
+}
+async function openSharedSchemaView(id) {
+  if (!state.canManage) return;
+  const epoch = state.sessionEpoch;
+  try {
+    if (!await loadCatalog() || epoch !== state.sessionEpoch) return;
+    if (!state.catalog.schemas.some(model => model.id === id)) throw new Error('数据模型不存在，请刷新后重试');
+    state.schemaViewId = id; state.schemaViewTab = 'fields';
+    $('#schema-view-description-details').open = false;
+    renderSchemaView(); openDialog('schema-view-modal');
+  } catch (error) { if (state.unlocked && epoch === state.sessionEpoch) showToast(error.message, 'error'); }
+}
+function renderSchemaView() {
+  const model = state.catalog.schemas.find(item => item.id === state.schemaViewId);
+  if (!model || !state.canManage) return;
+  const d = model.definition;
+  $('#schema-view-title').textContent = model.name;
+  $('#schema-view-scope').textContent = `v${model.version} · ${d.fields.length} 个字段 · ${model.dataset_ids.length} 个数据集引用`;
+  $('#schema-view-description-summary').textContent = descriptionSummary(model.description);
+  $('#schema-view-description').textContent = model.description?.trim() ? '修改描述' : '添加描述';
+  $('#schema-view-description-details').hidden = !model.description?.trim();
+  $('#schema-view-description-content').innerHTML = renderMarkdown(model.description || '');
+  const tabs = { fields: '字段定义', list: '检索展示', supplement: '附表字段' };
+  $('#schema-view-tabs').innerHTML = Object.entries(tabs).map(([key, label]) => `<button role="tab" id="model-tab-${key}" aria-controls="schema-view-content" aria-selected="${state.schemaViewTab === key}" tabindex="${state.schemaViewTab === key ? 0 : -1}" data-model-tab="${key}">${label}</button>`).join('');
+  $('#schema-view-content').setAttribute('role', 'tabpanel');
+  $('#schema-view-content').setAttribute('aria-labelledby', `model-tab-${state.schemaViewTab}`);
+  let content = schemaTable(d);
+  if (state.schemaViewTab === 'list') {
+    const list = (d.list_fields || []).filter(field => field.visible !== false).sort((a, b) => (a.position || 0) - (b.position || 0));
+    content = `<p class="security-note">以下默认规则共享给引用此模型的数据集。查询命中字段会临时前置，检索页可临时切换展示密度。</p><dl class="dataset-info-grid"><dt>记录标识</dt><dd>${escapeHtml(d.display_config?.identifier_fields?.join(' + ') || '使用公开逻辑 KEY 或系统 ID')}</dd><dt>默认密度</dt><dd>${d.display_config?.density === 'full' ? '完整' : '摘要'}</dd></dl><div class="dataset-info-table-wrap"><table class="dataset-info-table"><thead><tr><th>展示顺序</th><th>字段</th><th>展示形式</th></tr></thead><tbody>${list.map((field, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(field.display_name || d.fields.find(f => f.source_key === field.source_key)?.display_name || field.source_key)} <code>${escapeHtml(field.source_key)}</code></td><td>${({ single_line: '单行', multiline: '多行', json: 'JSON' })[field.format] || '单行'}</td></tr>`).join('') || '<tr><td colspan="3">未配置列表展示字段</td></tr>'}</tbody></table></div>`;
+  }
+  if (state.schemaViewTab === 'supplement') content = schemaTable({ ...d, identity_fields: [], list_fields: [], display_config: {} }, d.supplement_fields || []);
+  $('#schema-view-content').innerHTML = content;
+  $$('[data-model-tab]').forEach(button => button.addEventListener('click', () => { state.schemaViewTab = button.dataset.modelTab; renderSchemaView(); }));
+}
+$('#close-schema-view').addEventListener('click', () => $('#schema-view-modal').close());
+$('#schema-view-edit').addEventListener('click', () => { const id = state.schemaViewId; $('#schema-view-modal').close(); openSharedSchemaEditor(id); });
+$('#schema-view-description').addEventListener('click', () => openModelDescription(state.schemaViewId));
+async function openSharedSchemaEditor(id) {
+  if (!state.canManage) return;
+  const epoch = state.sessionEpoch;
+  try {
+    if (!await loadCatalog() || epoch !== state.sessionEpoch) return;
+    const schema = id ? state.catalog.schemas.find(s => s.id === id) : null;
+    if (id && !schema) throw new Error('结构不存在，请刷新后重试');
+    state.schemaDraft = { id, description: schema?.description || '', originalDescription: schema?.description || '', version: schema?.version, originalOrder: schema?.definition.fields.map(f => f.source_key) || [] };
+    const d = schema?.definition || { fields: [], identity_fields: [], list_fields: [], display_config: {}, supplement_fields: [] };
+    $('#shared-schema-title').textContent = id ? '编辑数据模型' : '新建数据模型';
+    $('#shared-schema-name').value = schema?.name || '';
+    $('#shared-description-details').open = false;
+    updateModelDescriptionPreview();
+    $('#shared-schema-scope').textContent = `引用此模型的数据集：${schema?.dataset_ids.length || 0} 个。发布前将预览全部影响。`;
+    $('#shared-density').value = d.display_config?.density || 'summary';
+    $('#shared-main-fields').innerHTML = d.fields.map(f => sharedFieldRow(f, d)).join('');
+    $('#shared-supplement-fields').innerHTML = d.supplement_fields.map(f => sharedFieldRow(f, d, true)).join('');
+    $$('#shared-schema-modal .catalog-field-row').forEach(bindSharedFieldRow);
+    state.schemaDraft.originalDefinitionDraft = JSON.stringify(readSharedDefinition());
+    $('#shared-schema-error').hidden = true; openDialog('shared-schema-modal');
+  } catch (error) { showToast(error.message, 'error'); }
+}
+function updateModelDescriptionPreview() {
+  const description = state.schemaDraft?.description || '';
+  $('#model-description-summary').textContent = descriptionSummary(description);
+  $('#shared-edit-description').textContent = description.trim() ? '修改描述' : '添加描述';
+  $('#shared-description-details').hidden = !description.trim();
+  $('#shared-schema-description-preview').innerHTML = description.trim() ? renderMarkdown(description) : '';
+}
+$('#shared-edit-description').addEventListener('click', () => openModelDescription(state.schemaDraft?.id, true));
+function readSharedDefinition() {
+  const readFields = selector => [...$(selector).children].map((row, position) => {
+    const source_key = row.querySelector('.shared-source').value.trim();
+    return { source_key, previous_source_key: row.dataset.original && row.dataset.original !== source_key ? row.dataset.original : null, display_name: row.querySelector('.shared-label').value.trim(), zone: row.querySelector('.shared-zone').value, unique: row.querySelector('.shared-key')?.checked || false, position };
+  });
+  const fields = readFields('#shared-main-fields');
+  const rows = [...$('#shared-main-fields').children];
+  const identity_fields = fields.filter((f, i) => rows[i].querySelector('.shared-key').checked).map(f => f.source_key);
+  const identifier_fields = fields.filter((f, i) => rows[i].querySelector('.shared-identifier').checked).map(f => f.source_key);
+  const reordered = JSON.stringify(rows.map(row => row.dataset.original)) !== JSON.stringify(state.schemaDraft?.originalOrder || []);
+  const list_fields = fields.flatMap((f, i) => ['indexes', 'display'].includes(f.zone) && (rows[i].dataset.listPresent === 'true' || rows[i].querySelector('.shared-visible').checked) ? [{ source_key: f.source_key, display_name: f.display_name, position: reordered ? i : Number(rows[i].dataset.listPosition || i), format: rows[i].querySelector('.shared-format').value, visible: rows[i].querySelector('.shared-visible').checked }] : []).sort((a, b) => a.position - b.position);
+  return { fields, identity_fields, list_fields, display_config: { identifier_fields, density: $('#shared-density').value }, supplement_fields: readFields('#shared-supplement-fields') };
+}
+for (const kind of ['main', 'supplement']) $('#shared-add-' + kind).addEventListener('click', () => {
+  const container = $('#shared-' + kind + '-fields');
+  container.insertAdjacentHTML('beforeend', sharedFieldRow({}, {}, kind === 'supplement'));
+  bindSharedFieldRow(container.lastElementChild); container.lastElementChild.querySelector('input').focus();
+});
+$('#preview-shared-schema').addEventListener('click', () => {
+  const definition = readSharedDefinition();
+  const unchanged = state.schemaDraft?.id && JSON.stringify(definition) === state.schemaDraft.originalDefinitionDraft;
+  const description = state.schemaDraft?.description || '';
+  const descriptionChanged = !state.schemaDraft?.id || description !== state.schemaDraft.originalDescription;
+  previewSchemaOperation({ schema_id: state.schemaDraft?.id || null, name: $('#shared-schema-name').value, ...(descriptionChanged ? { description } : {}), ...(unchanged ? {} : { definition }) }, 'shared-schema-error');
+});
+$('#close-shared-schema').addEventListener('click', () => $('#shared-schema-modal').close());
+function openSchemaMerge(id) {
+  const schema = state.catalog.schemas.find(s => s.id === id);
+  if (!schema) return;
+  state.mergeSchemaId = id;
+  $('#schema-merge-title').textContent = `合并到「${schema.name}」`;
+  $('#schema-merge-note').textContent = '选择要引用此模型的已有数据集。数据集 ID、标签和应用授权保留；字段差异将在下一步预览。目标模型必须包含源数据集的全部字段。';
+  $('#schema-merge-list').innerHTML = state.datasets.map(d => `<label class="app-dataset-option"><input type="checkbox" value="${escapeHtml(d.id)}" ${d.schema_id === id ? 'checked disabled' : ''} /><span><strong>${escapeHtml(datasetLocator(d))}</strong><small>${escapeHtml(datasetLabelText(d))} · ${escapeHtml(d.schema_name || '')}${d.schema_id === id ? '（已引用）' : ''}</small></span></label>`).join('');
+  $('#schema-merge-search').value = ''; $('#schema-merge-error').hidden = true; openDialog('schema-merge-modal');
+}
+$('#schema-merge-search').addEventListener('input', event => {
+  for (const row of $$('#schema-merge-list label')) row.hidden = !row.textContent.toLowerCase().includes(event.target.value.trim().toLowerCase());
+});
+$('#preview-schema-merge').addEventListener('click', () => {
+  const ids = $$('#schema-merge-list input:checked:not(:disabled)').map(i => i.value);
+  if (!ids.length) { catalogError('schema-merge-error', new Error('请至少选择一个待合并的数据集')); return; }
+  previewSchemaOperation({ schema_id: state.mergeSchemaId, dataset_ids: ids }, 'schema-merge-error');
+});
+$('#close-schema-merge').addEventListener('click', () => $('#schema-merge-modal').close());
+async function previewSchemaOperation(request, errorId) {
+  if (state.schemaBusy || !state.canManage) return;
+  const epoch = state.sessionEpoch;
+  state.schemaBusy = true; $('#' + errorId).hidden = true;
+  try {
+    const preview = await api('/schemas/preview', { method: 'POST', body: JSON.stringify(request) });
+    if (!state.unlocked || epoch !== state.sessionEpoch) return;
+    state.schemaPublication = { request, token: preview.confirmation_token };
+    $('#schema-preview-content').innerHTML = `<p>模型：${escapeHtml(request.name || state.catalog.schemas.find(s => s.id === request.schema_id)?.name || '')}</p>${request.description !== undefined ? `<details class="model-description-publication"><summary>本次模型说明${request.description.trim() ? '' : '（清空）'}</summary><div class="markdown-content">${renderMarkdown(request.description)}</div></details>` : ''}<p>涉及 ${preview.changes.length} 个数据集。记录与应用授权继续按数据集独立管理。</p>` + preview.changes.map(d => `<section class="catalog-impact"><h4>${escapeHtml(d.category_path)}</h4><p>${escapeHtml(datasetLabelText(d))} · ${d.record_count} 条主表 / ${d.supplement_count} 条附表</p><ul>${(d.changes.length ? d.changes : ['模型一致，保留数据并更新模型引用']).map(c => `<li>${escapeHtml(c)}</li>`).join('')}</ul></section>`).join('');
+    $('#schema-preview-error').hidden = true; openDialog('schema-preview-modal');
+  } catch (error) { if (state.unlocked && epoch === state.sessionEpoch) catalogError(errorId, error); }
+  finally { state.schemaBusy = false; }
+}
+$('#publish-shared-schema').addEventListener('click', async () => {
+  const publication = state.schemaPublication;
+  if (!publication || state.schemaBusy || !state.canManage) return;
+  const epoch = state.sessionEpoch;
+  state.schemaBusy = true; $('#publish-shared-schema').disabled = true; $('#schema-preview-error').hidden = true;
+  try {
+    await api('/schemas/publish', { method: 'POST', body: JSON.stringify({ ...publication.request, confirmation_token: publication.token }) });
+    if (!state.unlocked || epoch !== state.sessionEpoch) return;
+    for (const id of ['schema-preview-modal', 'shared-schema-modal', 'schema-merge-modal']) $('#' + id).close();
+    state.schemaPublication = null; state.schemaDraft = null;
+    const supplementId = supplementState?.datasetId;
+    await refreshAfterWrite(); if (await loadCatalog()) renderCatalog();
+    if (supplementId && state.unlocked && epoch === state.sessionEpoch) await openSupplement(supplementId);
+    showToast('数据模型已发布', 'success');
+  } catch (error) { if (state.unlocked && epoch === state.sessionEpoch) catalogError('schema-preview-error', error); }
+  finally { state.schemaBusy = false; $('#publish-shared-schema').disabled = false; }
+});
+$('#close-schema-preview').addEventListener('click', () => { $('#schema-preview-modal').close(); state.schemaPublication = null; });
+function clearCatalogState() {
+  state.catalog = { schemas: [], environments: [] }; state.schemaDraft = null; state.schemaPublication = null;
+  state.schemaFilter = ''; state.mergeSchemaId = null;
+  for (const id of ['catalog-list', 'shared-main-fields', 'shared-supplement-fields', 'schema-merge-list', 'schema-preview-content']) $('#' + id).replaceChildren();
+  for (const id of ['catalog-name', 'shared-schema-name', 'schema-merge-search']) $('#' + id).value = '';
+  $('#shared-schema-description-preview').replaceChildren(); $('#shared-description-details').open = false;
+  state.schemaViewId = null; state.schemaViewTab = 'fields'; state.descriptionSaving = false;
+  state.referenceCatalogLoaded = false; state.referenceCatalogError = null; state.referenceDetails = null;
+  for (const id of ['import-context', 'editor-model-reference', 'reference-info-content']) { $('#' + id).replaceChildren(); $('#' + id).hidden = id !== 'reference-info-content'; }
+  $('#reference-info-title').textContent = '查看详情';
+  for (const id of ['schema-view-title', 'schema-view-scope', 'schema-view-description-summary', 'schema-view-description-content', 'schema-view-tabs', 'schema-view-content', 'model-description-summary', 'description-edit-context']) $('#' + id).replaceChildren();
+  state.environmentDraft = []; state.transferEnvironmentDraft = []; state.environmentTags = []; state.managerTags = []; state.environment = 'all';
+  $('#dataset-environment-select').value = ''; $('#dataset-environment-tags').replaceChildren(); $('#dataset-environment-options').replaceChildren();
+  $('#transfer-environment').value = ''; $('#transfer-environment-tags').replaceChildren(); $('#transfer-environment-options').replaceChildren();
+  for (const id of ['dataset-schema', 'manager-schema', 'search-schema', 'manager-environment', 'environment-filters', 'global-dataset-scope']) $('#' + id).replaceChildren();
+}

@@ -136,8 +136,26 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
 .record-tags > span:first-child { overflow-wrap: anywhere; }
 .tag { padding: 3px 8px; background: var(--bg-2); border: 0; font-size: 12px; color: var(--muted); }
 .tag.environment { color: var(--muted); background: var(--bg-2); }
-.tag.environment.production { background: #42351f; color: #e9c57d; }
-:root[data-theme="light"] .tag.environment.production { background: #fbf0d9; color: #805414; }
+.tag.dimension-badge { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 2px 7px; border: 0; border-radius: 4px; color: var(--muted); line-height: 1.5; vertical-align: middle; }
+.tag.dimension-badge b { font-size: 12px; font-weight: 400; overflow-wrap: anywhere; }
+.tag.dimension-badge.environment { color: var(--muted); background: color-mix(in srgb, var(--amber) 5%, var(--panel)); }
+.tag.dimension-badge.environment::before { content: ''; width: 3px; height: 3px; border-radius: 50%; flex-shrink: 0; background: currentColor; opacity: .55; }
+.tag.dimension-badge.unspecified { background: var(--bg-2); }
+.dataset-dimensions, .dataset-instance-meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; min-width: 0; }
+.dataset-row-labels { display: flex; flex-wrap: wrap; gap: 4px; }
+#dataset-basic-fields { align-items: start; }
+.dataset-label-editor { display: grid; gap: 6px; min-width: 0; }
+.dataset-label-editor > label { margin: 0; }
+.label-entry { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--bg-2); padding: 6px 8px; }
+.label-entry:focus-within { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.selected-labels { display: contents; }
+.selected-label { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 2px 6px; border-radius: 4px; background: var(--panel); color: var(--muted); font-size: 12px; }
+.selected-label > span { overflow-wrap: anywhere; }
+.selected-label .remove-label { border: 0; background: transparent; color: var(--muted); padding: 2px 4px; font-size: 15px; line-height: 1; }
+.label-entry > #dataset-environment-select, .label-entry > #transfer-environment { flex: 1; width: 180px; min-width: 120px; padding: 3px; border: 0; background: transparent; outline: 0; }
+.label-entry > .clear-button { padding: 3px 6px; }
+.dataset-label-help { font-size: 12px; color: var(--muted); }
+.manager-tag-filters { display: flex; flex-wrap: wrap; gap: 6px; flex-basis: 100%; }
 .expired-tag { color: var(--red); }
 .record-title { width: 100%; }
 .record-title h4 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 5px 0 3px; font-size: 16px; overflow: visible; white-space: normal; }
@@ -196,6 +214,17 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
 .dataset-manager-row .tag { font-size: 12px; width: fit-content; }
 .dataset-manager-row > code { color: var(--ink); font-size: 13px; overflow-wrap: anywhere; }
 .dataset-manager-row .row-actions { display: flex !important; gap: 4px !important; justify-content: flex-end; }
+.dataset-manager-row .dataset-name-link, .dataset-manager-row .dataset-model-button,
+.dataset-manager-row .dataset-record-count, .dataset-manager-row .dataset-field-count { border: 0; background: transparent; color: var(--ink); padding: 0; text-align: left; font-size: 14px; }
+.dataset-manager-row .dataset-name-link { justify-self: start; }
+.dataset-manager-row .dataset-model-button { color: var(--cyan); font-size: 13px; overflow-wrap: anywhere; }
+.dataset-manager-row .dataset-name-link:hover, .dataset-manager-row .dataset-record-count:hover, .dataset-manager-row .dataset-field-count:hover { color: var(--cyan); text-decoration: underline; }
+.dataset-directory { overflow-wrap: anywhere; }
+.dataset-directory small { margin-right: 4px; font-size: 10px; opacity: .8; }
+.dataset-manager-model { min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
+.dataset-model-note { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
+.dataset-model-note h4 { margin: 0; }
+.dataset-model-note .markdown-content { margin-top: 12px; }
 .row-menu { position: relative; }
 .row-menu summary { min-width: 34px; min-height: 34px; padding: 6px; cursor: pointer; list-style: none; font-size: 20px; text-align: center; }
 .row-menu > div { position: absolute; top: 38px; right: 0; min-width: 150px; background: var(--panel); border: 1px solid var(--line); box-shadow: 0 8px 24px #0002; border-radius: 8px; padding: 6px; z-index: 10; }
@@ -407,7 +436,7 @@ dialog > header > .icon-button { position: absolute; right: 16px; top: 12px; }
   .search-input-wrap kbd { display: none; }
   .filter-row { margin-top: 10px; gap: 8px; }
   .filter-label { display: none; }
-  #environment-filters { display: none; }
+  #environment-filters { display: flex; flex-basis: 100%; }
   .mobile-environment-select { display: block; width: 104px; flex-shrink: 0; }
   .mobile-environment-select select { width: 100%; min-height: 40px; padding: 8px; font-size: 13px; }
   .dataset-scope-select { max-width: 180px; flex: 1; }
@@ -698,3 +727,172 @@ dialog > header > .icon-button { position: absolute; right: 16px; top: 12px; }
   .application-maintenance { align-items: flex-start; }
   .application-maintenance .secondary-button { font-size: 12px; padding: 8px; }
 }
+
+/* Data models and independent instance dimensions. */
+.catalog-dialog { width: min(880px, calc(100vw - 32px)); max-height: calc(100dvh - 40px); overflow: auto; padding: 24px; border: 1px solid var(--line); border-radius: 16px; color: var(--ink); background: var(--panel-strong); }
+.catalog-dialog::backdrop { background: #0007; }
+.catalog-dialog label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.catalog-dialog input:not([type=checkbox]), .catalog-dialog select { min-width: 0; width: 100%; }
+.catalog-dialog h4 { margin: 20px 0 10px; }
+.catalog-create, .catalog-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 14px 0; }
+.catalog-item { flex-wrap: wrap; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.catalog-item small { display: block; margin-top: 6px; color: var(--muted); }
+.catalog-rename { flex: 1; min-width: 180px; }
+.catalog-impact { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.manager-filters { flex-wrap: wrap; }
+.manager-filters select { max-width: 220px; }
+#search-schema { max-width: 180px; }
+.catalog-dialog input:not([type=checkbox]), .catalog-dialog select, #search-schema { border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); padding: 9px 10px; font: inherit; }
+
+.schema-dialog { width: min(1280px, calc(100vw - 32px)); padding: 0; }
+.schema-dialog[open] { display: flex; flex-direction: column; overflow: hidden; max-height: calc(100dvh - 32px); }
+.schema-dialog > header { flex: 0 0 auto; margin: 0; padding: 18px 24px; border-bottom: 1px solid var(--line); }
+.schema-dialog > header h3 { margin: 0; font-size: 20px; }
+.model-editor-body { overflow: auto; min-height: 0; padding: 18px 24px 24px; }
+.model-editor-meta { display: grid; grid-template-columns: minmax(180px, 420px) 180px; gap: 16px; align-items: end; }
+.model-scope-note { margin: 10px 0 20px; color: var(--muted); font-size: 12px; }
+.model-description-publication .markdown-content { margin-top: 12px; }
+.catalog-model-note { margin-top: 8px; }
+.model-section-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 18px 0 8px; }
+.model-section-heading h4 { margin: 0; font-size: 14px; }
+.model-section-heading button { padding: 6px 10px; font-size: 12px; }
+.model-table-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+.model-field-heading, .catalog-field-row { display: grid; grid-template-columns: 28px minmax(132px, 1.4fr) minmax(110px, 1.2fr) 144px 60px 64px 64px 90px 96px; gap: 8px; align-items: center; }
+.model-field-heading { padding: 10px 12px; background: var(--bg); color: var(--muted); font-size: 12px; font-weight: 600; }
+.model-field-heading span:nth-child(n+5) { text-align: center; }
+.catalog-field-table { counter-reset: model-field; }
+.catalog-field-row { padding: 8px 12px; border-top: 1px solid var(--line); }
+.model-field-number { font-size: 12px; color: var(--muted); text-align: center; }
+.model-field-number::before { counter-increment: model-field; content: counter(model-field); }
+.catalog-field-row label { position: relative; min-width: 0; gap: 0; }
+.catalog-field-row .model-control-caption { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.schema-dialog .catalog-field-row input:not([type=checkbox]), .schema-dialog .catalog-field-row select { height: 36px; padding: 6px 8px; font-size: 13px; border-radius: 6px; }
+.catalog-field-row label.model-check { flex-direction: row; justify-content: center; align-items: center; min-height: 36px; }
+.catalog-field-row input[type=checkbox] { width: 15px; height: 15px; margin: 0; }
+.catalog-field-row .row-actions { justify-content: center; flex-wrap: nowrap; gap: 2px; }
+.catalog-field-row .row-actions button { width: 28px; height: 30px; padding: 2px; }
+.supplement-field-row { grid-template-columns: 28px minmax(132px, 1.4fr) minmax(110px, 1.2fr) 144px 96px; }
+.model-editor-footer { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 14px 24px; border-top: 1px solid var(--line); flex: 0 0 auto; }
+.model-editor-footer p { margin: 0; font-size: 12px; }
+.model-editor-footer .inline-error { margin-top: 6px; }
+.model-editor-footer > button { flex-shrink: 0; }
+@media (min-width: 1000px) {
+  .model-field-heading, .catalog-field-row { min-width: 912px; }
+  .supplement-field-row { min-width: 650px; }
+}
+@media (max-width: 999px) {
+  .model-field-heading { display: none; }
+  .catalog-field-row, .supplement-field-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px 14px; padding: 14px; }
+  .catalog-field-row:first-child { border-top: 0; }
+  .model-field-number { display: none; }
+  .catalog-field-row .model-control-caption { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip-path: none; color: var(--muted); font-size: 12px; }
+  .catalog-field-row label { gap: 5px; }
+  .catalog-field-row label.model-check { justify-content: flex-start; flex-direction: row-reverse; gap: 8px; }
+  .catalog-field-row .row-actions { justify-content: flex-end; align-self: end; }
+}
+@media (max-width: 600px) {
+  .catalog-dialog { width: calc(100vw - 16px); padding: 16px; max-height: calc(100dvh - 16px); }
+  .schema-dialog { padding: 0; }
+  .schema-dialog > header, .model-editor-body, .model-editor-footer { padding: 14px 16px; }
+  .model-editor-meta { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .model-editor-footer { align-items: flex-start; gap: 12px; }
+  .manager-filters select { max-width: 100%; }
+}
+
+/* Keep common dataset actions visible at every width. */
+@media (min-width: 1321px) {
+  .dataset-table-header, .workspace-panel .dataset-manager-row:not(.app-manager-row) { grid-template-columns: minmax(170px, 1.7fr) minmax(92px, .9fr) minmax(110px, 1fr) 44px 44px minmax(95px, .9fr) 280px; gap: 14px; }
+}
+.workspace-panel .dataset-manager-row .dataset-row-actions { flex-wrap: wrap; max-width: none; min-width: 0; width: 100%; }
+.dataset-manager-row .dataset-row-actions > button { min-height: 34px; white-space: nowrap; }
+@media (max-width: 1320px) {
+  .dataset-table-header { display: none; }
+  .workspace-panel .dataset-manager-row:not(.app-manager-row) { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "name environment" "model model" "records fields" "key key" "actions actions"; gap: 8px 16px; align-items: start; padding: 16px 0; }
+  .dataset-manager-row .dataset-manager-name { grid-area: name; }
+  .dataset-manager-row .dataset-row-labels { grid-area: environment; max-width: 160px; }
+  .dataset-manager-row .dataset-manager-model { grid-area: model; }
+  .dataset-manager-row .dataset-manager-model::before { content: '模型 '; color: var(--muted); font-size: 12px; }
+  .dataset-manager-row .dataset-record-count { grid-area: records; }
+  .dataset-manager-row .dataset-record-count::before { content: '记录 '; color: var(--muted); font-size: 12px; }
+  .dataset-manager-row .dataset-field-count { grid-area: fields; }
+  .dataset-manager-row .dataset-field-count::before { content: '字段 '; color: var(--muted); font-size: 12px; }
+  .dataset-manager-row .dataset-key { grid-area: key; }
+  .dataset-manager-row .dataset-key::before { content: 'KEY '; color: var(--muted); font-size: 12px; }
+  .dataset-manager-row .dataset-row-actions { grid-area: actions; justify-content: flex-start !important; }
+}
+
+/* Model reading and description editing share the same compact dialog rhythm. */
+html:has(dialog[open]) { overflow: hidden; }
+.catalog-model-link { padding: 0; border: 0; background: transparent; color: var(--cyan); font: inherit; font-weight: 600; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+.model-view-dialog { width: min(960px, calc(100vw - 32px)); }
+.schema-dialog > header { padding-right: 152px; min-height: 66px; }
+.schema-dialog > header h3 { overflow-wrap: anywhere; }
+.model-description-card { margin: 0 0 18px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
+.model-description-card h4 { margin: 0; font-size: 14px; }
+.model-description-card .description-summary { margin: 8px 0; color: var(--muted); font-size: 13px; }
+.model-description-card summary, .catalog-model-note > summary { cursor: pointer; color: var(--cyan); font-size: 13px; }
+.model-description-card .markdown-content { margin-top: 12px; }
+.model-view-dialog .page-tabs { margin: 0 0 16px; }
+.model-view-dialog .dataset-info-table-wrap { max-width: 100%; }
+dialog.description-dialog { margin: auto; padding: 0; }
+.description-dialog[open] { display: flex; flex-direction: column; overflow: hidden; }
+.description-dialog > header { flex-shrink: 0; margin: 0; min-height: 70px; padding: 18px 152px 18px 24px; border-bottom: 1px solid var(--line); }
+.description-dialog h3 { font-size: 20px; }
+.description-dialog-body { min-height: 0; overflow: auto; padding: 16px 24px; }
+.description-dialog-body > label { display: block; margin: 14px 0 8px; font-size: 13px; }
+.description-dialog-body > .security-note { margin: 0; overflow-wrap: anywhere; }
+#description-draft { display: block; min-height: 200px; max-height: 50dvh; resize: vertical; font-size: 14px; line-height: 1.6; font-family: ui-monospace, monospace; }
+.description-dialog-body details { margin-top: 12px; }
+.description-dialog-body .markdown-content { margin-top: 12px; }
+.description-dialog > .dialog-actions { position: static; flex-shrink: 0; margin: 0; padding: 14px 24px; border-top: 1px solid var(--line); }
+@media (max-width: 600px) {
+  .schema-dialog > header { padding: 16px 144px 16px 16px; min-height: 72px; }
+  .schema-dialog > header h3 { font-size: 18px; }
+  .model-view-dialog .model-editor-body { padding: 14px 16px; }
+  .model-view-dialog .page-tabs { gap: 16px; }
+  .model-description-card .section-heading { flex-wrap: wrap; gap: 8px; }
+  dialog.description-dialog { width: 100%; height: 100dvh; max-height: 100dvh; max-width: 100%; margin: 0; border: 0; border-radius: 0; }
+  .description-dialog > header { padding: 16px 144px 16px 16px; min-height: 76px; }
+  .description-dialog h3 { font-size: 18px; }
+  .description-dialog-body { flex: 1; padding: 16px; }
+  #description-draft { font-size: 16px; min-height: 220px; max-height: 55dvh; }
+  .description-dialog > .dialog-actions { padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); }
+  .description-dialog > .dialog-actions button { min-height: 44px; }
+}
+
+.dataset-form-grid:has(#dataset-schema-label[hidden]) .dataset-label-editor { grid-column: 1 / -1; }
+
+/* Keep acquisition notes beside the selected import target, with full text one click away. */
+.reference-context { margin: 18px 0; min-width: 0; }
+.reference-group-title { margin: 0 0 10px; font-size: 14px; }
+.reference-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.reference-card { min-width: 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.reference-card .section-heading { display: flex; margin-bottom: 8px; gap: 10px; align-items: center; flex-direction: row; flex-wrap: nowrap; justify-content: space-between; }
+.reference-caption { font-size: 12px; color: var(--muted); }
+.reference-card h4 { margin: 0 0 6px; font-size: 15px; overflow-wrap: anywhere; }
+.reference-meta { margin: 0 0 8px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.reference-card .clear-button { font-size: 12px; padding: 4px 0; white-space: nowrap; }
+.reference-card .dataset-dimensions { margin: 8px 0; }
+.reference-card .description-summary { font-size: 13px; overflow-wrap: anywhere; }
+.reference-card .security-note { margin: 6px 0 0; }
+#editor-model-reference .reference-card { background: var(--bg-2); }
+.import-source-details { margin-top: 14px; }
+.import-source-details > summary, .reference-fields > summary { cursor: pointer; font-size: 13px; color: var(--cyan); }
+.import-source-details .reference-grid { margin-top: 12px; }
+.reference-info-dialog { width: min(920px, calc(100vw - 32px)); }
+.reference-info-dialog .dataset-info-summary { margin: 16px 0 24px; }
+.reference-description h4 { font-size: 15px; margin: 16px 0 12px; }
+.reference-fields { margin-top: 20px; }
+.reference-fields .dataset-info-table-wrap { margin-top: 12px; }
+.reference-info-dialog .markdown-content { overflow-wrap: anywhere; }
+@media (max-width: 700px) {
+  .reference-grid { grid-template-columns: minmax(0, 1fr); }
+  .reference-card { padding: 12px 14px; }
+  .reference-card .clear-button { min-height: 44px; }
+  .reference-info-dialog { width: calc(100vw - 16px); }
+}
+
+#ordinary-import-target, #native-import-target { display: grid; gap: 8px; margin-top: 18px; }
+
+.reference-card .reference-caption { white-space: nowrap; flex-shrink: 0; }
+.reference-card .section-heading > button { margin-left: auto; }

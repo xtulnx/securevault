@@ -101,9 +101,13 @@ fn field_role(field: &str, value: &Value, record: &Value, schema: Option<&Datase
 }
 
 fn candidates(clause: &SearchClause, record: &Value) -> Vec<(String, Value)> {
-    combined_clause_fields(clause, record["category"].as_str().unwrap_or_default(),
+    let mut fields=combined_clause_fields(clause, record["category"].as_str().unwrap_or_default(),
         record["environment"].as_str(), record["dataset_id"].as_str().unwrap_or_default(),
-        &record["indexes"], &record["display"], &record["supplement"])
+        &record["indexes"], &record["display"], &record["supplement"]);
+    if clause.field.is_none() || matches!(clause.field.as_deref(),Some("env"|"environment")) {
+        fields.extend(record["environments"].as_array().into_iter().flatten().map(|v|("environment".to_owned(),v.clone())));
+    }
+    fields
 }
 
 fn relevance(record: &mut Value, clauses: &[&SearchClause], schema: Option<&DatasetSchema>) -> Relevance {

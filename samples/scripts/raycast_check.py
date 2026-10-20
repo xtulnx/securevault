@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify Raycast's read-only API contract on a disposable project-local vault."""
+"""Verify extension metadata, multi-label filters and httpyac reads on a disposable vault."""
 import argparse
 import json
 import os
@@ -44,7 +44,7 @@ def main():
                 assert b'async function openLinkedRecord()' in response.read()
             password = secrets.token_urlsafe(32)
             owner.request('/vault/setup', {'password': password})
-            schema = dict(category_path='业务/支付', environment='正式', description='查询用途说明',
+            schema = dict(name='商户凭据', category_path='业务/支付', environment_names=['客户A', '生产', '一区,二区 / 主站;备站'], description='查询用途说明',
                           fields=[dict(source_key=key, display_name=label, zone=zone, position=index)
                                   for index, (key, label, zone) in enumerate([
                                       ('code', '编号', 'indexes'), ('enabled', '启用', 'display'),
@@ -56,13 +56,18 @@ def main():
                           sample_data=[dict(code=0, enabled=False, notes='普通说明', secret='MAIN_SECRET',
                                             hidden='HIDDEN_VALUE', ignored='IGNORED_VALUE')])
             allowed = owner.request('/datasets', schema)['dataset_id']
-            denied = owner.request('/datasets', {**schema, 'category_path': '未授权目录'})['dataset_id']
+            model_id = next(item for item in owner.request('/datasets')['datasets'] if item['id'] == allowed)['schema_id']
+            model_request = {'schema_id': model_id, 'description': 'DEMO_ONLY_OWNER_MODEL_NOTES'}
+            model_preview = owner.request('/schemas/preview', model_request)
+            owner.request('/schemas/publish', {**model_request, 'confirmation_token': model_preview['confirmation_token']})
             record = owner.search(dataset_id=allowed)['records'][0]['id']
-            denied_record = owner.search(dataset_id=denied)['records'][0]['id']
             owner.request('/datasets/' + allowed + '/supplement', {
                 'fields': [dict(source_key='alias', display_name='别名', zone='indexes', position=0),
                            dict(source_key='memo', display_name='备注', zone='normal', position=1),
                            dict(source_key='secret', display_name='附表密钥', zone='secrets', position=2)]}, method='PATCH')
+            denied = owner.request('/datasets', {'name': '商户凭据', 'category_path': '业务/支付',
+                'schema_id': model_id, 'environment_names': ['客户B', '生产'], 'sample_data': schema['sample_data']})['dataset_id']
+            denied_record = owner.search(dataset_id=denied)['records'][0]['id']
             supplement = owner.request('/datasets/' + allowed + '/supplement/records', {
                 'main_record_id': record, 'values': {'alias': '华东渠道', 'memo': '手工备注', 'secret': 'ADDON_SECRET'}})['id']
             app = owner.request('/apps', {'name': 'Raycast 测试', 'permission': 'search', 'datasets': [allowed]})
@@ -78,6 +83,32 @@ def main():
             assert [field['source_key'] for field in public['list_fields']] == ['enabled']
             assert public['display_config']['identifier_fields'] == ['code', 'enabled']
             assert public['description'] == '查询用途说明'
+            assert public['name'] == '商户凭据'
+            assert public['environments'] == ['客户A', '生产', '一区,二区 / 主站;备站']
+            assert public['schema_id'] == model_id and public['schema_name']
+            assert public['schema_version'] == 3  # Description publish plus supplement definition update.
+            assert 'schema_description' not in public and 'DEMO_ONLY_OWNER_MODEL_NOTES' not in json.dumps(public)
+            for tags, total in [(['客户A'], 1), (['客户A', '生产'], 1), (['客户A', '测试'], 0), (['客户B', '生产'], 0), (['客户A', '一区,二区 / 主站;备站'], 1), (['一区', '二区'], 0)]:
+                query = urllib.parse.urlencode({'environment_tags': json.dumps(tags), 'schema_id': model_id})
+                assert app_client.request('/records/search?' + query, headers=headers)['total'] == total
+            app_client.request('/catalog', headers=headers, expected=403)
+            # Execute the actual httpyac module against this same scoped application.
+            extension_env = environment.copy()
+            extension_env.update(SECUREVAULT_URL=f'http://127.0.0.1:{port}', SECUREVAULT_APP_ID=app['id'],
+                SECUREVAULT_APP_KEY=app['key'], SECUREVAULT_MODULE=(root / 'extensions/httpyac/securevault.mjs').as_uri(),
+                SECUREVAULT_MODEL=model_id, SECUREVAULT_DENIED_RECORD=denied_record)
+            subprocess.run(['node', '--input-type=module'], input='''
+import assert from 'node:assert/strict';
+const { loadFields } = await import(process.env.SECUREVAULT_MODULE);
+const fields = { code: 'code', enabled: 'enabled', memo: 'supplement.memo' };
+const result = await loadFields({ datasetName: '商户凭据', schemaId: process.env.SECUREVAULT_MODEL,
+  tags: ['客户A', '生产', '一区,二区 / 主站;备站'], query: 'code:=0', fields });
+assert.deepEqual({ ...result }, { code: 0, enabled: false, memo: '手工备注' });
+await assert.rejects(loadFields({ datasetName: '商户凭据', tags: ['客户B', '生产'], fields }), /授权范围内未找到/);
+await assert.rejects(loadFields({ tags: ['客户A', '测试'], fields }), /未找到/);
+await assert.rejects(loadFields({ datasetName: '商户凭据', environment: '生产', fields: ['secrets.secret'] }), /HTTP 403/);
+await assert.rejects(loadFields({ recordId: process.env.SECUREVAULT_DENIED_RECORD, fields }), /HTTP 403/);
+''', text=True, env=extension_env, check=True, cwd=root)
             assert not any(key in public for key in ['conflict_strategy', 'record_count'])
             request = urllib.request.Request(app_client.base + '/client/datasets', headers=headers)
             with app_client.opener.open(request) as response:
@@ -100,7 +131,11 @@ def main():
             app_client.request('/supplement/' + supplement + '/secrets/reveal', {'field_name': 'secret'}, headers=headers, expected=403)
             assert len(owner.request('/datasets')['datasets']) == 2
             assert len(owner.request('/client/datasets', headers=headers)['datasets']) == 1
-            owner.request('/datasets/' + allowed, {'identity_fields': ['code', 'secret']}, method='PATCH')
+            definition = next(model for model in owner.request('/catalog')['schemas'] if model['id'] == model_id)['definition']
+            definition['identity_fields'] = ['code', 'secret']
+            update_model = {'schema_id': model_id, 'definition': definition}
+            preview_model = owner.request('/schemas/preview', update_model)
+            owner.request('/schemas/publish', {**update_model, 'confirmation_token': preview_model['confirmation_token']})
             assert app_client.request('/client/datasets', headers=headers)['datasets'][0]['identity_fields'] == []
             owner.request('/apps/' + app['id'], {'datasets': []}, method='PATCH')
             assert app_client.request('/client/datasets', headers=headers)['datasets'] == []
@@ -119,7 +154,7 @@ def main():
             app_client.request('/client/datasets', headers=headers, expected=423)
             owner.request('/vault/unlock', {'password': password})
             assert len(app_client.request('/client/datasets', headers=headers)['datasets']) == 1
-            print('通过：授权元数据、主附表联合搜索、普通字段详情、敏感值隔离、管理权限不变、撤销/停用/过期/轮换、封印与解锁。')
+            print('通过：名称、共享模型和多标签、httpyac 实际取值、授权实例隔离、主附表联合搜索、敏感值隔离、撤销/停用/过期/轮换、封印与解锁。')
         finally:
             process.terminate()
             process.wait(timeout=10)

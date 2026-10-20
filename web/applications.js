@@ -37,7 +37,7 @@ function renderApplications() {
     return `<article class="application-row" aria-label="${escapeHtml(app.name)}">
       <div class="application-name"><button class="application-name-button" data-app-view="${escapeHtml(app.id)}">${escapeHtml(app.name)}</button><code title="${escapeHtml(app.id)}">${escapeHtml(app.id)}</code></div>
       <div class="application-permission" data-label="访问级别"><span class="application-access ${app.permission === 'secrets' ? 'sensitive' : ''}">${applicationPermission(app)}</span></div>
-      <div class="application-scope" data-label="授权范围"><span>${datasets.length} 个数据集</span><small>${escapeHtml(first?.category_path.split('/').at(-1) || (datasets.length ? '查看授权明细' : '尚未授权'))}${datasets.length > 1 ? ` 等 ${datasets.length} 项` : ''}</small></div>
+      <div class="application-scope" data-label="授权范围"><span>${datasets.length} 个数据集</span><small>${escapeHtml((first ? datasetName(first) : '') || (datasets.length ? '查看授权明细' : '尚未授权'))}${datasets.length > 1 ? ` 等 ${datasets.length} 项` : ''}</small></div>
       <div class="application-state" data-label="状态与期限"><span class="application-status ${status.key}">${status.label}</span><small title="${escapeHtml(applicationDate(app.access_expires_at))}">${applicationExpiry(app)}</small></div>
       <div class="application-row-actions"><button class="clear-button" data-app-view="${escapeHtml(app.id)}">查看</button><button class="secondary-button app-configure" data-id="${escapeHtml(app.id)}">${status.key === 'expired' ? '重新授权' : '配置授权'}</button></div>
     </article>`;
@@ -78,7 +78,7 @@ function openAppDetails(id) {
   $('#app-details-error').hidden = true;
   $('#app-details-content').innerHTML = `<div class="application-identity"><div><small>应用 ID</small><code>${escapeHtml(app.id)}</code></div><button id="copy-detail-app-id" class="clear-button" type="button">复制 ID</button></div>
     <dl class="application-facts"><div><dt>访问级别</dt><dd>${applicationPermission(app)}</dd></div><div><dt>应用状态</dt><dd><span class="application-status ${status.key}">${status.label}</span></dd></div><div><dt>授权到期</dt><dd>${escapeHtml(applicationDate(app.access_expires_at))}</dd></div></dl>
-    <section class="application-granted"><h4>可访问的数据集 <span>${app.datasets?.length || 0}</span></h4>${app.datasets?.length ? `<ul>${app.datasets.map(id => { const dataset = applicationDataset(id); return `<li><div>${dataset ? `<button class="application-dataset-link" type="button" data-dataset-id="${escapeHtml(id)}" aria-label="查看数据集基本信息：${escapeHtml(dataset.category_path)}">${escapeHtml(dataset.category_path)}</button>` : '<strong>数据集已删除</strong>'}${!dataset ? `<code>${escapeHtml(id)}</code>` : ''}</div><span class="tag">${escapeHtml(dataset?.environment || '未设置环境')}</span></li>`; }).join('')}</ul>` : '<p class="application-caption">尚未选择数据集，此应用无法读取任何数据。请先配置授权。</p>'}</section>`;
+    <section class="application-granted"><h4>可访问的数据集 <span>${app.datasets?.length || 0}</span></h4>${app.datasets?.length ? `<ul>${app.datasets.map(id => { const dataset = applicationDataset(id); return `<li><div>${dataset ? `<button class="application-dataset-link" type="button" data-dataset-id="${escapeHtml(id)}" aria-label="查看数据集基本信息：${escapeHtml(datasetLocator(dataset))}">${escapeHtml(datasetLocator(dataset))}</button>` : '<strong>数据集已删除</strong>'}${!dataset ? `<code>${escapeHtml(id)}</code>` : ''}</div><span class="tag">${escapeHtml(datasetLabelText(dataset))}</span></li>`; }).join('')}</ul>` : '<p class="application-caption">尚未选择数据集，此应用无法读取任何数据。请先配置授权。</p>'}</section>`;
   $('#copy-detail-app-id').addEventListener('click', () => copyApplicationId(app.id));
   $$('#app-details-content .application-dataset-link').forEach(button => button.addEventListener('click', () => openDatasetInfo(button.dataset.datasetId)));
   $('#details-toggle').textContent = app.disabled ? '启用应用' : '停用应用';
@@ -180,7 +180,7 @@ function openAppScope(id = null) {
   $('#scope-permission').value = app?.permission || 'search';
   $('#scope-keep-expiry').hidden = create || Boolean(expired);
   $('#scope-ttl').value = create || expired ? '1800' : 'keep';
-  $('#scope-datasets').innerHTML = state.datasets.map(dataset => `<label class="app-dataset-option"><input type="checkbox" value="${escapeHtml(dataset.id)}" ${(app?.datasets || []).includes(dataset.id) ? 'checked' : ''} /><span><strong>${escapeHtml(dataset.category_path)}</strong><small>${escapeHtml(dataset.environment || '未设置环境')}</small></span></label>`).join('');
+  $('#scope-datasets').innerHTML = state.datasets.map(dataset => `<label class="app-dataset-option"><input type="checkbox" value="${escapeHtml(dataset.id)}" ${(app?.datasets || []).includes(dataset.id) ? 'checked' : ''} /><span><strong>${escapeHtml(datasetLocator(dataset))}</strong><small>${escapeHtml(datasetLabelText(dataset))}</small></span></label>`).join('');
   $('#scope-search').value = '';
   $('#scope-only-selected').checked = false;
   $('#scope-error').hidden = true;

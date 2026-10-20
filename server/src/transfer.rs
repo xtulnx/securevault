@@ -23,9 +23,19 @@ pub(super) struct Package {
 #[derive(Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 struct Schema {
+    #[serde(default, skip_serializing_if="Option::is_none")]
+    name: Option<String>,
+    #[serde(default, skip_serializing_if="Option::is_none")]
+    schema_name: Option<String>,
+    #[serde(default, skip_serializing_if="Option::is_none")]
+    schema_description: Option<String>,
+    #[serde(default, skip_serializing_if="Option::is_none")]
+    customer: Option<String>,
     category_path: String,
     #[serde(default)]
     environment: Option<String>,
+    #[serde(default)]
+    environments: Option<Vec<String>>,
     #[serde(default)]
     description: String,
     fields: Vec<FieldDefinition>,
@@ -88,6 +98,8 @@ pub(super) struct Request {
     #[serde(default)]
     environment: Option<String>,
     #[serde(default)]
+    environments: Option<Vec<String>>,
+    #[serde(default)]
     skip_existing: bool,
     #[serde(default)]
     confirm_changes: bool,
@@ -116,6 +128,10 @@ fn read_schema(db: &Connection, id: &str) -> ApiResult<Schema> {
     ).optional().map_err(internal)?.ok_or_else(|| ApiError(StatusCode::NOT_FOUND,"数据集不存在".into()))?;
     let mut schema: Schema = serde_json::from_value(value).map_err(internal)?;
     schema.supplement_fields = supplement::fields(db, id)?;
+    let (schema_name,customer,schema_description):(Option<String>,Option<String>,Option<String>)=db.query_row("SELECT s.name,c.name,s.description FROM datasets d LEFT JOIN shared_schemas s ON s.id=d.schema_id LEFT JOIN customers c ON c.id=d.customer_id WHERE d.id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(internal)?;
+    schema.name=Some(db.query_row("SELECT name FROM datasets WHERE id=?1",[id],|r|r.get(0)).map_err(internal)?);
+    schema.schema_name=schema_name;schema.customer=customer;schema.schema_description=schema_description;
+    schema.environments=Some(catalog::environments(db,id)?.into_iter().map(|v|v.1).collect());
     Ok(schema)
 }
 
@@ -317,6 +333,7 @@ fn validate_package(package: &Package) -> ApiResult<()> {
     }
     let schema = &package.schema;
     normalize_category(&schema.category_path)?;
+    if let Some(name)=&schema.name {normalize_dataset_name(name)?;}
     if schema.conflict_strategy != "allow_mark" {
         return Err(bad_request("重复处理策略无效"));
     }
@@ -450,13 +467,16 @@ fn changes(db: &Connection, request: &Request) -> ApiResult<Vec<String>> {
     {
         result.push("列表展示规则将更新".into());
     }
+    if request.package.schema.name.as_ref().is_some_and(|name| old.name.as_ref() != Some(name)) {
+        result.push("数据集名称将更新".into());
+    }
     if old.description != request.package.schema.description {
         result.push("数据集描述将更新".into());
     }
     if old.identity_fields != request.package.schema.identity_fields {
         result.push("逻辑唯一 KEY 将变更，影响去重与附表关联".into());
     }
-    if old.category_path != request.category_path || old.environment != request.environment {
+    if old.category_path != request.category_path || old.environments.as_deref().unwrap_or_default() != requested_environments(request).as_slice() {
         result.push("目录或环境将变更".into());
     }
     Ok(result)
@@ -487,10 +507,20 @@ fn confirmation_token(db: &Connection, request: &Request) -> ApiResult<String> {
     Ok(hex::encode(hash.finalize()))
 }
 
+fn requested_environments(request:&Request) -> Vec<String> {
+    if let Some(labels)=&request.environments {return labels.clone();}
+    // New exports provide all labels. An unchanged compatibility field preserves them.
+    if request.environment==request.package.schema.environment {
+        if let Some(labels)=&request.package.schema.environments {return labels.clone();}
+    }
+    request.environment.iter().cloned().collect()
+}
+
 fn apply(db: &Connection, keys: &KeySet, request: &Request) -> ApiResult<Value> {
     validate_package(&request.package)?;
     let category = normalize_category(&request.category_path)?;
     let schema = &request.package.schema;
+    let environment_names=requested_environments(request);
     let id = if let Some(id) = request.dataset_id.as_deref() {
         let old = read_schema(db, id)?;
         let mut merged = schema.fields.clone();
@@ -499,14 +529,16 @@ fn apply(db: &Connection, keys: &KeySet, request: &Request) -> ApiResult<Value> 
                 merged.push(field);
             }
         }
-        let update:DatasetUpdate=serde_json::from_value(json!({"category_path":category,"environment":request.environment,"clear_environment":request.environment.is_none(),"description":schema.description,"fields":merged,"identity_fields":schema.identity_fields,"list_fields":schema.list_fields,"display_config":schema.display_config})).map_err(internal)?;
+        let update:DatasetUpdate=serde_json::from_value(json!({"name":schema.name,"category_path":category,"environment_names":environment_names,"description":schema.description,"fields":merged,"identity_fields":schema.identity_fields,"list_fields":schema.list_fields,"display_config":schema.display_config})).map_err(internal)?;
         update_dataset_in_connection(db, keys, id, update)?;
         id.to_owned()
     } else {
         let id = format!("ds_{}", Uuid::new_v4().simple());
-        db.execute("INSERT INTO datasets(id,category_path,environment,description,fields_json,identity_fields_json,conflict_strategy,list_fields_json,display_config_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![id,category,request.environment,schema.description,serde_json::to_string(&schema.fields).map_err(internal)?,serde_json::to_string(&schema.identity_fields).map_err(internal)?,schema.conflict_strategy,serde_json::to_string(&schema.list_fields).map_err(internal)?,serde_json::to_string(&schema.display_config).map_err(internal)?]).map_err(internal)?;
+        db.execute("INSERT INTO datasets(id,category_path,environment,description,fields_json,identity_fields_json,conflict_strategy,list_fields_json,display_config_json,name) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![id,category,request.environment,schema.description,serde_json::to_string(&schema.fields).map_err(internal)?,serde_json::to_string(&schema.identity_fields).map_err(internal)?,schema.conflict_strategy,serde_json::to_string(&schema.list_fields).map_err(internal)?,serde_json::to_string(&schema.display_config).map_err(internal)?,normalize_dataset_name(schema.name.as_deref().unwrap_or(""))?]).map_err(internal)?;
         id
     };
+    let environment_ids=catalog::resolve_environments(db,None,Some(&environment_names),None,None,false)?.unwrap_or_default();
+    catalog::set_environments(db,&id,&environment_ids)?;
     let old_extensions = supplement::fields(db, &id)?;
     let mut extensions = schema.supplement_fields.clone();
     for field in &old_extensions {
@@ -514,6 +546,9 @@ fn apply(db: &Connection, keys: &KeySet, request: &Request) -> ApiResult<Value> 
             extensions.push(field.clone());
         }
     }
+    let mut proposed=catalog::read_instance(db,&id)?;
+    proposed.supplement_fields=extensions.clone();
+    catalog::require_local_edit(db,&id,&proposed)?;
     // Keep fields absent from the source; clear only explicitly ignored values.
     let rows = supplement::rows(db, keys, &id, None)?;
     for row in rows {
@@ -646,6 +681,25 @@ fn apply(db: &Connection, keys: &KeySet, request: &Request) -> ApiResult<Value> 
         }
     }
     supplement::sync(db, &id)?;
+    catalog::sync_local(db,&id)?;
+    if request.dataset_id.is_none() {
+        if let Some(title)=schema.schema_name.as_deref() {
+            if title.trim().is_empty() || title.chars().count()>120 {return Err(bad_request("数据模型名称无效"));}
+            db.execute("UPDATE shared_schemas SET name=?2 WHERE id=(SELECT schema_id FROM datasets WHERE id=?1)",params![id,title]).map_err(internal)?;
+        }
+        if let Some(description)=schema.schema_description.as_deref() {
+            db.execute("UPDATE shared_schemas SET description=?2 WHERE id=(SELECT schema_id FROM datasets WHERE id=?1)",params![id,description]).map_err(internal)?;
+        }
+        // Older native files carried a separate customer; preserve it as a label.
+        if let Some(customer)=schema.customer.as_deref() {
+            let mut ids=catalog::environments(db,&id)?.into_iter().map(|v|v.0).collect::<Vec<_>>();
+            let label=catalog::environment_named(db,customer)?;
+            if !ids.contains(&label) {ids.push(label);}
+            catalog::set_environments(db,&id,&ids)?;
+        }
+        catalog::assign_metadata(db,&id)?;
+    } else {catalog::assign_metadata(db,&id)?;}
+
     db.execute(
         "INSERT INTO audit_events(event,record_id) VALUES('dataset_transfer_import',?1)",
         [&id],
@@ -722,6 +776,36 @@ mod tests {
         result
     }
 
+    #[test]
+    fn dataset_names_round_trip_and_missing_legacy_names_preserve_existing_targets() {
+        let (db,keys,mut request)=fixture();request.package.schema.name=Some("产品凭据".into());
+        let id=commit(&db,&keys,&request)["dataset_id"].as_str().unwrap().to_owned();
+        assert_eq!(read_schema(&db,&id).unwrap().name.as_deref(),Some("产品凭据"));
+        let query:ExportQuery=serde_json::from_value(json!({"content":"schema"})).unwrap();
+        let package=build_package(&db,&keys,&id,&query).unwrap();assert_eq!(package.schema.name.as_deref(),Some("产品凭据"));
+        request.package=package;request.dataset_id=None;
+        let second=commit(&db,&keys,&request)["dataset_id"].as_str().unwrap().to_owned();
+        assert_eq!(read_schema(&db,&second).unwrap().name.as_deref(),Some("产品凭据"));
+        request.dataset_id=Some(id.clone());request.package.schema.name=None;commit(&db,&keys,&request);
+        assert_eq!(read_schema(&db,&id).unwrap().name.as_deref(),Some("产品凭据"));
+        request.package.schema.name=Some("新的名称".into());assert!(changes(&db,&request).unwrap().iter().any(|c|c.contains("数据集名称")));commit(&db,&keys,&request);
+        assert_eq!(read_schema(&db,&id).unwrap().name.as_deref(),Some("新的名称"));
+        request.package.schema.name=Some(String::new());commit(&db,&keys,&request);
+        assert_eq!(read_schema(&db,&id).unwrap().name.as_deref(),Some(""));
+    }
+    #[test]
+    fn model_notes_survive_native_exchange_without_overwriting_existing_target_notes() {
+        let (db,keys,mut request)=fixture();
+        let description="## 数据来源\n\n```sql\nSELECT code FROM demo_products;\n```\n";
+        request.package.schema.schema_description=Some(description.into());
+        let first=commit(&db,&keys,&request);let id=first["dataset_id"].as_str().unwrap();
+        let query:ExportQuery=serde_json::from_value(json!({"content":"schema"})).unwrap();
+        let package=build_package(&db,&keys,id,&query).unwrap();assert_eq!(package.schema.schema_description.as_deref(),Some(description));
+        request.package=package;request.dataset_id=None;let second=commit(&db,&keys,&request);
+        assert_eq!(read_schema(&db,second["dataset_id"].as_str().unwrap()).unwrap().schema_description.as_deref(),Some(description));
+        request.dataset_id=Some(id.into());request.package.schema.schema_description=Some("来源文件中的其他说明".into());commit(&db,&keys,&request);
+        assert_eq!(read_schema(&db,id).unwrap().schema_description.as_deref(),Some(description));
+    }
     #[test]
     fn empty_schema_round_trip_preserves_all_zones_description_display_and_supplement() {
         let (db, keys, request) = fixture();

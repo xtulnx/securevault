@@ -43,7 +43,7 @@ test('creating and editing datasets send unchanged long Markdown, preview it, an
   assert.equal(document.querySelector('#dataset-description-preview h2').textContent, '数据说明');
   const requests = [];
   window.fetch = async (url, options) => {
-    requests.push({ url, options });
+    if (options?.method) requests.push({ url, options });
     return { ok: true, json: async () => ({ category_path: dataset.category_path }) };
   };
   await window.createDataset();

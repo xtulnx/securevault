@@ -4,6 +4,11 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import {
   categories,
+  datasetLabel,
+  datasetEnvironments,
+  datasetChoiceLabel,
+  datasetMarkdown,
+  matchesFilters,
   publicFields,
   recordIdentity,
   recordMarkdown,
@@ -171,4 +176,52 @@ test("directory options include authorized parents and preserve separate branche
     "业务/云/账号",
     "业务/支付",
   ]);
+});
+
+test("optional dataset names retain directory and labels while older servers keep existing labels", () => {
+  assert.equal(datasetLabel({ ...dataset, name: "商户凭据" }), "商户凭据 · 业务/支付 · 正式");
+  assert.equal(datasetLabel({ ...dataset, name: "" }), "业务/支付 · 正式");
+  assert.equal(datasetLabel(dataset), "业务/支付 · 正式");
+});
+
+test("multi-label filters intersect directory and model by ID, preserving arrays and legacy fallback", () => {
+  const current = {
+    ...dataset,
+    name: "商户凭据",
+    environments: ["客户A", "生产"],
+    schema_id: "model-a",
+    schema_name: "商户模型",
+    schema_version: 3,
+  };
+  const filters = {
+    datasetId: "",
+    category: "业务",
+    tags: ["客户A", "生产"],
+    schemaId: "model-a",
+    includeExpired: false,
+  };
+  assert.equal(matchesFilters(current, filters), true);
+  assert.equal(matchesFilters({ ...current, environments: ["客户A", "测试"] }, filters), false);
+  assert.equal(matchesFilters({ ...current, schema_id: "model-b" }, filters), false);
+  assert.equal(matchesFilters({ ...current, category_path: "业务2/支付" }, filters), false);
+  assert.deepEqual(datasetEnvironments({ ...current, environments: [] }), []);
+  assert.deepEqual(datasetEnvironments(dataset), ["正式"]);
+  assert.equal(datasetLabel(current), "商户凭据 · 业务/支付 · 客户A / 生产");
+  assert.match(datasetMarkdown(current), /商户模型 · v3/);
+  assert.match(recordMarkdown(record, current), /商户模型 · v3/);
+  assert.match(datasetMarkdown({ ...current, description: "" }), /暂无数据集说明/);
+  const duplicate = { ...current, id: "other" };
+  assert.notEqual(
+    datasetChoiceLabel(current, [current, duplicate]),
+    datasetChoiceLabel(duplicate, [current, duplicate]),
+  );
+});
+
+test("tag filters preserve literal punctuation and legacy whitespace and do not split names", () => {
+  const label = " 客户A,区域 / 主站;备站 ";
+  const current = { ...dataset, environments: [label, "生产"] };
+  const filters = { datasetId: "", category: "", schemaId: "", tags: [label, "生产"], includeExpired: false };
+  assert.equal(matchesFilters(current, filters), true);
+  assert.equal(matchesFilters(current, { ...filters, tags: [label.trim()] }), false);
+  assert.equal(matchesFilters(current, { ...filters, tags: ["客户A", "区域"] }), false);
 });

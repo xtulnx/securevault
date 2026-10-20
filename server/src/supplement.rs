@@ -267,27 +267,43 @@ pub(super) async fn save_schema(
     Json(request): Json<SchemaRequest>,
 ) -> ApiResult<Json<Value>> {
     with_connection(&state, |db,keys| {
-        let old = fields(db,&dataset)?;
-        validate_schema(&request.fields,&[],&[])?;
         let tx = db.unchecked_transaction().map_err(internal)?;
-        let ids: Vec<String> = { let mut stmt = tx.prepare("SELECT id FROM supplement_records WHERE dataset_id=?1").map_err(internal)?; stmt.query_map([&dataset], |r| r.get(0)).map_err(internal)?.collect::<Result<_,_>>().map_err(internal)? };
-        for id in ids {
-            let previous = values(&tx,keys,&id)?;
-            let mut next = serde_json::Map::new();
-            for field in &request.fields {
-                let key = field.previous_source_key.as_ref().filter(|key| old.iter().any(|f| &f.source_key == *key)).unwrap_or(&field.source_key);
-                if field.zone != "ignore" { if let Some(value) = previous.get(key) { next.insert(field.source_key.clone(),value.clone()); } }
-            }
-            let (nonce,ciphertext) = seal_field(&keys.field,&id,"supplement",&Value::Object(next))?;
-            tx.execute("UPDATE supplement_records SET nonce=?2,ciphertext=?3 WHERE id=?1",params![id,nonce,ciphertext]).map_err(internal)?;
-        }
-        let mut definitions = request.fields;
-        for field in &mut definitions { field.previous_source_key = None; }
-        tx.execute("INSERT INTO supplement_schemas(dataset_id,fields_json) VALUES(?1,?2) ON CONFLICT(dataset_id) DO UPDATE SET fields_json=excluded.fields_json",params![dataset,serde_json::to_string(&definitions).map_err(internal)?]).map_err(internal)?;
-        tx.execute("INSERT INTO audit_events(event,record_id) VALUES('supplement_schema_updated',?1)",[&dataset]).map_err(internal)?;
+        let mut next=catalog::read_instance(&tx,&dataset)?;
+        next.supplement_fields=request.fields.clone();
+        catalog::require_local_edit(&tx,&dataset,&next)?;
+        save_schema_in_connection(&tx,keys,&dataset,&request.fields)?;
+        catalog::sync_local(&tx,&dataset)?;
         tx.commit().map_err(internal)?;
         Ok(Json(json!({"saved":true})))
     }).await
+}
+
+pub(super) fn save_schema_in_connection(db: &Connection, keys: &KeySet, dataset: &str, fields_next: &[FieldDefinition]) -> ApiResult<()> {
+    let old=fields(db,dataset)?;
+    validate_schema(fields_next,&[],&[])?;
+    let ids:Vec<String>={let mut s=db.prepare("SELECT id FROM supplement_records WHERE dataset_id=?1").map_err(internal)?;s.query_map([dataset],|r|r.get(0)).map_err(internal)?.collect::<Result<_,_>>().map_err(internal)?};
+    for id in ids {
+        let previous=values(db,keys,&id)?;
+        let previous=previous.as_object().ok_or_else(||bad_request("附表值格式无效，已中止数据模型迁移"))?;
+        let mut next=serde_json::Map::new();
+        let mut consumed=std::collections::HashSet::new();
+        for field in fields_next {
+            let key=field.previous_source_key.as_ref().filter(|key|old.iter().any(|f|&f.source_key==*key)).unwrap_or(&field.source_key);
+            if !consumed.insert(key.as_str()) {return Err(bad_request("附表多个字段不能引用同一原字段"));}
+            if field.zone!="ignore" {if let Some(value)=previous.get(key){next.insert(field.source_key.clone(),value.clone());}}
+        }
+        for key in previous.keys() {
+            let explicitly_ignored=fields_next.iter().any(|field|field.zone=="ignore" && (key==&field.source_key || key.starts_with(&format!("{}.",field.source_key))));
+            if !consumed.contains(key.as_str()) && !explicitly_ignored && !old.iter().any(|field|&field.source_key==key) {return Err(bad_request(format!("附表仍有字段 {key} 的值，请先补齐数据模型或显式设为忽略")));}
+        }
+        let (nonce,ciphertext)=seal_field(&keys.field,&id,"supplement",&Value::Object(next))?;
+        db.execute("UPDATE supplement_records SET nonce=?2,ciphertext=?3 WHERE id=?1",params![id,nonce,ciphertext]).map_err(internal)?;
+    }
+    let mut definitions=fields_next.to_vec();
+    for field in &mut definitions {field.previous_source_key=None;}
+    db.execute("INSERT INTO supplement_schemas(dataset_id,fields_json) VALUES(?1,?2) ON CONFLICT(dataset_id) DO UPDATE SET fields_json=excluded.fields_json",params![dataset,serde_json::to_string(&definitions).map_err(internal)?]).map_err(internal)?;
+    db.execute("INSERT INTO audit_events(event,record_id) VALUES('supplement_schema_updated',?1)",[dataset]).map_err(internal)?;
+    Ok(())
 }
 
 pub(super) fn write_row(
@@ -496,6 +512,10 @@ pub(super) fn write_main(
     request: &WriteRequest,
 ) -> ApiResult<Value> {
     let definitions = dataset_definitions(db, dataset).map_err(|_| missing())?;
+    if let Some(id)=id {
+        let owner:Option<String>=db.query_row("SELECT dataset_id FROM records WHERE id=?1",[id],|row|row.get(0)).optional().map_err(internal)?;
+        if owner.as_deref()!=Some(dataset) {return Err(bad_request("记录不属于目标数据集或已删除"));}
+    }
     let mut data = if let Some(id) = id {
         main_values(db, keys, id)?
     } else {

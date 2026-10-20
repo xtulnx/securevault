@@ -105,7 +105,18 @@ function renderSupplement(keepSchema = false) {
   $('#supplement-link-status').textContent = `关联依据：${table.link_mode === 'id' ? '主表系统主键' : table.link_fields.join(' + ')} · ${table.records.length} 条附表记录 · ${orphanCount} 条失联记录`;
   $('#supplement-cleanup').disabled = !orphanCount || !state.canManage;
   $('#supplement-new').disabled = !table.fields.some((field) => field.zone !== 'ignore') || !state.canManage;
-  $('#supplement-schema-panel').hidden = !state.canManage;
+  const dataset = state.datasets.find(item => item.id === table.datasetId);
+  $('#supplement-schema-panel').hidden = !state.canManage || Boolean(dataset?.schema_id);
+  let sharedEntry = $('#supplement-shared-schema');
+  if (!sharedEntry) {
+    sharedEntry = document.createElement('button'); sharedEntry.id = 'supplement-shared-schema'; sharedEntry.className = 'secondary-button';
+    sharedEntry.textContent = '编辑共享附表结构'; $('#supplement-schema-panel').before(sharedEntry);
+    sharedEntry.addEventListener('click', () => {
+      const current = state.datasets.find(item => item.id === supplementState?.datasetId);
+      if (current?.schema_id) openSharedSchemaEditor(current.schema_id);
+    });
+  }
+  sharedEntry.hidden = !state.canManage || !dataset?.schema_id;
   if (!keepSchema) $('#supplement-schema-fields').innerHTML = table.fields.map((field) => supplementSchemaRow(field)).join('');
   const onlyOrphans = $('#supplement-only-orphans').checked;
   $('#supplement-records').innerHTML = table.records.filter((row) => !onlyOrphans || row.orphan).map((row) => supplementMarkup(row, table.fields, state.canManage)).join('') || '<p class="detail-empty">暂无记录</p>';

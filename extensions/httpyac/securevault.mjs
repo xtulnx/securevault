@@ -10,7 +10,7 @@
  *     baseUrl: 'http://127.0.0.1:4173', // 也可包含 /api，或设置 SECUREVAULT_URL
  *     // appId: vaultAppId, appKey: vaultAppKey, // 可改用 httpyac 环境变量
  *     datasetId: '替换为数据集 ID',
- *     environment: '正式', // 数据集的环境名称，不是 httpyac 的环境名称
+ *     tags: ['客户A', '生产'], // 同时满足全部标签，与 httpyac 的环境配置无关
  *     query: 'gid:=2001 platform:=Android',
  *     fields: {
  *       gid: 'gid',
@@ -27,7 +27,7 @@
  *
  * {"gid": {{JSON.stringify(vault.gid)}}, "secret": {{JSON.stringify(vault.appSecret)}}}
  *
- * 支持 recordId 直接定位，或 query / datasetId / category / environment 组合检索。
+ * 支持 recordId 直接定位，或 query / datasetId / datasetName / category / tags / schemaId 组合检索。
  * 检索必须恰好一条；category 包含子目录。过期记录默认拒绝，需 includeExpired:true。
  * fields 也可写成 ['gid', 'secrets.app_secret']，返回对象使用相同名称作键。
  * 裸字段名从主表 indexes/display/normal 查找，并自动按需读取 secrets。
@@ -110,7 +110,7 @@ export async function loadFields(options = {}) {
     baseUrl = process.env.SECUREVAULT_URL || 'http://127.0.0.1:4173',
     appId = process.env.SECUREVAULT_APP_ID,
     appKey = process.env.SECUREVAULT_APP_KEY,
-    recordId, query = '', datasetId, category, environment,
+    recordId, query = '', datasetId, datasetName, category, schemaId, tags = [], environment,
     fields, timeoutMs = 10000, includeExpired = false,
   } = options;
   if (typeof appId !== 'string' || !appId.trim() ||
@@ -119,16 +119,23 @@ export async function loadFields(options = {}) {
   }
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw fail('timeoutMs 必须为正整数');
   if (typeof includeExpired !== 'boolean') throw fail('includeExpired 必须为布尔值');
-  for (const value of [recordId, datasetId, category, environment]) {
+  for (const value of [recordId, datasetId, datasetName, category, schemaId, environment]) {
     if (value !== undefined && (typeof value !== 'string' || !value.trim())) {
-      throw fail('记录 ID、数据集 ID、目录和环境应为非空字符串');
+      throw fail('记录 ID、数据集 ID、名称、目录、模型 ID 和兼容标签应为非空字符串');
     }
   }
+  if (!Array.isArray(tags) || tags.some(tag => typeof tag !== 'string' || !tag.length)) {
+    throw fail('tags 必须为非空标签名称组成的数组');
+  }
+  const selectedTags = [...new Set([...tags, ...(environment === undefined ? [] : [environment])])];
+  if (selectedTags.length > 64) {
+    throw fail('最多筛选 64 个标签');
+  }
   if (typeof query !== 'string') throw fail('query 必须为字符串');
-  if (recordId && (query || datasetId || category || environment !== undefined)) {
+  if (recordId && (query || datasetId || datasetName || category || schemaId || selectedTags.length)) {
     throw fail('recordId 与检索条件请二选一');
   }
-  if (!recordId && !query.trim() && !datasetId && !category && environment === undefined) {
+  if (!recordId && !query.trim() && !datasetId && !datasetName && !category && !schemaId && !selectedTags.length) {
     throw fail('请提供 recordId 或至少一个检索条件');
   }
   if (!fields || typeof fields !== 'object') throw fail('请提供 fields 数组或字段映射');
@@ -148,22 +155,42 @@ export async function loadFields(options = {}) {
   const headers = { Accept: 'application/json', 'X-App-Id': appId, 'X-App-Key': appKey };
   const api = (path, body) => getJson(base, headers, timeoutMs, path, body);
   let id = recordId;
+  let resolvedDatasetId = datasetId;
+  // 名称不是唯一键。只在当前应用授权的实例中精确匹配，并拒绝含糊的选择。
+  if (datasetName !== undefined) {
+    const metadata = await api('/client/datasets');
+    if (!Array.isArray(metadata?.datasets)) throw fail('数据集信息响应格式异常');
+    const candidates = metadata.datasets.filter(dataset => {
+      const name = dataset.name?.trim() || dataset.category_path?.split('/').filter(Boolean).at(-1);
+      const labels = dataset.environments ?? (dataset.environment ? [dataset.environment] : []);
+      return name === datasetName.trim() && (!datasetId || dataset.id === datasetId) &&
+        (!category || dataset.category_path === category || dataset.category_path?.startsWith(`${category}/`)) &&
+        (!schemaId || dataset.schema_id === schemaId) && selectedTags.every(tag => labels.includes(tag));
+    });
+    if (!candidates.length) throw fail('授权范围内未找到符合名称、目录、标签和模型条件的数据集');
+    if (candidates.length !== 1) throw fail(`名称匹配到 ${candidates.length} 个数据集，请补充目录、标签或 datasetId`);
+    resolvedDatasetId = candidates[0].id;
+    if (typeof resolvedDatasetId !== 'string' || !resolvedDatasetId) throw fail('接口未返回有效数据集 ID');
+  }
   if (!id) {
     const params = new URLSearchParams({ q: query, page: '1', limit: '2', include_expired: String(includeExpired) });
-    for (const [key, value] of Object.entries({ dataset_id: datasetId, category, environment })) {
+    for (const [key, value] of Object.entries({ dataset_id: resolvedDatasetId, category, schema_id: schemaId })) {
       if (value !== undefined) params.set(key, value);
     }
+    // 保留旧单环境请求参数，已有调用也可继续连接旧版服务。
+    if (environment !== undefined) params.set('environment', environment);
+    if (selectedTags.length) params.set('environment_tags', JSON.stringify(selectedTags));
     const found = await api(`/records/search?${params}`);
     if (!Array.isArray(found?.records) || !Number.isSafeInteger(found.total) || found.total < 0) {
       throw fail('检索响应格式异常');
     }
-    if (found.total === 0) throw fail('未找到记录，请检查检索条件、环境及授权数据集');
+    if (found.total === 0) throw fail('未找到记录，请检查检索条件、标签及授权数据集');
     if (found.total !== 1) throw fail(`匹配到 ${found.total} 条记录，请缩小检索范围`);
     id = found.records[0]?.id;
   }
   if (typeof id !== 'string' || !id) throw fail('接口未返回有效记录 ID');
   const detail = await api(`/records/${encodeURIComponent(id)}`);
-  if (!detail || detail.id !== id) throw fail('记录详情响应格式异常');
+  if (!detail || detail.id !== id || (resolvedDatasetId && detail.dataset_id !== resolvedDatasetId)) throw fail('记录详情响应格式异常');
   if (detail.expired && !includeExpired) throw fail('记录已过期，如需使用请显式设置 includeExpired:true');
   const loaded = new Map(); // 仅在本次调用内合并重复字段的解密请求。
   async function read(source) {

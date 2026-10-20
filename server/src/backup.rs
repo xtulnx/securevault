@@ -5,11 +5,15 @@ use std::io::{BufRead, BufReader, Read, Write};
 // Public interchange v1 is JSONL, not SQL or SQLCipher pages. Only these logical
 // columns are admitted; keys, key hashes, ciphertext and derived indexes are excluded.
 const TABLES: &[(&str, &[&str])] = &[
+    ("shared_schemas", &["id", "name", "definition_json", "version", "description"]),
+    ("customers", &["id", "name"]),
+    ("environments", &["id", "name"]),
     (
         "datasets",
         &[
             "id",
             "category_path",
+            "name",
             "environment",
             "fields_json",
             "identity_fields_json",
@@ -18,8 +22,12 @@ const TABLES: &[(&str, &[&str])] = &[
             "created_at",
             "description",
             "display_config_json",
+            "schema_id",
+            "customer_id",
+            "environment_id",
         ],
     ),
+    ("dataset_environments", &["dataset_id", "environment_id", "position"]),
     (
         "records",
         &[
@@ -57,7 +65,9 @@ const TABLES: &[(&str, &[&str])] = &[
     ),
     ("supplement_schemas", &["dataset_id", "fields_json"]),
     ("supplement_records", &["id", "dataset_id", "main_record_id", "link_json", "orphan", "updated_at"]),
+
 ];
+fn optional_table(table: &str) -> bool { table.starts_with("supplement_") || matches!(table,"shared_schemas"|"customers"|"environments"|"dataset_environments") }
 const MAX_LINE: u64 = 16 * 1024 * 1024;
 const MAX_EXPANDED: u64 = 16 * 1024 * 1024 * 1024;
 
@@ -282,12 +292,18 @@ fn write_logical(connection: &Connection, keys: &KeySet, writer: &mut impl Write
         &json!({"type":"header","format":"securevault-logical","version":1,"producer":env!("CARGO_PKG_VERSION"),"created_at":unix_now()}),
     )?;
     let mut counts = serde_json::Map::new();
+    let has_model_description:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('shared_schemas') WHERE name='description')",[],|r|r.get(0)).map_err(internal)?;
     let has_description: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('datasets') WHERE name='description')", [], |row| row.get(0)).map_err(internal)?;
     let has_display_config: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('datasets') WHERE name='display_config_json')", [], |row| row.get(0)).map_err(internal)?;
     for &(table, columns) in TABLES {
-        if table.starts_with("supplement_") && !connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)", [table], |r| r.get::<_,bool>(0)).map_err(internal)? { continue; }
+        if optional_table(table) && !connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)", [table], |r| r.get::<_,bool>(0)).map_err(internal)? { continue; }
+        let dataset_columns: Vec<String> = if table=="datasets" { let mut s=connection.prepare("PRAGMA table_info(datasets)").map_err(internal)?; s.query_map([],|r|r.get(1)).map_err(internal)?.collect::<Result<_,_>>().map_err(internal)? } else {Vec::new()};
         let selected = columns.iter().map(|column| {
-            if table == "datasets" && *column == "description" && !has_description { "'' AS description" } else if table == "datasets" && *column == "display_config_json" && !has_display_config { "'{}' AS display_config_json" } else { *column }
+            if table=="datasets" && *column=="name" && !dataset_columns.iter().any(|c|c==column) {return "'' AS name".to_owned();}
+            if table=="shared_schemas" && *column=="description" && !has_model_description {return "'' AS description".to_owned();}
+            if table=="datasets" && matches!(*column,"schema_id"|"customer_id"|"environment_id") && !dataset_columns.iter().any(|c|c==column) {return format!("NULL AS {column}");}
+
+            if table == "datasets" && *column == "description" && !has_description { "'' AS description" } else if table == "datasets" && *column == "display_config_json" && !has_display_config { "'{}' AS display_config_json" } else { *column }.to_string()
         }).collect::<Vec<_>>().join(",");
         let mut statement = connection
             .prepare(&format!(
@@ -301,7 +317,7 @@ fn write_logical(connection: &Connection, keys: &KeySet, writer: &mut impl Write
         while let Some(row) = rows.next().map_err(internal)? {
             let mut data = serde_json::Map::new();
             for (i, column) in columns.iter().enumerate() {
-                if table == "datasets" && *column == "description" && row.get::<_, String>(i).map_err(internal)?.is_empty() { continue; }
+                if table == "datasets" && matches!(*column, "description" | "name") && row.get::<_, String>(i).map_err(internal)?.is_empty() { continue; }
                 if table == "datasets" && *column == "display_config_json" && row.get::<_, String>(i).map_err(internal)? == "{}" { continue; }
                 let value = match row.get_ref(i).map_err(internal)? {
                     rusqlite::types::ValueRef::Null => Value::Null,
@@ -340,7 +356,7 @@ fn write_logical(connection: &Connection, keys: &KeySet, writer: &mut impl Write
             line(writer, &json!({"type":table,"data":data}))?;
             count += 1;
         }
-        if !table.starts_with("supplement_") || count > 0 { counts.insert(table.into(), json!(count)); }
+        if !optional_table(table) || count > 0 { counts.insert(table.into(), json!(count)); }
     }
     line(writer, &json!({"type":"end","counts":counts}))
 }
@@ -450,6 +466,7 @@ fn restore(input: &FsPath, output: &FsPath, password: &str, master: &str) -> Api
     result
 }
 fn read_logical(reader: impl Read, db: &Connection, keys: &KeySet) -> ApiResult<()> {
+    db.execute_batch("PRAGMA defer_foreign_keys=ON").map_err(internal)?;
     let mut reader = BufReader::new(reader);
     let mut bytes = Zeroizing::new(Vec::new());
     let mut total = 0u64;
@@ -457,7 +474,7 @@ fn read_logical(reader: impl Read, db: &Connection, keys: &KeySet) -> ApiResult<
     let mut ended = false;
     let mut counts = serde_json::Map::new();
     for &(table, _) in TABLES {
-        if !table.starts_with("supplement_") { counts.insert(table.into(), json!(0)); }
+        if !optional_table(table) { counts.insert(table.into(), json!(0)); }
     }
     let mut current_table = 0usize;
     loop {
@@ -531,6 +548,8 @@ fn read_logical(reader: impl Read, db: &Connection, keys: &KeySet) -> ApiResult<
     if !header || !ended {
         return Err(bad_request("逻辑备份不完整"));
     }
+    catalog::upgrade_rows(db)?;
+    catalog::validate_relations(db)?;
     Ok(())
 }
 fn insert_row(
@@ -544,8 +563,14 @@ fn insert_row(
     let normalized = if table == "datasets" {
         let mut value = data.clone();
         value.as_object_mut().ok_or_else(|| bad_request("备份的 data 字段必须是 JSON 对象"))?;
+        value.as_object_mut().unwrap().entry("name").or_insert(json!(""));
         value.as_object_mut().unwrap().entry("description").or_insert(json!(""));
         value.as_object_mut().unwrap().entry("display_config").or_insert(json!({}));
+        for key in ["schema_id","customer_id","environment_id"] {value.as_object_mut().unwrap().entry(key).or_insert(Value::Null);}
+        Some(value)
+    } else if table=="shared_schemas" {
+        let mut value=data.clone();
+        value.as_object_mut().ok_or_else(||bad_request("备份的 data 字段必须是 JSON 对象"))?.entry("description").or_insert(json!(""));
         Some(value)
     } else { None };
     let data = normalized.as_ref().unwrap_or(data);
@@ -566,6 +591,7 @@ fn insert_row(
     };
     if table == "datasets" {
         normalize_category(text("category_path")?)?;
+        normalize_dataset_name(text("name")?)?;
         let fields: Vec<FieldDefinition> = serde_json::from_value(data["fields"].clone())
             .map_err(|_| bad_request("数据集字段定义无效"))?;
         let identity: Vec<String> = serde_json::from_value(data["identity_fields"].clone())
@@ -578,6 +604,13 @@ fn insert_row(
         if !matches!(text("conflict_strategy")?, "allow_mark") {
             return Err(bad_request("重复记录处理策略无效"));
         }
+    }
+    if table=="shared_schemas" {
+        let d:catalog::Definition=serde_json::from_value(data["definition"].clone()).map_err(|_|bad_request("数据模型无效"))?;
+        validate_schema(&d.fields,&d.identity_fields,&d.list_fields)?;
+        validate_display_config(&d.display_config,&d.fields)?;
+        validate_schema(&d.supplement_fields,&[],&[])?;
+        if data["version"].as_i64().is_none_or(|v|v<1) {return Err(bad_request("数据模型版本无效"));}
     }
     if table == "records"
         && (!data["indexes"].is_object()
@@ -635,11 +668,11 @@ fn insert_row(
             values.push(value.to_string().into());
             continue;
         }
-        let integer = matches!(*column, "expired" | "disabled" | "access_expires_at")
+        let integer = matches!(*column, "expired" | "disabled" | "access_expires_at" | "version" | "position")
             || (table == "audit_events" && *column == "id");
         let nullable = matches!(
             *column,
-            "environment" | "duplicate_of" | "access_expires_at"
+            "environment" | "duplicate_of" | "access_expires_at" | "schema_id" | "customer_id" | "environment_id"
         ) || (table == "audit_events"
             && matches!(*column, "record_id" | "field_name"));
         values.push(if value.is_null() && nullable {
@@ -764,6 +797,62 @@ mod tests {
     use super::*;
     const FIXTURE: &str = include_str!("../../samples/fixtures/backup-v1.jsonl");
     #[test]
+    fn dataset_names_survive_backup_and_older_rows_and_databases_default_to_empty() {
+        let db=Connection::open_in_memory().unwrap();let keys=random_keys();initialize_schema(&db).unwrap();read_logical(FIXTURE.as_bytes(),&db,&keys).unwrap();
+        assert_eq!(db.query_row("SELECT name FROM datasets",[],|r|r.get::<_,String>(0)).unwrap(),"");
+        db.execute("UPDATE datasets SET name='产品凭据'",[]).unwrap();
+        let mut bytes=Vec::new();write_logical(&db,&keys,&mut bytes).unwrap();
+        let restored=Connection::open_in_memory().unwrap();initialize_schema(&restored).unwrap();let newkeys=random_keys();read_logical(bytes.as_slice(),&restored,&newkeys).unwrap();
+        assert_eq!(restored.query_row("SELECT name FROM datasets",[],|r|r.get::<_,String>(0)).unwrap(),"产品凭据");
+        db.execute("ALTER TABLE datasets DROP COLUMN name",[]).unwrap();
+        let mut old_bytes=Vec::new();write_logical(&db,&keys,&mut old_bytes).unwrap();
+        let old=Connection::open_in_memory().unwrap();initialize_schema(&old).unwrap();read_logical(old_bytes.as_slice(),&old,&random_keys()).unwrap();
+        assert_eq!(old.query_row("SELECT name FROM datasets",[],|r|r.get::<_,String>(0)).unwrap(),"");
+    }
+    #[test]
+    fn shared_model_and_legacy_customer_migrate_to_labels_through_logical_backup() {
+        let keys=random_keys();let db=Connection::open_in_memory().unwrap();initialize_schema(&db).unwrap();
+        read_logical(FIXTURE.as_bytes(),&db,&keys).unwrap();
+        db.execute("INSERT INTO customers VALUES('customer-a','客户A')",[]).unwrap();
+        db.execute("INSERT INTO environments VALUES('env-prod','生产')",[]).unwrap();
+        db.execute("UPDATE datasets SET customer_id='customer-a',environment_id='env-prod',environment='生产'",[]).unwrap();
+        db.execute("UPDATE records SET environment='生产'",[]).unwrap();
+        db.execute("INSERT INTO datasets(id,category_path,environment,fields_json,identity_fields_json,conflict_strategy,list_fields_json,description,display_config_json,schema_id,customer_id,environment_id) SELECT 'second',category_path,environment,fields_json,identity_fields_json,conflict_strategy,list_fields_json,description,display_config_json,schema_id,customer_id,environment_id FROM datasets WHERE id='dataset-fixture'",[]).unwrap();
+        let mut output=Vec::new();write_logical(&db,&keys,&mut output).unwrap();
+        let restored=Connection::open_in_memory().unwrap();initialize_schema(&restored).unwrap();let new_keys=random_keys();
+        read_logical(output.as_slice(),&restored,&new_keys).unwrap();catalog::validate_relations(&restored).unwrap();
+        assert_eq!(restored.query_row("SELECT COUNT(DISTINCT schema_id) FROM datasets",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(restored.query_row("SELECT COUNT(*) FROM dataset_environments de JOIN environments e ON e.id=de.environment_id WHERE e.name='客户A'",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+        assert_eq!(restored.query_row("SELECT COUNT(*) FROM datasets WHERE customer_id IS NOT NULL",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(restored.query_row("SELECT name FROM customers WHERE id='customer-a'",[],|r|r.get::<_,String>(0)).unwrap(),"客户A");
+    }
+    #[test]
+    fn multiple_labels_round_trip_without_creating_duplicate_records() {
+        let db=Connection::open_in_memory().unwrap();let keys=random_keys();initialize_schema(&db).unwrap();read_logical(FIXTURE.as_bytes(),&db,&keys).unwrap();
+        let ids=catalog::resolve_environments(&db,None,Some(&["客户A".into(),"测试".into(),"预发布".into()]),None,None,false).unwrap().unwrap();
+        catalog::set_environments(&db,"dataset-fixture",&ids).unwrap();
+        let mut output=Vec::new();write_logical(&db,&keys,&mut output).unwrap();
+        let restored=Connection::open_in_memory().unwrap();let newkeys=random_keys();initialize_schema(&restored).unwrap();read_logical(output.as_slice(),&restored,&newkeys).unwrap();
+        assert_eq!(catalog::environments(&restored,"dataset-fixture").unwrap(),catalog::environments(&db,"dataset-fixture").unwrap());
+        assert_eq!(restored.query_row("SELECT COUNT(*) FROM records",[],|r|r.get::<_,i64>(0)).unwrap(),db.query_row("SELECT COUNT(*) FROM records",[],|r|r.get::<_,i64>(0)).unwrap());
+        validate_relations(&restored).unwrap();
+    }
+    #[test]
+    fn model_notes_round_trip_and_old_model_rows_default_to_empty_notes() {
+        let db=Connection::open_in_memory().unwrap();let keys=random_keys();initialize_schema(&db).unwrap();read_logical(FIXTURE.as_bytes(),&db,&keys).unwrap();
+        let description="## 提取步骤\n\n```sql\nSELECT * FROM demo_products;\n```\n";
+        db.execute("UPDATE shared_schemas SET description=?1",[description]).unwrap();
+        let mut bytes=Vec::new();write_logical(&db,&keys,&mut bytes).unwrap();
+        let restored=Connection::open_in_memory().unwrap();initialize_schema(&restored).unwrap();read_logical(bytes.as_slice(),&restored,&keys).unwrap();
+        assert_eq!(restored.query_row("SELECT description FROM shared_schemas",[],|r|r.get::<_,String>(0)).unwrap(),description);
+        let old=String::from_utf8(bytes).unwrap().lines().map(|line|{let mut row:Value=serde_json::from_str(line).unwrap();if row["type"]=="shared_schemas" {row["data"].as_object_mut().unwrap().remove("description");}row.to_string()}).collect::<Vec<_>>().join("\n") + "\n";
+        let legacy=Connection::open_in_memory().unwrap();initialize_schema(&legacy).unwrap();read_logical(old.as_bytes(),&legacy,&keys).unwrap();
+        assert_eq!(legacy.query_row("SELECT description FROM shared_schemas",[],|r|r.get::<_,String>(0)).unwrap(),"");
+        db.execute("ALTER TABLE shared_schemas DROP COLUMN description",[]).unwrap();let mut old_export=Vec::new();write_logical(&db,&keys,&mut old_export).unwrap();
+        let legacy=Connection::open_in_memory().unwrap();initialize_schema(&legacy).unwrap();read_logical(old_export.as_slice(),&legacy,&keys).unwrap();
+        assert_eq!(legacy.query_row("SELECT description FROM shared_schemas",[],|r|r.get::<_,String>(0)).unwrap(),"");
+    }
+    #[test]
     fn supplementary_schema_values_and_orphans_round_trip_with_new_keys() {
         let keys=random_keys();let db=Connection::open_in_memory().unwrap();initialize_schema(&db).unwrap();
         read_logical(FIXTURE.as_bytes(),&db,&keys).unwrap();
@@ -774,6 +863,7 @@ mod tests {
             let(nonce,ciphertext)=seal_field(&keys.field,id,"supplement",&value).unwrap();
             db.execute("INSERT INTO supplement_records(id,dataset_id,main_record_id,link_json,nonce,ciphertext,orphan) VALUES(?1,'dataset-fixture',?2,?3,?4,?5,?6)",params![id,parent,json!({"mode":"id","fields":[],"values":{"id":parent}}).to_string(),nonce,ciphertext,orphan]).unwrap();
         }
+        catalog::sync_local(&db,"dataset-fixture").unwrap();
         let mut logical=Vec::new();write_logical(&db,&keys,&mut logical).unwrap();
         assert!(std::str::from_utf8(&logical).unwrap().contains("addon-private"));
         let restored=Connection::open_in_memory().unwrap();initialize_schema(&restored).unwrap();let newkeys=random_keys();
@@ -799,6 +889,7 @@ mod tests {
         new.push(serde_json::from_value(json!({"source_key":"unused","zone":"ignore"})).unwrap());
         migrate_schema_records(&db, &keys, "dataset-fixture", &old, &new, &["account.token".into()], "固定回归", None).unwrap();
         db.execute("UPDATE datasets SET fields_json=?1", [serde_json::to_string(&new).unwrap()]).unwrap();
+        catalog::sync_local(&db,"dataset-fixture").unwrap();
         let mut output = Zeroizing::new(Vec::new());
         write_logical(&db, &keys, &mut *output).unwrap();
         let mut restored = Connection::open_in_memory().unwrap();
@@ -868,7 +959,14 @@ mod tests {
             .skip(1)
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
+        // New metadata is additive; the original v1 rows and values stay equivalent.
+        let actual:Vec<Value>=actual.into_iter().filter(|v|!matches!(v["type"].as_str(),Some("shared_schemas"|"customers"|"environments"|"dataset_environments"))).map(|mut v|{
+            if v["type"]=="datasets" {for key in ["schema_id","customer_id","environment_id"] {v["data"].as_object_mut().unwrap().remove(key);}}
+            if v["type"]=="end" {for key in ["shared_schemas","customers","environments","dataset_environments"] {v["counts"].as_object_mut().unwrap().remove(key);}}
+            v
+        }).collect();
         assert_eq!(actual, expected);
+        catalog::validate_relations(&db).unwrap();
         let hashes: Vec<String> = {
             let mut s = db
                 .prepare("SELECT identity_hash FROM records ORDER BY id")
@@ -895,6 +993,7 @@ mod tests {
         db.execute("UPDATE datasets SET description=?1", [description]).unwrap();
         let display_config = r#"{"identifier_fields":["name"],"density":"full"}"#;
         db.execute("UPDATE datasets SET display_config_json=?1", [display_config]).unwrap();
+        catalog::sync_local(&db,"dataset-fixture").unwrap();
         output.clear();
         write_logical(&db, &keys, &mut *output).unwrap();
         let mut restored = Connection::open_in_memory().unwrap();
@@ -909,11 +1008,14 @@ mod tests {
         assert_eq!(serde_json::from_str::<Value>(&actual).unwrap(), serde_json::from_str::<Value>(display_config).unwrap());
 
         // An older vault can be backed up directly before its first UI unlock.
+        for column in ["schema_id","customer_id","environment_id"] {db.execute(&format!("DROP INDEX ix_datasets_{column}"),[]).unwrap();db.execute(&format!("ALTER TABLE datasets DROP COLUMN {column}"),[]).unwrap();}
+        db.execute_batch("DROP TABLE dataset_environments; DROP TABLE shared_schemas; DROP TABLE customers; DROP TABLE environments;").unwrap();
         db.execute("ALTER TABLE datasets DROP COLUMN description", []).unwrap();
         db.execute("UPDATE datasets SET display_config_json='{}'", []).unwrap();
         output.clear();
         write_logical(&db, &keys, &mut *output).unwrap();
         let actual: Vec<Value> = std::str::from_utf8(&output).unwrap().lines().skip(1).map(|l| serde_json::from_str(l).unwrap()).collect();
+        let actual:Vec<Value>=actual.into_iter().map(|mut v|{if v["type"]=="datasets" {for key in ["schema_id","customer_id","environment_id"]{v["data"].as_object_mut().unwrap().remove(key);}}v}).collect();
         assert_eq!(actual, expected);
     }
 }

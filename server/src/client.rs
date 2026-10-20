@@ -47,6 +47,7 @@ pub(super) async fn datasets(
                 "description": row.get::<_, String>(7).map_err(internal)?,
             }));
         }
+        for dataset in &mut datasets { catalog::enrich(db,dataset)?; }
         Ok(Json(json!({ "datasets": datasets })))
     }).await
 }

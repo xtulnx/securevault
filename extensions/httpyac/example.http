@@ -10,7 +10,9 @@
     // 使用 httpyac 环境变量时，可显式传入：
     // baseUrl: vaultUrl, appId: vaultAppId, appKey: vaultAppKey,
     datasetId: '替换为数据集 ID',
-    environment: '正式',
+    tags: ['客户A', '生产'], // 全部标签都要满足
+    // datasetName: '商户凭据', // 可替代 datasetId，同名时必须补充范围
+    // schemaId: '替换为数据模型 ID',
     query: 'gid:=2001 platform:=Android',
     fields: {
       gid: 'gid',
