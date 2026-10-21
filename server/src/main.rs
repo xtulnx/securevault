@@ -35,9 +35,12 @@ type HmacSha256 = Hmac<Sha256>;
 mod supplement;
 mod search_rank;
 mod transfer;
+mod import_diagnostics;
 mod security;
+mod authorization_events;
 mod client;
 mod catalog;
+mod saved_queries;
 use security::*;
 mod backup;
 mod rotation;
@@ -62,12 +65,32 @@ async fn serve_embedded_web(uri: Uri) -> Response {
     }
 }
 
+async fn serve_guide(Path(name): Path<String>) -> Response {
+    let (text, mime) = match name.as_str() {
+        "httpyac.md" => (include_str!("../../extensions/httpyac/README.md"), "text/plain; charset=utf-8"),
+        "raycast.md" => (include_str!("../../extensions/raycast/README.md"), "text/plain; charset=utf-8"),
+        "securevault.mjs" => (include_str!("../../extensions/httpyac/securevault.mjs"), "text/javascript; charset=utf-8"),
+        "example.http" => (include_str!("../../extensions/httpyac/example.http"), "text/plain; charset=utf-8"),
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    ([(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "no-cache")], text).into_response()
+}
+
 #[derive(Clone)]
 struct AppState {
     runtime: Arc<Mutex<Runtime>>,
     data_dir: PathBuf,
     public_origin: Option<String>,
-    batches: Arc<Mutex<std::collections::HashMap<String, (Instant, Vec<Value>)>>>,
+    batches: Arc<Mutex<std::collections::HashMap<String, ImportBatch>>>,
+}
+
+struct ImportBatch {
+    created: Instant,
+    session_id: Option<String>,
+    records: Vec<Value>,
+}
+impl ImportBatch {
+    fn new(records: Vec<Value>, session_id: Option<String>) -> Self { Self { created: Instant::now(), session_id, records } }
 }
 
 struct StartupOptions {
@@ -77,6 +100,7 @@ struct StartupOptions {
 }
 
 struct Runtime {
+    authorization_events: authorization_events::AuthorizationEvents,
     keys: Option<KeySet>,
     unlocked_at: Option<SessionInstant>,
     last_activity: Option<SessionInstant>,
@@ -106,7 +130,10 @@ struct ApiError(StatusCode, String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({ "error": self.1 }))).into_response()
+        let reason = authorization_events::denial_reason(&self.1);
+        let mut response = (self.0, Json(json!({ "error": self.1 }))).into_response();
+        if let Some(reason) = reason { response.extensions_mut().insert(authorization_events::AuthorizationDenial(reason)); }
+        response
     }
 }
 
@@ -283,7 +310,7 @@ fn default_conflict() -> String {
     "allow_mark".into()
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct ImportRequest {
     dataset_id: String,
     batch_id: String,
@@ -556,6 +583,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             persistent: false,
             session_hash: None,
             session_id: None,
+            authorization_events: Default::default(),
             unlock_failures: 0,
             unlock_after: None,
         })),
@@ -594,10 +622,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .route("/vault/activity", post(vault_activity))
         .route("/vault/password", post(change_password))
         .route("/datasets/schema-preview", post(schema_preview))
+        .route("/datasets/transfer/report", post(transfer::report).layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)))
         .route("/datasets/transfer/preview", post(transfer::preview).layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)))
         .route("/datasets/transfer/import", post(transfer::import).layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)))
         .route("/records/import/preview", post(preview_import))
         .route("/catalog", get(catalog::list))
+        .route("/saved-queries", get(saved_queries::list).post(saved_queries::create))
+        .route("/saved-queries/{id}", axum::routing::patch(saved_queries::update).delete(saved_queries::delete))
         .route("/catalog/{kind}", post(catalog::create_named))
         .route("/catalog/{kind}/{id}", axum::routing::patch(catalog::rename_named).delete(catalog::delete_named))
         .route("/schemas/preview", post(catalog::preview))
@@ -611,6 +642,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .route("/datasets/tree", get(dataset_tree))
         .route("/vault/summary", get(vault_summary))
         .route("/imports/upload", post(upload_import))
+        .route("/imports/{id}/samples", post(import_diagnostics::samples))
+        .route("/records/import/report", post(import_diagnostics::report))
         .route("/records/import", post(import_records))
         .route("/records/{id}/expired", post(set_expired))
         .route("/records/{id}", get(record_detail).patch(supplement::update_main).delete(supplement::delete_main))
@@ -623,12 +656,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .route("/records/search", get(search_records))
         .route("/records/{id}/secrets/reveal", post(reveal_secret))
         .route("/apps", get(list_apps).post(create_app))
+        .route("/apps/authorization-events", get(authorization_events::list).post(authorization_events::acknowledge))
         .route("/apps/{id}", axum::routing::patch(update_app).delete(delete_app))
         .route("/apps/{id}/rotate", post(rotate_app))
         .layer(middleware::from_fn_with_state(state.clone(), protect_api))
         .with_state(state.clone());
 
     let app = Router::new()
+        .route("/guides/{name}", get(serve_guide))
         .nest("/api", api)
         .with_state(state.clone());
     #[cfg(debug_assertions)]
@@ -644,7 +679,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             expire_runtime(&mut runtime);
             let sealed = runtime.keys.is_none();
             let mut batches = cleanup.batches.lock().await;
-            batches.retain(|_, (created, _)| !sealed && created.elapsed() < Duration::from_secs(3600));
+            batches.retain(|_, batch| !sealed && batch.session_id == runtime.session_id && batch.created.elapsed() < Duration::from_secs(3600));
         }
     });
     let address = options.address;
@@ -760,13 +795,15 @@ fn initialize_schema_in_connection(connection: &Connection) -> ApiResult<()> {
     if !has_display_config { connection.execute("ALTER TABLE datasets ADD COLUMN display_config_json TEXT NOT NULL DEFAULT '{}'", []).map_err(internal)?; }
     supplement::initialize(connection)?;
     catalog::initialize(connection)?;
+    saved_queries::initialize(connection)?;
     Ok(())
 }
 
 async fn vault_status(State(state): State<AppState>, headers: HeaderMap) -> Json<Value> {
     let mut runtime = state.runtime.lock().await;
     expire_runtime(&mut runtime);
-    let mut status = owner_status(&runtime, owner_cookie(&headers, &runtime));
+    let owner = !headers.contains_key("x-app-id") && !headers.contains_key("x-app-key") && owner_cookie(&headers, &runtime);
+    let mut status = owner_status(&runtime, owner);
     status["initialized"] = json!(meta_path(&state).exists());
     Json(status)
 }
@@ -806,6 +843,7 @@ async fn vault_unlock(
 
 async fn activate(state: &AppState, keys: KeySet, persistent: bool) {
     let mut runtime = state.runtime.lock().await;
+    runtime.authorization_events = Default::default();
     runtime.session_hash = None;
     runtime.session_id = None;
     runtime.keys = Some(keys);
@@ -816,6 +854,7 @@ async fn activate(state: &AppState, keys: KeySet, persistent: bool) {
 
 async fn vault_seal(State(state): State<AppState>) -> Json<Value> {
     let mut runtime = state.runtime.lock().await;
+    runtime.authorization_events = Default::default();
     runtime.session_hash = None;
     runtime.session_id = None;
     runtime.keys = None;
@@ -1580,8 +1619,8 @@ async fn set_expired(
 
 async fn list_datasets(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     with_connection(&state, |connection, _| {
-        let mut statement = connection.prepare("SELECT d.id,d.category_path,d.environment,d.fields_json,d.identity_fields_json,d.conflict_strategy,d.list_fields_json,COUNT(r.id),d.description,(SELECT fields_json FROM supplement_schemas s WHERE s.dataset_id=d.id),d.display_config_json FROM datasets d LEFT JOIN records r ON r.dataset_id=d.id GROUP BY d.id ORDER BY d.category_path").map_err(internal)?;
-        let rows = statement.query_map([], |row| Ok(json!({ "id": row.get::<_,String>(0)?, "category_path": row.get::<_,String>(1)?, "environment": row.get::<_,Option<String>>(2)?, "fields": serde_json::from_str::<Value>(&row.get::<_,String>(3)?).unwrap_or(Value::Array(vec![])), "identity_fields": serde_json::from_str::<Value>(&row.get::<_,String>(4)?).unwrap_or(Value::Array(vec![])), "conflict_strategy": row.get::<_,String>(5)?, "list_fields": serde_json::from_str::<Value>(&row.get::<_,String>(6)?).unwrap_or(Value::Array(vec![])), "record_count": row.get::<_,i64>(7)?, "description": row.get::<_,String>(8)?, "supplement_fields": serde_json::from_str::<Value>(&row.get::<_,Option<String>>(9)?.unwrap_or_else(||"[]".into())).unwrap_or(json!([])), "display_config": serde_json::from_str::<Value>(&row.get::<_,String>(10)?).unwrap_or(json!({})) }))).map_err(internal)?;
+        let mut statement = connection.prepare("SELECT d.id,d.category_path,d.environment,d.fields_json,d.identity_fields_json,d.conflict_strategy,d.list_fields_json,COUNT(r.id),d.description,(SELECT fields_json FROM supplement_schemas s WHERE s.dataset_id=d.id),d.display_config_json,(SELECT description FROM shared_schemas m WHERE m.id=d.schema_id) FROM datasets d LEFT JOIN records r ON r.dataset_id=d.id GROUP BY d.id ORDER BY d.category_path").map_err(internal)?;
+        let rows = statement.query_map([], |row| Ok(json!({ "id": row.get::<_,String>(0)?, "category_path": row.get::<_,String>(1)?, "environment": row.get::<_,Option<String>>(2)?, "fields": serde_json::from_str::<Value>(&row.get::<_,String>(3)?).unwrap_or(Value::Array(vec![])), "identity_fields": serde_json::from_str::<Value>(&row.get::<_,String>(4)?).unwrap_or(Value::Array(vec![])), "conflict_strategy": row.get::<_,String>(5)?, "list_fields": serde_json::from_str::<Value>(&row.get::<_,String>(6)?).unwrap_or(Value::Array(vec![])), "record_count": row.get::<_,i64>(7)?, "description": row.get::<_,String>(8)?, "supplement_fields": serde_json::from_str::<Value>(&row.get::<_,Option<String>>(9)?.unwrap_or_else(||"[]".into())).unwrap_or(json!([])), "display_config": serde_json::from_str::<Value>(&row.get::<_,String>(10)?).unwrap_or(json!({})), "schema_description": row.get::<_,Option<String>>(11)?.unwrap_or_default() }))).map_err(internal)?;
         let mut datasets = Vec::new(); for row in rows { datasets.push(row.map_err(internal)?); }
         let mut datasets = datasets;
         for dataset in &mut datasets { catalog::enrich(connection,dataset)?; }
@@ -1875,95 +1914,25 @@ async fn upload_import(
     let records = parse_tabular(&bytes, &filename)?;
     let id = Uuid::new_v4().simple().to_string();
     let count = records.len();
-    let fields = records
-        .first()
-        .and_then(Value::as_object)
-        .map(|o| o.keys().cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
+    let fields = records.iter().filter_map(Value::as_object).flat_map(|o| o.keys().cloned()).collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>();
     let mut batches = state.batches.lock().await;
-    batches.retain(|_, (created, _)| created.elapsed() < Duration::from_secs(3600));
+    batches.retain(|_, batch| batch.session_id == runtime.session_id && batch.created.elapsed() < Duration::from_secs(3600));
     if count > 10000 { return Err(bad_request("import capacity exceeded (10000 rows per batch)")); }
     if batches.len() >= 8 {
-        if let Some(oldest) = batches.iter().min_by_key(|(_, (created, _))| *created).map(|(id, _)| id.clone()) { batches.remove(&oldest); }
+        if let Some(oldest) = batches.iter().min_by_key(|(_, batch)| batch.created).map(|(id, _)| id.clone()) { batches.remove(&oldest); }
     }
-    batches.insert(id.clone(), (Instant::now(), records));
+    batches.insert(id.clone(), ImportBatch::new(records, runtime.session_id.clone()));
     drop(runtime);
     Ok(Json(
         json!({"batch_id":id,"filename":filename,"record_count":count,"source_fields":fields,"expires_in_seconds":3600}),
     ))
 }
 
-fn mapped_records(inputs: &[Value], mappings: &[FieldMapping]) -> ApiResult<Vec<Value>> {
-    if mappings.is_empty() {
-        return Ok(inputs.to_vec());
-    }
-    inputs
-        .iter()
-        .map(|input| {
-            let mut object = serde_json::Map::new();
-            for mapping in mappings {
-                let mut value = input
-                    .get(&mapping.source_key)
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                if let Some(path) = mapping.json_path.as_deref().filter(|p| !p.is_empty()) {
-                    if let Value::String(text) = &value {
-                        value = serde_json::from_str(text).map_err(|_| {
-                            bad_request(format!("{} is not valid JSON", mapping.source_key))
-                        })?;
-                    }
-                    for segment in path.trim_matches('.').split('.') {
-                        value = value.get(segment).cloned().unwrap_or(Value::Null);
-                    }
-                }
-                if !value.is_null() {
-                    object.insert(mapping.target_key.clone(), value);
-                }
-            }
-            Ok(Value::Object(object))
-        })
-        .collect()
+async fn import_records(State(state): State<AppState>, Json(request): Json<ImportRequest>) -> ApiResult<Json<Value>> {
+    import_diagnostics::run(state, request, false).await
 }
-
-async fn import_records(
-    State(state): State<AppState>,
-    Json(request): Json<ImportRequest>,
-) -> ApiResult<Json<Value>> {
-    let inputs = {
-        let batches = state.batches.lock().await;
-        batches
-            .get(&request.batch_id)
-            .filter(|(created, _)| created.elapsed() < Duration::from_secs(3600))
-            .map(|(_, records)| records.clone())
-            .ok_or_else(|| {
-                ApiError(
-                    StatusCode::NOT_FOUND,
-                    "temporary import batch expired or not found".into(),
-                )
-            })?
-    };
-    let inputs = mapped_records(&inputs, &request.mappings)?;
-    with_connection(&state, |db, keys| {
-        let tx = db.unchecked_transaction().map_err(internal)?;
-        let response = import_records_in_connection(&tx, keys, &request, &inputs)?;
-        tx.commit().map_err(internal)?;
-        Ok(Json(response))
-    }).await
-}
-
 async fn preview_import(State(state): State<AppState>, Json(request): Json<ImportRequest>) -> ApiResult<Json<Value>> {
-    let inputs = {
-        let batches = state.batches.lock().await;
-        batches.get(&request.batch_id).filter(|(created, _)| created.elapsed() < Duration::from_secs(3600)).map(|(_, records)| records.clone())
-            .ok_or_else(|| bad_request("导入批次已过期，请重新上传"))?
-    };
-    let inputs = mapped_records(&inputs, &request.mappings)?;
-    with_connection(&state, |db, keys| {
-        let tx = db.unchecked_transaction().map_err(internal)?;
-        let result = import_records_in_connection(&tx, keys, &request, &inputs)?;
-        tx.rollback().map_err(internal)?;
-        Ok(Json(result))
-    }).await
+    import_diagnostics::run(state, request, true).await
 }
 
 fn import_records_in_connection(connection: &Connection, keys: &KeySet, request: &ImportRequest, inputs: &[Value]) -> ApiResult<Value> {
@@ -2366,7 +2335,7 @@ mod tests {
         assert_eq!(search_records(State(state.clone()), Query(query), headers.clone()).await.unwrap().0["total"], 0);
 
         // Schema evolution during import applies the same cleanup to existing rows.
-        state.batches.lock().await.insert("batch_zones".into(), (Instant::now(), vec![json!({"name":"new-row","legacy":"discard-this"})]));
+        state.batches.lock().await.insert("batch_zones".into(), ImportBatch::new(vec![json!({"name":"new-row","legacy":"discard-this"})], None));
         let request = serde_json::from_value(json!({"dataset_id":dataset_id,"batch_id":"batch_zones","evolved_fields":[{"source_key":"legacy","zone":"ignore"}]})).unwrap();
         let _ = import_records(State(state.clone()), Json(request)).await.unwrap();
         let detail = record_detail(State(state.clone()), Path(record_id), headers).await.unwrap().0;
@@ -2414,6 +2383,14 @@ mod tests {
         assert_eq!(created["description"], description);
         let list = list_datasets(State(state.clone())).await.unwrap().0;
         assert_eq!(list["datasets"][0]["description"], description);
+        assert_eq!(list["datasets"][0]["schema_description"], "");
+        with_connection(&state, |db, _| {
+            db.execute("UPDATE shared_schemas SET description=?2 WHERE id=(SELECT schema_id FROM datasets WHERE id=?1)", params![id, "## 模型说明\n独立于数据集描述"]).map_err(internal)?;
+            Ok(())
+        }).await.unwrap();
+        let list = list_datasets(State(state.clone())).await.unwrap().0;
+        assert_eq!(list["datasets"][0]["schema_description"], "## 模型说明\n独立于数据集描述");
+        assert_eq!(list["datasets"][0]["description"], description);
         let request = serde_json::from_value(json!({"category_path":"测试/重命名"})).unwrap();
         let updated = update_dataset(State(state.clone()), Path(id.clone()), Json(request)).await.unwrap().0;
         assert_eq!(updated["description"], description);
@@ -2456,6 +2433,10 @@ mod tests {
             ("/index.html", "text/html; charset=utf-8"),
             ("/styles.css?v=test", "text/css; charset=utf-8"),
             ("/app.js", "text/javascript; charset=utf-8"),
+            ("/search-tools.js", "text/javascript; charset=utf-8"),
+            ("/search-layout.js", "text/javascript; charset=utf-8"),
+            ("/guide.html", "text/html; charset=utf-8"),
+            ("/guide.js", "text/javascript; charset=utf-8"),
         ] {
             let response = serve_embedded_web(path.parse().unwrap()).await;
             assert_eq!(response.status(), StatusCode::OK);
@@ -2466,7 +2447,20 @@ mod tests {
             assert_eq!(serve_embedded_web(path.parse().unwrap()).await.status(), StatusCode::NOT_FOUND);
         }
         assert_eq!(embedded_asset("app.js").unwrap().0, include_bytes!("../../web/app.js"));
+        assert_eq!(embedded_asset("search-tools.js").unwrap().0, include_bytes!("../../web/search-tools.js"));
         assert_eq!(embedded_asset("styles.css").unwrap().0, include_bytes!("../../web/styles.css"));
+    }
+
+    #[tokio::test]
+    async fn integration_guides_are_bundled_and_only_allow_known_project_documents() {
+        for name in ["httpyac.md", "raycast.md", "securevault.mjs", "example.http"] {
+            let response = serve_guide(Path(name.to_owned())).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-cache");
+        }
+        for name in ["../server/Cargo.toml", "vault.meta.json", "unknown.md"] {
+            assert_eq!(serve_guide(Path(name.to_owned())).await.status(), StatusCode::NOT_FOUND);
+        }
     }
 
     #[test]

@@ -312,7 +312,7 @@ pub(super) async fn export(
     }).await
 }
 
-fn validate_package(package: &Package) -> ApiResult<()> {
+fn package_report(package: &Package) -> ApiResult<import_diagnostics::Report> {
     if package.format != "securevault-dataset" || package.version != 1 {
         return Err(bad_request("不支持的数据集文件格式或版本"));
     }
@@ -350,74 +350,57 @@ fn validate_package(package: &Package) -> ApiResult<()> {
             "交换文件应包含最终字段定义，不能携带未执行的重命名",
         ));
     }
-    let validate_values = |values: &serde_json::Map<String, Value>,
-                           omitted: &[String],
-                           fields: &[FieldDefinition]|
-     -> ApiResult<()> {
+    let mut report = import_diagnostics::Report::new(package.records.len() + package.supplements.len());
+    let validate_values = |report: &mut import_diagnostics::Report, scope: &str, index: usize, values: &serde_json::Map<String, Value>, omitted: &[String], fields: &[FieldDefinition]| {
         for key in values.keys() {
-            if !fields
-                .iter()
-                .any(|f| &f.source_key == key && f.zone != "ignore")
-            {
-                return Err(bad_request(format!("记录含未定义或忽略字段：{key}")));
+            if !fields.iter().any(|f| &f.source_key == key && f.zone != "ignore") {
+                report.add(scope, index, true, key, key, "", "undefined_field", "记录含未定义或忽略字段");
             }
         }
         let mut seen = HashSet::new();
         for key in omitted {
-            if values.contains_key(key)
-                || !seen.insert(key)
-                || !fields.iter().any(|f| {
-                    &f.source_key == key && matches!(f.zone.as_str(), "hidden" | "secrets")
-                })
-            {
-                return Err(bad_request("未导出字段声明无效"));
+            if values.contains_key(key) || !seen.insert(key) || !fields.iter().any(|f| &f.source_key == key && matches!(f.zone.as_str(), "hidden" | "secrets")) {
+                report.add(scope, index, true, key, key, "", "invalid_omission", "未导出字段声明无效");
             }
         }
-        Ok(())
     };
     let mut ids = HashSet::new();
-    for row in &package.records {
+    for (i, row) in package.records.iter().enumerate() {
         if row.source_id.is_empty() || !ids.insert(&row.source_id) {
-            return Err(bad_request("来源记录 ID 为空或重复"));
+            report.add("records", i+1, true, "", "", "", "invalid_source_id", "来源记录 ID 为空或重复");
         }
-        validate_values(&row.values, &row.omitted_fields, &schema.fields)?;
+        validate_values(&mut report, "records", i+1, &row.values, &row.omitted_fields, &schema.fields);
     }
     let mut extension_ids = HashSet::new();
     let mut parents = HashSet::new();
-    for row in &package.supplements {
+    for (i, row) in package.supplements.iter().enumerate() {
         if row.source_id.is_empty() || !extension_ids.insert(&row.source_id) {
-            return Err(bad_request("附表来源 ID 为空或重复"));
+            report.add("supplements", i+1, true, "", "", "", "invalid_source_id", "附表来源 ID 为空或重复");
         }
-        if !row.orphan
-            && (!ids.contains(&row.main_source_id) || !parents.insert(&row.main_source_id))
-        {
-            return Err(bad_request("附表关联不完整或重复"));
+        if !row.orphan && (!ids.contains(&row.main_source_id) || !parents.insert(&row.main_source_id)) {
+            report.add("supplements", i+1, true, "", "", "", "invalid_parent", "附表关联不完整或重复");
         }
-        if !row.link.is_object()
-            || !matches!(
-                row.link["mode"].as_str(),
-                Some("id" | "indexes" | "incomplete")
-            )
-            || !row.link["fields"].is_array()
-            || !row.link["values"].is_object()
-        {
-            return Err(bad_request("附表关联快照无效"));
+        if !row.link.is_object() || !matches!(row.link["mode"].as_str(), Some("id" | "indexes" | "incomplete")) || !row.link["fields"].is_array() || !row.link["values"].is_object() {
+            report.add("supplements", i+1, true, "", "", "", "invalid_link", "附表关联快照无效");
         }
-        validate_values(&row.values, &row.omitted_fields, &schema.supplement_fields)?;
+        validate_values(&mut report, "supplements", i+1, &row.values, &row.omitted_fields, &schema.supplement_fields);
     }
     let mut templates = HashSet::new();
-    for template in &package.templates {
-        if template.name.trim().is_empty()
-            || !templates.insert(&template.name)
-            || template.mappings.iter().any(|m| {
-                m.source_key.is_empty()
-                    || !schema.fields.iter().any(|f| f.source_key == m.target_key)
-            })
-        {
-            return Err(bad_request("导入模板定义无效"));
+    for (i, template) in package.templates.iter().enumerate() {
+        if template.name.trim().is_empty() || !templates.insert(&template.name) || template.mappings.iter().any(|m| m.source_key.is_empty() || !schema.fields.iter().any(|f| f.source_key == m.target_key)) {
+            report.add("templates", i+1, true, "", "", "", "invalid_template", "导入模板定义无效");
         }
     }
+    Ok(report)
+}
+fn validate_package(package: &Package) -> ApiResult<()> {
+    let report = package_report(package)?;
+    if report.error_count > 0 { return Err(bad_request(format!("数据集包包含 {} 项错误，请先预检并下载报告", report.error_count))); }
     Ok(())
+}
+
+pub(super) async fn report(State(state): State<AppState>, Query(format): Query<import_diagnostics::Format>, Json(request): Json<Request>) -> ApiResult<Response> {
+    with_connection(&state, |_, _| package_report(&request.package)?.response(format.format.as_deref())).await
 }
 
 fn changes(db: &Connection, request: &Request) -> ApiResult<Vec<String>> {
@@ -714,14 +697,15 @@ pub(super) async fn preview(
     State(state): State<AppState>,
     Json(request): Json<Request>,
 ) -> ApiResult<Json<Value>> {
-    validate_package(&request.package)?;
     with_connection(&state,|db,keys|{
+        let diagnostics = package_report(&request.package)?;
+        if diagnostics.error_count > 0 { return Ok(Json(json!({"valid":false,"diagnostics":diagnostics}))); }
         let token=confirmation_token(db,&request)?;
         let diff=changes(db,&request)?;
         let tx=db.unchecked_transaction().map_err(internal)?;
         let result=apply(&tx,keys,&request)?;
         tx.rollback().map_err(internal)?;
-        Ok(Json(json!({"changes":diff,"confirmation_token":token,"result":result,"field_count":request.package.schema.fields.len(),"record_count":request.package.records.len()})))
+        Ok(Json(json!({"valid":true,"diagnostics":diagnostics,"changes":diff,"confirmation_token":token,"result":result,"field_count":request.package.schema.fields.len(),"record_count":request.package.records.len()})))
     }).await
 }
 pub(super) async fn import(
@@ -768,6 +752,23 @@ mod tests {
             }
         }})).unwrap();
         (db, keys, request)
+    }
+    #[test]
+    fn native_diagnostics_collect_all_rows_and_reject_atomic_apply_without_values_in_report() {
+        let (db, keys, mut request) = fixture(); request.package.mode = "package".into();
+        request.package.records = serde_json::from_value(json!([
+            {"source_id":"one", "values":{"undefined":"SYNTHETIC-SECRET"}},
+            {"source_id":"one", "values":{"unused":42}, "omitted_fields":["code"]}
+        ])).unwrap();
+        request.package.supplements = serde_json::from_value(json!([
+            {"source_id":"", "main_source_id":"missing", "values":{"wrong":"SYNTHETIC-SECRET"}, "orphan":false, "link":{}}
+        ])).unwrap();
+        let report = package_report(&request.package).unwrap();
+        assert_eq!(report.checked_rows, 3); assert_eq!(report.error_count, 8);
+        let text = serde_json::to_string(&report).unwrap(); assert!(!text.contains("SYNTHETIC-SECRET"));
+        assert!(text.contains("supplements")); assert!(text.contains("invalid_parent"));
+        assert!(apply(&db, &keys, &request).is_err());
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM datasets", [], |r| r.get::<_,i64>(0)).unwrap(), 0);
     }
     fn commit(db: &Connection, keys: &KeySet, request: &Request) -> Value {
         let tx = db.unchecked_transaction().unwrap();

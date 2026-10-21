@@ -50,7 +50,8 @@ test('display names appear in management, detail and selectors while directory-b
   assert.equal(d.querySelectorAll('.dataset-manager-row').length, 1);
   w.openManagedDataset('a', 'basic');
   assert.equal(d.querySelector('#dataset-detail-heading h2').textContent, '产品凭据');
-  assert.match(d.querySelector('#dataset-detail-body').textContent, /名称产品凭据/);
+  assert.doesNotMatch(d.querySelector('#dataset-detail-body').textContent, /名称产品凭据/);
+  assert.match(d.querySelector('#dataset-detail-heading').textContent, /示例业务\/产品/);
   w.renderFilters();
   assert.match(d.querySelector('#global-dataset-scope option[value="a"]').textContent, /产品凭据 · 示例业务\/产品/);
   assert.equal(w.datasetName({ category_path: '旧业务/旧目录' }), '旧目录');

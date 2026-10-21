@@ -51,6 +51,7 @@ test('ordinary import shows dataset and model before file selection and details 
   assert.equal(state.pendingBatchId, 'batch-keep'); assert.equal(state.importStep, 2);
   assert.equal(d.querySelector('[data-map-path]').value, 'product.code');
   assert.equal(d.querySelector('#mapping-template').value, '保留映射'); assert.equal(d.querySelector('#skip-existing').checked, true);
+  w.confirm = () => true;
   d.querySelector('#import-dataset-select').value = 'b'; d.querySelector('#import-dataset-select').dispatchEvent(new w.Event('change'));
   assert.match(d.querySelector('#import-context').textContent, /账号模型/);
   assert.ok(!d.querySelector('#import-context').textContent.includes('产品模型'));
@@ -62,13 +63,18 @@ test('native import keeps file model notes separate from an existing model with 
   const file = { format: 'securevault-dataset', version: 1, mode: 'schema', schema: { name: '文件中的产品', category_path: '文件/产品', environments: ['预发布'], schema_name: '产品模型', schema_description: '文件专用提取方法', description: '文件数据集备注', fields: [] }, records: [] };
   const raw = JSON.stringify(file);
   await w.importFile({ name: 'demo.schema.json', text: async () => raw });
+  assert.equal(d.querySelectorAll('#transfer-schema-preview .dataset-model-fields').length, 2);
+  assert.equal(d.querySelector('#transfer-schema-preview th').textContent, '序号');
+  assert.equal(d.querySelector('#transfer-schema-preview [role="region"]').tabIndex, 0);
   assert.match(d.querySelector('#import-context').textContent, /文件专用提取方法/);
   assert.ok(!d.querySelector('#import-context').textContent.includes('SELECT code'));
   d.querySelector('#transfer-category').value = '目标/新目录'; d.querySelector('#transfer-category').dispatchEvent(new w.Event('input'));
   assert.match(d.querySelector('#import-context').textContent, /目标\/新目录/);
   d.querySelector('#transfer-target').value = 'a'; d.querySelector('#transfer-target').dispatchEvent(new w.Event('change'));
-  assert.match(d.querySelector('#import-context > .reference-grid').textContent, /取数方法/);
+  assert.equal(d.querySelector('.import-target-details').open, false);
+  assert.match(d.querySelector('.import-target-details > .reference-grid').textContent, /取数方法/);
   assert.match(d.querySelector('.import-source-details').textContent, /文件专用提取方法/);
+  d.querySelector('.import-target-details').open = true;
   d.querySelector('.import-source-details').open = true;
   d.querySelector('[data-reference="sourceModel"]').click();
   assert.match(d.querySelector('#reference-info-content').textContent, /文件专用提取方法/);
@@ -160,4 +166,32 @@ test('basic tag editing batches new names while preserving existing labels and U
   assert.equal(w.appendLabelInput([], '🌱'.repeat(120))[0], '🌱'.repeat(120));
   assert.throws(() => w.appendLabelInput([], '🌱'.repeat(121)), /120/);
   assert.throws(() => w.appendLabelInput([], '新\u0085标签'), /控制字符/);
+});
+
+test('referenced model viewing and editing share compact fields and preserve the surrounding dataset draft', async t => {
+  const { w, d, state, calls } = await setup(t);
+  state.catalog.schemas[0].description = '';
+  w.openDatasetEdit('a', 'basic'); await tick();
+  d.querySelector('#dataset-name').value = '未保存的数据集名称';
+  d.querySelector('#dataset-name').dispatchEvent(new w.Event('input', { bubbles: true }));
+  d.querySelector('#editor-model-reference [data-reference]').click();
+  assert.equal(d.querySelectorAll('#reference-info-content .dataset-model-fields').length, 2);
+  assert.equal(d.querySelector('#reference-info-content [role="tab"], #reference-info-content .reference-fields'), null);
+  assert.match(d.querySelector('#reference-info-content').textContent, /暂无模型描述/);
+  d.querySelector('[data-reference-model-edit]').click(); await tick();
+  assert.equal(d.querySelector('#reference-info-modal').open, false);
+  assert.equal(d.querySelector('#shared-schema-modal').open, true);
+  assert.equal(state.schemaDraft.id, 'model-a');
+  assert.equal(state.workspace, 'editor');
+  assert.equal(state.editDatasetId, 'a');
+  assert.equal(d.querySelector('#dataset-name').value, '未保存的数据集名称');
+  assert.equal(state.editorDirty, true);
+  assert.ok(calls.every(call => !call.options?.method));
+});
+
+test('file model snapshots never provide an edit action for a live model with the same name', async t => {
+  const { w, d, models } = await setup(t);
+  w.openReferenceDetails('model', { ...w.fileModelReference({ schema_name: models[0].name, fields: [] }) }, '文件中的数据模型');
+  assert.equal(d.querySelector('[data-reference-model-edit]'), null);
+  assert.equal(d.querySelectorAll('#reference-info-content .dataset-model-fields').length, 2);
 });

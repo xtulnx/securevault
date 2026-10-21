@@ -95,15 +95,15 @@ test('ordinary and ignored schema zones stay out of list configuration and ignor
   assert.match(document.querySelector('[data-map-source="unused"] option:checked').textContent, /忽略，不保存/);
 });
 
-test('record details display ordinary fields in their own section', async (t) => {
+test('record details include ordinary fields alongside other public fields', async (t) => {
   const window = page(t, true);
   await window.initialStatusCheck;
   const state = window.stateForTest;
   state.unlocked = true;
   state.datasets = [{ ...dataset('ds_product'), fields: [{ source_key: 'notes', display_name: '说明', zone: 'normal' }] }];
-  window.fetch = async () => ({ ok: true, json: async () => ({ dataset_id: 'ds_product', category: '业务/产品', indexes: {}, display: {}, normal: { notes: '只在详情展示的普通内容' }, protected_fields: [] }) });
+  window.fetch = async () => ({ ok: true, json: async () => ({ id: 'rec_test', dataset_id: 'ds_product', category: '业务/产品', indexes: {}, display: {}, normal: { notes: '只在详情展示的普通内容' }, protected_fields: [] }) });
   await window.openRecordDetail('rec_test');
-  const section = [...window.document.querySelectorAll('#record-detail-content .detail-section')].find((element) => element.querySelector('h4').textContent === '普通字段');
+  const section = [...window.document.querySelectorAll('#record-detail-content .detail-section')].find((element) => element.querySelector('h4').textContent === '主表字段');
   assert.match(section.textContent, /说明/);
   assert.match(section.textContent, /只在详情展示的普通内容/);
 });

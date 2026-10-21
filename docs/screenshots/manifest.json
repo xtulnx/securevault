@@ -1,0 +1,171 @@
+{
+  "max_width": 1440,
+  "max_height": 960,
+  "max_bytes": 163840,
+  "encoding": "lossy WebP; quality 86 (fallback 82/78/74); method 6; sharp YUV; no metadata; no upscaling",
+  "total_bytes": 1489066,
+  "images": [
+    {
+      "file": "apps.webp",
+      "width": 1440,
+      "height": 900,
+      "bytes": 50112
+    },
+    {
+      "file": "authorization-events.webp",
+      "width": 1440,
+      "height": 900,
+      "bytes": 59340
+    },
+    {
+      "file": "authorization-notice.webp",
+      "width": 1440,
+      "height": 900,
+      "bytes": 94228
+    },
+    {
+      "file": "authorization.webp",
+      "width": 1440,
+      "height": 900,
+      "bytes": 59950
+    },
+    {
+      "file": "dark.webp",
+      "width": 1440,
+      "height": 900,
+      "bytes": 106264
+    },
+    {
+      "file": "dataset-edit.webp",
+      "width": 1440,
+      "height": 900,
+      "bytes": 42898
+    },
+    {
+      "file": "dataset-info.webp",
+      "width": 1440,
+      "height": 900,
+      "bytes": 44992
+    },
+    {
+      "file": "datasets.webp",
+      "width": 1440,
+      "height": 900,
+      "bytes": 47600
+    },
+    {
+      "file": "detail.webp",
+      "width": 1440,
+      "height": 900,
+      "bytes": 95316
+    },
+    {
+      "file": "export.webp",
+      "width": 1440,
+      "height": 900,
+      "bytes": 40486
+    },
+    {
+      "file": "import-report.webp",
+      "width": 1440,
+      "height": 900,
+      "bytes": 63838
+    },
+    {
+      "file": "import.webp",
+      "width": 1440,
+      "height": 900,
+      "bytes": 43568
+    },
+    {
+      "file": "locked-dark.webp",
+      "width": 1440,
+      "height": 900,
+      "bytes": 21234
+    },
+    {
+      "file": "locked-light.webp",
+      "width": 1440,
+      "height": 900,
+      "bytes": 20546
+    },
+    {
+      "file": "mobile-authorization.webp",
+      "width": 392,
+      "height": 852,
+      "bytes": 31096
+    },
+    {
+      "file": "mobile-detail.webp",
+      "width": 392,
+      "height": 852,
+      "bytes": 15254
+    },
+    {
+      "file": "mobile-directory.webp",
+      "width": 392,
+      "height": 852,
+      "bytes": 15998
+    },
+    {
+      "file": "mobile.webp",
+      "width": 392,
+      "height": 852,
+      "bytes": 27810
+    },
+    {
+      "file": "model-edit.webp",
+      "width": 1440,
+      "height": 900,
+      "bytes": 50436
+    },
+    {
+      "file": "model-info.webp",
+      "width": 1440,
+      "height": 900,
+      "bytes": 38264
+    },
+    {
+      "file": "overview.webp",
+      "width": 1440,
+      "height": 900,
+      "bytes": 88504
+    },
+    {
+      "file": "record-edit.webp",
+      "width": 1440,
+      "height": 900,
+      "bytes": 33856
+    },
+    {
+      "file": "saved-queries.webp",
+      "width": 1440,
+      "height": 900,
+      "bytes": 66536
+    },
+    {
+      "file": "search.webp",
+      "width": 1440,
+      "height": 900,
+      "bytes": 95938
+    },
+    {
+      "file": "secrets.webp",
+      "width": 1440,
+      "height": 900,
+      "bytes": 87032
+    },
+    {
+      "file": "supplement.webp",
+      "width": 1440,
+      "height": 900,
+      "bytes": 84582
+    },
+    {
+      "file": "table.webp",
+      "width": 1440,
+      "height": 900,
+      "bytes": 63388
+    }
+  ]
+}

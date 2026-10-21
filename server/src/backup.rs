@@ -65,9 +65,10 @@ const TABLES: &[(&str, &[&str])] = &[
     ),
     ("supplement_schemas", &["dataset_id", "fields_json"]),
     ("supplement_records", &["id", "dataset_id", "main_record_id", "link_json", "orphan", "updated_at"]),
+    ("saved_queries", &["id", "name", "filters_json"]),
 
 ];
-fn optional_table(table: &str) -> bool { table.starts_with("supplement_") || matches!(table,"shared_schemas"|"customers"|"environments"|"dataset_environments") }
+fn optional_table(table: &str) -> bool { table.starts_with("supplement_") || matches!(table,"shared_schemas"|"customers"|"environments"|"dataset_environments"|"saved_queries") }
 const MAX_LINE: u64 = 16 * 1024 * 1024;
 const MAX_EXPANDED: u64 = 16 * 1024 * 1024 * 1024;
 
@@ -623,6 +624,13 @@ fn insert_row(
         let _: Vec<FieldMapping> = serde_json::from_value(data["mappings"].clone())
             .map_err(|_| bad_request("导入字段映射无效"))?;
     }
+    if table == "saved_queries" {
+        let request: saved_queries::SavedQuery = serde_json::from_value(json!({"name": data["name"], "filters": data["filters"]}))
+            .map_err(|_| bad_request("常用查询格式无效"))?;
+        saved_queries::validate(&request)?;
+        let count: i64 = db.query_row("SELECT COUNT(*) FROM saved_queries", [], |r| r.get(0)).map_err(internal)?;
+        if count >= 50 { return Err(bad_request("常用查询数量超过限制")); }
+    }
     if table == "api_apps" {
         if !validate_permission(text("permission")?)
             || !matches!(data["disabled"].as_i64(), Some(0 | 1))
@@ -796,6 +804,28 @@ fn validate_relations(db: &Connection) -> ApiResult<()> {
 mod tests {
     use super::*;
     const FIXTURE: &str = include_str!("../../samples/fixtures/backup-v1.jsonl");
+    #[test]
+    fn saved_queries_round_trip_and_old_vaults_without_queries_remain_compatible() {
+        let db = Connection::open_in_memory().unwrap();
+        let keys = random_keys();
+        initialize_schema(&db).unwrap();
+        read_logical(FIXTURE.as_bytes(), &db, &keys).unwrap();
+        let filters = json!({"q":"enabled:=false","categories":["业务"],"labels":["内部"],"dataset_id":"deleted-dataset","schema_id":null,"include_expired":true});
+        db.execute("INSERT INTO saved_queries VALUES('query-test','常用查询',?1)", [filters.to_string()]).unwrap();
+        let mut bytes = Vec::new(); write_logical(&db, &keys, &mut bytes).unwrap();
+        let restored = Connection::open_in_memory().unwrap(); initialize_schema(&restored).unwrap();
+        read_logical(bytes.as_slice(), &restored, &random_keys()).unwrap();
+        let raw: String = restored.query_row("SELECT filters_json FROM saved_queries", [], |r| r.get(0)).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&raw).unwrap(), filters);
+        let corrupt = String::from_utf8(bytes).unwrap().replace("\"q\":\"enabled:=false\"", "\"q\":false");
+        let invalid = Connection::open_in_memory().unwrap(); initialize_schema(&invalid).unwrap();
+        assert!(read_logical(corrupt.as_bytes(), &invalid, &random_keys()).is_err());
+        db.execute("DROP TABLE saved_queries", []).unwrap();
+        let mut old = Vec::new(); write_logical(&db, &keys, &mut old).unwrap();
+        let legacy = Connection::open_in_memory().unwrap(); initialize_schema(&legacy).unwrap();
+        read_logical(old.as_slice(), &legacy, &random_keys()).unwrap();
+        assert_eq!(legacy.query_row("SELECT COUNT(*) FROM saved_queries", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
     #[test]
     fn dataset_names_survive_backup_and_older_rows_and_databases_default_to_empty() {
         let db=Connection::open_in_memory().unwrap();let keys=random_keys();initialize_schema(&db).unwrap();read_logical(FIXTURE.as_bytes(),&db,&keys).unwrap();

@@ -330,10 +330,10 @@ test('detail omits the system record ID and removes the border from the first vi
   await w.openRecordDetail('rec-001');
   assert.equal(w.document.querySelector('.system-record-info'), null);
   const first = w.document.querySelector('#record-detail-content .first-visible-section');
-  assert.equal(first.querySelector('h4').textContent, '展示字段');
+  assert.equal(first.querySelector('h4').textContent, '主表字段');
   assert.equal(w.getComputedStyle(first).borderTopWidth, '0px');
   w.selectDetailTab('secrets');
-  assert.equal(w.document.querySelector('.first-visible-section h4').textContent, '展示字段');
+  assert.equal(w.document.querySelector('.first-visible-section h4').textContent, '主表字段');
   assert.equal(w.document.querySelector('[data-detail-tab="secrets"]'), null);
 });
 

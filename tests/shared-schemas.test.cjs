@@ -139,7 +139,9 @@ test('compact model rows preserve fields, key and display choices when reordered
   const w = await setup(t), d = w.document;
   await w.openSharedSchemaEditor('schema');
   const rows = [...d.querySelectorAll('#shared-main-fields .catalog-field-row')];
-  rows[1].querySelector('.shared-up').click();
+  rows[1].querySelector('.shared-row-number').click();
+  rows[1].querySelector('.shared-position').value='1';
+  rows[1].querySelector('.shared-position').dispatchEvent(new w.KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
   d.querySelector('#shared-add-supplement').click();
   const row = d.querySelector('#shared-supplement-fields .catalog-field-row');
   row.querySelector('.shared-source').value = 'memo';
@@ -167,8 +169,9 @@ test('dataset title opens scoped records directly and the model link opens a rea
   d.querySelector('.dataset-model-button').click(); await tick();
   assert.equal(state.schemaDraft, null); assert.equal(d.querySelector('#schema-view-modal').open, true);
   assert.equal(d.querySelector('#shared-schema-modal').open, false);
-  d.querySelector('[data-model-tab="list"]').click();
-  assert.match(d.querySelector('#schema-view-content').textContent, /默认规则共享/);
+  assert.equal(d.querySelector('#schema-view-tabs, [data-model-tab]'), null);
+  assert.equal(d.querySelectorAll('#schema-view-content .dataset-model-fields').length, 2);
+  assert.match(d.querySelector('#schema-view-content').textContent, /默认摘要/);
   assert.match(d.querySelector('#schema-view-content').textContent, /商户号/);
   d.querySelector('#schema-view-edit').click(); await tick();
   assert.equal(state.schemaDraft.id, 'schema'); assert.equal(d.querySelector('#shared-schema-modal').open, true);
@@ -289,6 +292,7 @@ test('unchanged model notes are omitted from structure edits and a rejected note
   assert.equal(calls[0].body.description, undefined);
   assert.equal(calls[0].body.definition.fields[0].display_name, '新显示名');
   d.querySelector('#close-schema-preview').click();
+  w.confirm = () => true;
   d.querySelector('#close-shared-schema').click();
   await w.openSharedSchemaView('schema');
   d.querySelector('#schema-view-description').click();
@@ -302,4 +306,23 @@ test('unchanged model notes are omitted from structure edits and a rejected note
   assert.equal(d.querySelector('#save-description').disabled, false);
   await w.sealVault('', false);
   assert.equal(d.querySelector('#description-edit-context').textContent, '');
+});
+
+test('standalone model overview keeps description creation available and removes repeated tabs and counts', async t => {
+  const w = await setup(t), d = w.document, state = w.stateForTest;
+  state.catalog.schemas[0].description = '';
+  await w.openSharedSchemaView('schema');
+  assert.equal(d.querySelector('#schema-view-title').textContent, '数据模型：商户结构');
+  assert.equal(d.querySelector('#schema-view-scope').textContent, '1 个数据集引用');
+  assert.equal(d.querySelector('#schema-view-description').textContent, '添加描述');
+  assert.equal(d.querySelector('#schema-view-description-summary').textContent, '暂无模型描述');
+  assert.equal(d.querySelector('#schema-view-description-details').hidden, true);
+  assert.equal(d.querySelectorAll('#schema-view-content .dataset-model-fields').length, 2);
+  assert.equal(d.querySelector('#schema-view-content').nextElementSibling.classList.contains('info-description'), true);
+  assert.equal(d.querySelector('#schema-view-tabs,[data-model-tab],#schema-view-content .info-tab-count'), null);
+  assert.doesNotMatch(d.querySelector('#schema-view-modal').textContent, /个字段|统一维护|主表 \/ 附表字段/);
+  assert.equal(d.querySelectorAll('#schema-view-summary dt').length, 1);
+  d.querySelector('#schema-view-description').click();
+  assert.equal(state.descriptionTarget.id, 'schema');
+  assert.equal(d.querySelector('#description-draft').value, '');
 });

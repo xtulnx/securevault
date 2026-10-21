@@ -21,7 +21,7 @@ function page(t, app = false, url = 'http://127.0.0.1:4180/') {
     window.setInterval = () => 1;
     window.scrollTo = () => {};
     window.fetch = async () => ({ ok: true, json: async () => ({ initialized: true, sealed: true, persistent: false }) });
-    const source = ['app.js', 'supplement.js', 'workbench.js', 'applications.js'].map(asset => fs.readFileSync(path.join(web, asset), 'utf8')).join('\n').replace('\ncheckStatus();\n', '\nwindow.initialStatusCheck = checkStatus();\n');
+    const source = ['app.js', 'supplement.js', 'workbench.js', 'applications.js', 'search-tools.js', 'search-layout.js'].map(asset => fs.readFileSync(path.join(web, asset), 'utf8')).join('\n').replace('\ncheckStatus();\n', '\nwindow.initialStatusCheck = checkStatus();\n');
     window.eval(source + '\nwindow.stateForTest = state; showToast = () => {}; refreshAfterWrite = async () => {};');
     window.document.querySelector('#dataset-info-modal').showModal = () => {};
     window.document.querySelector('#dataset-info-modal').close = () => {};

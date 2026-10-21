@@ -50,6 +50,29 @@ const state = {
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 
+function confirmDiscardChanges(dirty, subject, busy = false) {
+  if (!state.unlocked) return true;
+  if (busy) { showToast('操作正在进行，请等待完成后再离开', 'error'); return false; }
+  return !dirty || window.confirm(`放弃未保存的${subject}？\n选择“取消”继续编辑，选择“确定”放弃修改。`);
+}
+
+function formValues(root) {
+  return [...root.querySelectorAll('input, select, textarea')].filter(control => control.type !== 'file')
+    .map(control => [control.name || control.id || control.className, control.type === 'checkbox' || control.type === 'radio' ? control.checked : control.value]);
+}
+
+const busyForms = new WeakMap();
+function setFormBusy(root, busy) {
+  if (busy && !busyForms.has(root)) {
+    const controls = [...root.querySelectorAll('input, select, textarea, button')].filter(control => !control.classList.contains('panel-lock'));
+    busyForms.set(root, controls.map(control => [control, control.disabled]));
+    controls.forEach(control => { control.disabled = true; });
+  } else if (!busy && busyForms.has(root)) {
+    busyForms.get(root).forEach(([control, disabled]) => { control.disabled = disabled; });
+    busyForms.delete(root);
+  }
+}
+
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
 }
@@ -78,21 +101,23 @@ function highlightValue(value) {
 
 async function api(path, options = {}) {
   const sessionEpoch = state.sessionEpoch;
+  const { responseType, ...fetchOptions } = options;
   let response;
   try {
     response = await fetch(`/api${path}`, {
-      ...options,
+      ...fetchOptions,
       headers: { "Content-Type": "application/json", ...(options.headers || {}) }
     });
   } catch (error) {
+    if (error.name === "AbortError") throw error;
     await handleServiceOffline();
     throw error;
   }
   if (response.status === 503) await handleServiceOffline();
-  const body = await response.json().catch(() => ({}));
+  const body = response.ok && responseType === "blob" ? await response.blob() : await response.json().catch(() => ({}));
   if (!response.ok) {
     if (sessionEpoch === state.sessionEpoch && (response.status === 423 || (response.status === 401 && state.unlocked))) sealVault("会话已失效，请重新解锁", false);
-    throw new Error(body.error || `请求失败 (${response.status})`);
+    throw Object.assign(new Error(body.error || `请求失败 (${response.status})`), { status: response.status, code: body.code });
   }
   return body;
 }
@@ -115,8 +140,12 @@ function applyTheme(theme = state.theme) {
   state.theme = theme === "light" ? "light" : "dark";
   document.documentElement.dataset.theme = state.theme;
   localStorage.setItem("securevault-theme", state.theme);
-  const button = $("#theme-toggle");
-  if (button) { button.querySelector("span").textContent = state.theme === "light" ? "☾" : "☼"; button.querySelector("b").textContent = state.theme === "light" ? "暗色" : "浅色"; }
+  for (const button of $$("#theme-toggle, #sealed-theme-toggle")) {
+    const next = state.theme === "light" ? "暗色" : "浅色";
+    button.querySelector("span").textContent = state.theme === "light" ? "☾" : "☼";
+    button.querySelector("b").textContent = next;
+    button.setAttribute("aria-label", `切换为${next}主题`);
+  }
 }
 
 let statusCheckPending = false;
@@ -142,6 +171,7 @@ function syncSession(status) {
   const sessionId = status.session_id ?? null;
   if (state.sessionId !== sessionId) {
     state.sessionEpoch++;
+    if (typeof clearAuthorizationEvents === "function") clearAuthorizationEvents();
     state.activityAt = -Infinity;
     state.activityReportedAt = -Infinity;
     state.lastActivityReport = -Infinity;
@@ -153,6 +183,7 @@ function syncSession(status) {
   state.warningSeconds = status.warning_seconds ?? 600;
   state.unlockAt = now - (state.maxSeconds - (status.ttl_seconds_remaining ?? state.maxSeconds)) * 1000;
   state.lastActivity = Math.max(state.activityAt, now - (state.idleTimeout - (status.idle_seconds_remaining ?? state.idleTimeout)) * 1000);
+  if (typeof syncAuthorizationNotice === "function") syncAuthorizationNotice(status.authorization_notice);
 }
 
 async function checkStatus() {
@@ -235,6 +266,7 @@ async function unlockVault(event) {
 
 async function sealVault(message = "数据空间已手动封印", callServer = true) {
   clearInterval(state.timer);
+  if (typeof clearAuthorizationEvents === "function") clearAuthorizationEvents();
   state.unlocked = false;
   state.sessionEpoch++;
   state.sessionId = null;
@@ -440,7 +472,7 @@ function renderDatasetActions() {
   const container = $("#dataset-context-actions");
   const candidates = datasetCandidates();
   const dataset = currentDataset();
-  container.hidden = !state.unlocked || !candidates.length;
+  container.hidden = !state.unlocked || (!candidates.length && !dataset);
   if (container.hidden) { container.replaceChildren(); return; }
   const icons = {
     view: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>',
@@ -470,7 +502,7 @@ function insertSearchField(field) {
   const input = $("#search-input");
   const prefix = input.value.trim();
   input.value = `${prefix}${prefix ? " " : ""}${field}:`;
-  state.query = input.value;
+  queueSearchFromInput({ target: input });
   input.focus();
   input.setSelectionRange(input.value.length, input.value.length);
 }
@@ -537,7 +569,8 @@ function recordCard(record) {
 }
 
 function renderRecords() {
-  $("#records-grid").innerHTML = state.records.map(recordCard).join("");
+  const tableDataset = typeof activeRecordTableDataset === "function" ? activeRecordTableDataset() : null;
+  $("#records-grid").innerHTML = tableDataset ? recordTableMarkup(tableDataset) : state.records.map(recordCard).join("");
   $("#empty-state").hidden = state.total > 0;
   const pages = Math.max(1, Math.ceil(state.total / state.pageSize));
   $("#pagination").hidden = state.total <= state.pageSize;
@@ -1069,7 +1102,7 @@ async function createDataset() {
   } catch (error) { showToast(error.message, "error"); }
 }
 
-async function importFile(file) {
+async function importFile(file, isCurrent = () => state.unlocked) {
   if (!file) return;
   try {
     const datasetId = $("#import-dataset-select").value;
@@ -1077,6 +1110,7 @@ async function importFile(file) {
     const form = new FormData(); form.append("file", file);
     const response = await fetch("/api/imports/upload", { method: "POST", body: form });
     const batch = await response.json();
+    if (!isCurrent()) return;
     if (!response.ok) throw new Error(batch.error || `上传失败 (${response.status})`);
     const existingDataset = state.datasets.find((item) => item.id === datasetId);
     if ($("#delete-missing").checked && !existingDataset?.identity_fields?.length) throw new Error("该数据集尚未配置逻辑唯一 KEY，不能按批次删除旧记录");
@@ -1084,6 +1118,7 @@ async function importFile(file) {
     $("#batch-summary").textContent = `${batch.filename} · ${batch.record_count} 条 · ${batch.source_fields.length} 个源字段`;
     const dataset = state.datasets.find((item) => item.id === datasetId);
     const templateResult = await api(`/datasets/${encodeURIComponent(datasetId)}/templates`);
+    if (!isCurrent()) return;
     state.importTemplates = templateResult.templates;
     state.currentBatchSources = batch.source_fields;
     $("#mapping-template-select").innerHTML = `<option value="">不使用已保存模板</option>${state.importTemplates.map((template, index) => `<option value="${index}">${escapeHtml(template.name)}</option>`).join("")}`;
@@ -1100,10 +1135,9 @@ async function importFile(file) {
       $("#first-schema").hidden = true;
       renderMappings(batch.source_fields, knownFields, true);
     }
-    $$('[data-map-source]').forEach((select) => select.addEventListener("change", () => { $(`[data-map-new="${CSS.escape(select.dataset.mapSource)}"]`).hidden = select.value !== "__new"; }));
     $("#batch-options").hidden = false; $("#batch-summary").hidden = false;
     $("#import-file").value = "";
-  } catch (error) { showToast(error.message || "文件无法解析", "error"); }
+  } catch (error) { if (isCurrent()) showToast(error.message || "文件无法解析", "error"); }
 }
 
 function renderMappings(sourceFields, targetFields, autoSelect = false, templateMappings = []) {
@@ -1181,21 +1215,18 @@ async function commitImport() {
 $("#unlock-form").addEventListener("submit", unlockVault);
 $("#toggle-password").addEventListener("click", () => { const input = $("#master-password"); input.type = input.type === "password" ? "text" : "password"; });
 $("#lock-button").addEventListener("click", () => sealVault());
-$("#theme-toggle").addEventListener("click", () => applyTheme(state.theme === "light" ? "dark" : "light"));
+for (const button of $$("#theme-toggle, #sealed-theme-toggle")) button.addEventListener("click", () => applyTheme(state.theme === "light" ? "dark" : "light"));
 $("#all-categories").addEventListener("click", () => selectCategory("all"));
-$("#search-input").addEventListener("input", (event) => {
-  state.query = event.target.value;
-  state.page = 1;
-  clearTimeout(state.searchTimer);
-  state.searchTimer = setTimeout(() => fetchRecords().catch((error) => showToast(error.message, "error")), 180);
+$("#search-input").addEventListener("input", event => queueSearchFromInput(event));
+$("#search-input").addEventListener("compositionstart", () => { state.searchComposing = true; pauseSearchInput(); });
+$("#search-input").addEventListener("compositionend", event => { state.searchComposing = false; queueSearchFromInput(event); });
+$("#search-input").addEventListener("keydown", event => {
+  if (event.key !== "Enter" || event.isComposing || state.searchComposing || event.keyCode === 229) return;
+  event.preventDefault(); clearTimeout(state.searchTimer);
+  state.query = event.currentTarget.value; state.page = 1;
+  fetchRecords().catch(() => {}); // Search failures are rendered once, beside the results.
 });
-$("#clear-filters").addEventListener("click", async () => {
-  state.environmentTags = []; state.schemaFilter = "";
-  state.query = ""; state.selectedDatasetId = null; state.category = "all"; state.categories = []; state.environment = "all"; state.includeExpired = false; state.page = 1;
-  $("#include-expired").checked = false;
-  $("#search-input").value = "";
-  await fetchRecords(); renderCategoryTree(); renderFilters();
-});
+$("#clear-filters").addEventListener("click", () => clearSearchScope());
 $("#previous-page").addEventListener("click", async () => { if (state.page > 1) { state.page--; await fetchRecords(); window.scrollTo({ top: 0, behavior: "smooth" }); } });
 $("#next-page").addEventListener("click", async () => { if (state.page * state.pageSize < state.total) { state.page++; await fetchRecords(); window.scrollTo({ top: 0, behavior: "smooth" }); } });
 $("#security-settings-button").addEventListener("click", () => openSecuritySettings());

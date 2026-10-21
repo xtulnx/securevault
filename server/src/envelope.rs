@@ -481,6 +481,7 @@ mod tests {
                 persistent: false,
                 session_hash: None,
                 session_id: None,
+                authorization_events: Default::default(),
                 unlock_failures: 0,
                 unlock_after: None,
             })),

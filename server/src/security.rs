@@ -38,6 +38,7 @@ pub(super) fn expire_runtime(runtime: &mut Runtime) {
                 .last_activity
                 .is_some_and(|t| t.elapsed() >= Duration::from_secs(SESSION_IDLE_SECONDS)))
     {
+        runtime.authorization_events = Default::default();
         runtime.keys = None;
         runtime.session_hash = None;
         runtime.session_id = None;
@@ -67,6 +68,7 @@ pub(super) fn owner_cookie(headers: &HeaderMap, runtime: &Runtime) -> bool {
 pub(super) fn owner_status(runtime: &Runtime, owner: bool) -> Value {
     json!({
         "sealed": !owner,
+        "authorization_notice": if owner { runtime.authorization_events.summary() } else { Value::Null },
         "can_manage": owner,
         "persistent": runtime.persistent,
         "session_id": if owner { runtime.session_id.as_deref() } else { None },
@@ -117,6 +119,7 @@ pub(super) async fn owner_session(state: &AppState, warning: bool) -> ApiResult<
         Uuid::new_v4().simple()
     ));
     let mut runtime = state.runtime.lock().await;
+    runtime.authorization_events = Default::default();
     runtime.session_hash = Some(app_key_hash(&token));
     runtime.session_id = Some(Uuid::new_v4().to_string());
     let mut status = owner_status(&runtime, true);
@@ -139,7 +142,7 @@ pub(super) async fn owner_session(state: &AppState, warning: bool) -> ApiResult<
     Ok(response)
 }
 
-fn app_route(method: &axum::http::Method, path: &str) -> bool {
+pub(super) fn app_route(method: &axum::http::Method, path: &str) -> bool {
     if method == axum::http::Method::GET {
         return path == "/records/search"
             || path == "/client/datasets"
@@ -158,6 +161,10 @@ pub(super) async fn protect_api(
 ) -> Response {
     // Never trust a client-supplied marker, even with valid app credentials.
     request.headers_mut().remove("x-vault-owner");
+    let mut verified_identity = None;
+    let mut event_session = None;
+    let target = Query::<authorization_events::Target>::try_from_uri(request.uri()).ok().and_then(|query| query.0.dataset_id);
+    let operation = authorization_events::operation(request.method(), request.uri().path());
     let response = async {
         let host = request
             .headers()
@@ -221,14 +228,16 @@ pub(super) async fn protect_api(
                 "owner session or app credentials required".into(),
             ));
         }
+        let keys = runtime.keys.as_ref().ok_or_else(locked)?;
+        let connection = open_database(&database_path(&state), &keys.db)?;
+        verified_identity = authorization_events::verified_app(&connection, request.headers(), target.as_deref())?;
+        event_session = runtime.session_id.clone();
         if !app_route(request.method(), path) {
             return Err(ApiError(
                 StatusCode::FORBIDDEN,
                 "management requires an owner session".into(),
             ));
         }
-        let keys = runtime.keys.as_ref().ok_or_else(locked)?;
-        let connection = open_database(&database_path(&state), &keys.db)?;
         authorize_app(&connection, request.headers(), "search")?;
         Ok(())
     }
@@ -237,6 +246,11 @@ pub(super) async fn protect_api(
         Ok(()) => next.run(request).await,
         Err(error) => error.into_response(),
     };
+    let denial = response.extensions_mut().remove::<authorization_events::AuthorizationDenial>();
+    let empty_scope = response.status().is_success() && verified_identity.as_ref().is_some_and(|identity| !identity.has_dataset);
+    let target_denied = response.status().is_success() && operation == "search" && verified_identity.as_ref().is_some_and(|identity| !identity.target_allowed);
+    let reason = denial.map(|denial| denial.0).or(if target_denied { Some("dataset_scope") } else if empty_scope { Some("no_datasets") } else { None });
+    authorization_events::record(&state, event_session, verified_identity, reason, operation).await;
     let headers = response.headers_mut();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(
@@ -339,6 +353,7 @@ mod tests {
             persistent: false,
             session_hash: Some("token".into()),
             session_id: Some("session".into()),
+            authorization_events: Default::default(),
             unlock_failures: 0,
             unlock_after: None,
         };
@@ -353,6 +368,7 @@ mod tests {
             persistent: false,
             session_hash: Some(app_key_hash("test-cookie")),
             session_id: Some("test-session".into()),
+            authorization_events: Default::default(),
             unlock_failures: 0,
             unlock_after: None,
         }
@@ -476,7 +492,14 @@ mod tests {
         assert!(app_route(&Method::POST, "/supplement/sup_1/secrets/reveal"));
         assert!(app_route(&Method::POST, "/records/rec_1/secrets/reveal"));
         for (method, path) in [
+            (Method::POST, "/imports/batch/samples"),
+            (Method::POST, "/records/import/report"),
+            (Method::POST, "/datasets/transfer/report"),
             (Method::GET, "/apps"),
+            (Method::GET, "/saved-queries"),
+            (Method::POST, "/saved-queries"),
+            (Method::PATCH, "/saved-queries/query_1"),
+            (Method::DELETE, "/saved-queries/query_1"),
             (Method::GET, "/datasets"),
             (Method::GET, "/datasets/tree"),
             (Method::POST, "/client/datasets"),

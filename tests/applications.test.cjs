@@ -59,7 +59,8 @@ test('dataset names open existing information without leaving application detail
   assert.equal($('#app-details-modal').open, true);
   assert.match($('#dataset-info-content').textContent, /支付\/商户/);
   assert.match($('#dataset-info-content').textContent, /记录数量/);
-  assert.match($('#dataset-info-content').textContent, /字段数量/);
+  assert.match($('#dataset-info-model-content').textContent, /尚未定义主表字段/);
+  assert.match($('#dataset-info-model-content').textContent, /尚未定义附表字段/);
   assert.equal($('#app-details-content [data-dataset-id="deleted"]'), null);
   assert.equal(w.getComputedStyle($('.application-granted li:last-child')).borderBottomWidth, '0px');
   w.document.activeElement.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
@@ -67,6 +68,7 @@ test('dataset names open existing information without leaving application detail
   assert.equal($('#app-details-modal').open, true);
   assert.equal(w.stateForTest.appViewing, 'app-1');
   assert.equal($('#dataset-info-content').textContent, '');
+  assert.equal($('#dataset-info-title').textContent, '数据集信息');
   name.focus();
   name.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   assert.equal($('#app-details-modal').open, false);

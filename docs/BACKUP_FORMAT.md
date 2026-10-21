@@ -74,6 +74,13 @@ age --passphrase --output repacked.jsonl.gz.age backup.jsonl.gz
 | audit_events | id、event、record_id、field_name、created_at |
 | supplement_schemas（可选扩展） | dataset_id、fields |
 | supplement_records（可选扩展） | id、dataset_id、main_record_id、link、orphan、updated_at、value |
+| saved_queries（可选扩展） | id、name、filters |
+
+常用查询是 v1 的可选扩展，排在附表之后；无查询时省略记录和计数。
+`filters` 包含 q、categories、labels、dataset_id、schema_id、include_expired。
+保存的条件允许引用已删除的数据集或目录，应用查询时会提示范围失效并阻止扩大检索范围。
+恢复时校验条件类型、长度、名称和最多 50 条的数量限制。
+旧库缺少此表或旧备份没有此扩展时仍可处理；包含此扩展的备份需由支持它的版本恢复。
 
 `protected_fields.value` 为解密后的原始 JSON 值，`zone` 仅支持 hidden 或 secrets。业务字段仍以现有扁平路径为键，例如 `indexes` 内的 `config.region`，重建身份索引时按路径还原。对象、数组、数字、字符串、布尔及 null 均按 JSON 语义保存；不导出字段 nonce、密文、数据密钥、密钥封装、应用 key_hash、派生 identity_hash 或 search_blob。
 

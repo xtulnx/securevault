@@ -754,6 +754,28 @@ mod tests {
     }
 
     #[test]
+    fn explicit_null_preserves_field_presence_for_main_and_supplement_without_clearing_keys() {
+        let (db, keys) = fixture();
+        let id = write_main(&db, &keys, "d", None, &request(json!({"values":{"code":"A","note":{"count":0},"credential":"synthetic"}}))).unwrap()["id"].as_str().unwrap().to_owned();
+        write_main(&db, &keys, "d", Some(&id), &request(json!({"values":{"note":null,"credential":null}}))).unwrap();
+        let data = main_values(&db, &keys, &id).unwrap();
+        for key in ["note", "credential"] {
+            assert!(data.contains_key(key));
+            assert!(data[key].is_null());
+        }
+        assert_eq!(data["code"], "A");
+        assert!(write_main(&db, &keys, "d", Some(&id), &request(json!({"values":{"code":null}}))).is_err());
+        assert_eq!(main_values(&db, &keys, &id).unwrap()["code"], "A");
+        let child = write_row(&db, &keys, "d", None, &request(json!({"main_record_id":id,"values":{"remark":"text","access":"synthetic"}}))).unwrap()["id"].as_str().unwrap().to_owned();
+        write_row(&db, &keys, "d", Some(&child), &request(json!({"values":{"remark":null,"access":null}}))).unwrap();
+        let child_data = values(&db, &keys, &child).unwrap();
+        for key in ["remark", "access"] {
+            assert!(child_data.as_object().unwrap().contains_key(key));
+            assert!(child_data[key].is_null());
+        }
+    }
+
+    #[test]
     fn manual_main_edits_preserve_secrets_and_types_and_reject_duplicate_keys() {
         let (db, keys) = fixture();
         let input = request(
@@ -1129,7 +1151,7 @@ mod tests {
         // A failed destructive import is atomic, including a prospective schema change.
         state.batches.lock().await.insert(
             "bad".into(),
-            (Instant::now(), vec![json!({"note":"no-key"})]),
+            ImportBatch::new(vec![json!({"note":"no-key"})], None),
         );
         assert!(
             import_records(
