@@ -1,3 +1,25 @@
+// The browser keeps its existing download/clipboard behavior. Desktop privileges
+// are limited to these native operations and to the launched service's origin.
+function desktopInvoke(command, args) {
+  return window.__TAURI__.core.invoke(command, args);
+}
+
+async function copyText(text) {
+  if (window.__SECUREVAULT_DESKTOP__) return desktopInvoke('desktop_copy', { text });
+  return navigator.clipboard.writeText(text);
+}
+
+async function saveDownload(blob, name) {
+  if (window.__SECUREVAULT_DESKTOP__) {
+    if (blob.size > 64 * 1024 * 1024) throw new Error('桌面导出超过 64 MiB，请通过浏览器下载');
+    return desktopInvoke('desktop_save', { name, bytes: Array.from(new Uint8Array(await blob.arrayBuffer())) });
+  }
+  const url = URL.createObjectURL(blob), anchor = document.createElement('a');
+  anchor.href = url; anchor.download = name; anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return true;
+}
+
 const state = {
   initialized: false,
   canManage: false,
@@ -832,8 +854,7 @@ async function exportDataset(datasetId, format = "json", includeSecrets = false)
     const response = await fetch(`/api/datasets/${encodeURIComponent(datasetId)}/export?format=${format}&include_secrets=${includeSecrets}`, { headers: { Accept: format === "xlsx" ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" : format === "csv" ? "text/csv" : "application/json" } });
     if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error || `导出失败 (${response.status})`); }
     const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a"); anchor.href = url; anchor.download = `securevault-${datasetId}.${format}`; anchor.click(); URL.revokeObjectURL(url);
+    if (!await saveDownload(blob, `securevault-${datasetId}.${format}`)) return;
     showToast(`数据集已导出为 ${format.toUpperCase()}（${includeSecrets ? "包含机密" : "不含机密"}）`, "success");
   } catch (error) { showToast(error.message, "error"); }
 }
@@ -871,8 +892,8 @@ async function handleSecretAction(action, field) {
   try {
     if (action === "copy") {
       const value = await showSecret(recordId, field);
-      if (!navigator.clipboard?.writeText) throw new Error("剪贴板不可用，请检查浏览器权限");
-      await navigator.clipboard.writeText(typeof value === "string" ? value : JSON.stringify(value));
+      if (!window.__SECUREVAULT_DESKTOP__ && !navigator.clipboard?.writeText) throw new Error("剪贴板不可用，请检查浏览器权限");
+      await copyText(typeof value === "string" ? value : JSON.stringify(value));
       showToast(`${field} 已复制到剪贴板`, "success");
       return;
     }

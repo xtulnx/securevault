@@ -1148,7 +1148,7 @@ renderDetailSecrets = function() {
       const button = document.createElement('button'); button.className = 'detail-secret-button'; button.textContent = '复制';
       button.addEventListener('click', async () => {
         if (state.reveal !== revealed || revealed.expiresAt <= Date.now()) return;
-        try { await navigator.clipboard.writeText(revealed.value); showToast('字段已复制', 'success'); } catch { showToast('剪贴板不可用', 'error'); }
+        try { await copyText(revealed.value); showToast('字段已复制', 'success'); } catch { showToast('剪贴板不可用', 'error'); }
       }); actions.append(button);
     }
   }
@@ -1190,9 +1190,7 @@ async function downloadExport() {
     if (!response.ok) { const body = await response.json(); throw new Error(body.error || '导出失败'); }
     const blob = await response.blob();
     if (!state.unlocked || state.exportDatasetId !== id) return;
-    const url = URL.createObjectURL(blob), anchor = document.createElement('a');
-    anchor.href = url; anchor.download = `securevault-${id}${content === 'schema' ? '.schema' : content === 'package' ? '.dataset' : ''}.${format}`;
-    anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    if (!await saveDownload(blob, `securevault-${id}${content === 'schema' ? '.schema' : content === 'package' ? '.dataset' : ''}.${format}`)) return;
     $('#export-modal').close(); $('#export-with-secrets').checked = false; state.exportDatasetId = null;
     showToast('数据集已导出', 'success');
   } catch (error) { $('#export-error').textContent = error.message; $('#export-error').hidden = false; }
@@ -1292,6 +1290,7 @@ function drawImportDiagnostics(context) {
     try {
       const blob = await api(`${transfer ? '/datasets/transfer/report' : '/records/import/report'}?format=csv`, { method: 'POST', body: JSON.stringify(context.request), responseType: 'blob' });
       if (!current()) return;
+      if (window.__SECUREVAULT_DESKTOP__) { await saveDownload(blob, 'securevault-import-report.csv'); return; }
       const url = URL.createObjectURL(blob); state.importReportUrl = url;
       const link = document.createElement('a'); link.href = url; link.download = 'securevault-import-report.csv'; link.click();
       setTimeout(() => { URL.revokeObjectURL(url); if (state.importReportUrl === url) state.importReportUrl = null; }, 0);
@@ -1796,10 +1795,50 @@ document.addEventListener('keydown', event => {
 });
 new MutationObserver(updateOverlayFocus).observe($('#app'), { attributes: true, attributeFilter: ['hidden', 'open'], subtree: true });
 window.addEventListener('resize', () => { setDetailMode(); scheduleRecordLayout(); updateOverlayFocus(); });
-window.addEventListener('beforeunload', event => {
+function hasUnsavedChanges() {
   const descriptionDirty = state.descriptionTarget && $('#description-draft').value !== state.descriptionTarget.initial;
   const scopeDirty = state.scopeEditing && JSON.stringify(appScopeBody()) !== state.scopeEditing.initial;
-  if (state.unlocked && (state.editorDirty || manualRecordDirty() || sharedSchemaDirty() || hasImportDraft() || descriptionDirty || scopeDirty || state.importLoading || state.importBusy || state.schemaBusy || manualEditState?.busy)) {
+  return Boolean(state.unlocked && (state.editorDirty || manualRecordDirty() || sharedSchemaDirty() || hasImportDraft() || descriptionDirty || scopeDirty || state.importLoading || state.importBusy || state.schemaBusy || manualEditState?.busy || state.exportBusy));
+}
+window.secureVaultRequestClose = () => {
+  if (window.__SECUREVAULT_DESKTOP__) desktopInvoke('desktop_close', { dirty: hasUnsavedChanges() });
+};
+window.secureVaultSelectDirectory = async existingOnly => {
+  if (!window.__SECUREVAULT_DESKTOP__) return;
+  $('#desktop-directory-error').hidden = true;
+  try {
+    await desktopInvoke('desktop_select_directory', { existingOnly, dirty: hasUnsavedChanges() });
+  } catch (error) {
+    const message = String(error.message || error);
+    if ($('#desktop-directory-dialog').open) {
+      $('#desktop-directory-error').textContent = message;
+      $('#desktop-directory-error').hidden = false;
+    } else { showToast(message, 'error'); }
+  }
+};
+window.secureVaultDirectoryChanged = () => {
+  // Native code calls this only after the old session ended (including rollback).
+  clearInterval(state.timer);
+  state.unlocked = false;
+  state.sessionEpoch++;
+  document.body.inert = true;
+  window.location.reload();
+};
+async function showDesktopDirectory() {
+  if (!window.__SECUREVAULT_DESKTOP__) return;
+  try {
+    $('#desktop-current-directory').textContent = await desktopInvoke('desktop_directory_info');
+    $('#desktop-directory-error').hidden = true;
+    $('#desktop-directory-dialog').showModal();
+  } catch (error) { showToast(String(error.message || error), 'error'); }
+}
+document.querySelectorAll('[data-desktop-only]').forEach(element => { element.hidden = !window.__SECUREVAULT_DESKTOP__; });
+document.querySelectorAll('[data-desktop-directory]').forEach(button => button.addEventListener('click', showDesktopDirectory));
+document.querySelectorAll('[data-desktop-open]').forEach(button => button.addEventListener('click', () => window.secureVaultSelectDirectory(true)));
+$('#desktop-directory-switch').addEventListener('click', () => window.secureVaultSelectDirectory(false));
+$('#desktop-directory-close').addEventListener('click', () => $('#desktop-directory-dialog').close());
+window.addEventListener('beforeunload', event => {
+  if (hasUnsavedChanges()) {
     event.preventDefault(); event.returnValue = '';
   }
 });
@@ -1977,7 +2016,7 @@ async function copyWithFeedback(button, value, message = '字段已复制') {
   button.disabled = !iconButton; button.setAttribute('aria-disabled', 'true'); button.setAttribute('aria-busy', 'true');
   button.setAttribute('aria-label', `${feedback.ariaLabel || feedback.label}，正在复制`);
   try {
-    await navigator.clipboard.writeText(value);
+    await copyText(value);
     if (!current()) return;
     setCopyButtonFeedback(button, 'success', '已复制');
     status.textContent = iconButton ? `${feedback.ariaLabel || '字段'}：已复制` : message;

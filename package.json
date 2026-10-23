@@ -2,9 +2,13 @@
   "name": "securevault-web-tests",
   "private": true,
   "scripts": {
-    "test": "node --test tests/*.test.cjs"
+    "test": "node --test tests/*.test.cjs",
+    "desktop:dev": "python3 scripts/desktop.py dev",
+    "desktop:build": "python3 scripts/desktop.py build",
+    "desktop:test": "python3 scripts/desktop.py test"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4",
     "jsdom": "29.1.1"
   }
 }

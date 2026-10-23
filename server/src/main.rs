@@ -41,6 +41,7 @@ mod authorization_events;
 mod client;
 mod catalog;
 mod saved_queries;
+mod desktop;
 use security::*;
 mod backup;
 mod rotation;
@@ -97,6 +98,8 @@ struct StartupOptions {
     data_dir: PathBuf,
     address: SocketAddr,
     password: Option<Zeroizing<String>>,
+    desktop_stdio: bool,
+    desktop_auto_port: bool,
 }
 
 struct Runtime {
@@ -474,6 +477,11 @@ fn parse_startup_options(root: &FsPath) -> Result<StartupOptions, Box<dyn std::e
         .unwrap_or_else(|_| "127.0.0.1:4173".into())
         .parse::<SocketAddr>().map_err(|_| "SECUREVAULT_ADDR 格式无效，应为 IP地址:端口")?;
     let mut password = std::env::var("SECUREVAULT_PASSWORD").ok();
+    let desktop_stdio = std::env::args().any(|arg| arg == "--desktop-stdio");
+    let mut desktop_auto_port = false;
+    if desktop_stdio && (password.is_some() || std::env::args().any(|arg| matches!(arg.as_str(), "--password" | "-P" | "--password-stdin" | "-s"))) {
+        return Err("桌面模式必须从界面解锁，不能通过启动参数或环境变量提供密码".into());
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut index = 0;
     let mut seen = std::collections::HashSet::new();
@@ -481,6 +489,8 @@ fn parse_startup_options(root: &FsPath) -> Result<StartupOptions, Box<dyn std::e
         let flag = cli_flag(&args[index], "server");
         if !seen.insert(flag) { return Err(format!("参数 {flag} 重复，请只指定一次").into()); }
         match flag {
+            "--desktop-stdio" => {},
+            "--desktop-auto-port" => desktop_auto_port = true,
             "--data-dir" => {
                 index += 1;
                 data_dir = PathBuf::from(args.get(index).ok_or("--data-dir / -d 后需要提供目录路径")?);
@@ -513,10 +523,15 @@ fn parse_startup_options(root: &FsPath) -> Result<StartupOptions, Box<dyn std::e
         }
         index += 1;
     }
+    if desktop_auto_port && !desktop_stdio {
+        return Err("--desktop-auto-port 仅供桌面启动器使用".into());
+    }
     Ok(StartupOptions {
         data_dir,
         address,
         password: password.map(Zeroizing::new),
+        desktop_stdio,
+        desktop_auto_port,
     })
 }
 
@@ -671,6 +686,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(debug_assertions))]
     let app = app.fallback(get(serve_embedded_web));
     let app = app.layer(middleware::from_fn(security_headers));
+    let app = if options.desktop_stdio { app.layer(middleware::from_fn(desktop::ipc_headers)) } else { app };
     let cleanup = state.clone();
     tokio::spawn(async move {
         loop {
@@ -683,9 +699,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     let address = options.address;
-    let listener = tokio::net::TcpListener::bind(address).await?;
-    println!("SecureVault 已启动，访问地址：http://{address}");
-    axum::serve(listener, app).await?;
+    let listener = desktop::bind(address, options.desktop_auto_port).await?;
+    if options.desktop_stdio {
+        desktop::serve(listener, app).await?;
+    } else {
+        println!("SecureVault 已启动，访问地址：http://{}", listener.local_addr()?);
+        axum::serve(listener, app).await?;
+    }
     Ok(())
 }
 

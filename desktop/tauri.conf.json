@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "SecureVault",
+  "version": "0.1.0",
+  "identifier": "org.nx.securevault",
+  "build": { "frontendDist": "assets" },
+  "app": {
+    "windows": [],
+    "withGlobalTauri": true,
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; frame-ancestors 'none'",
+      "capabilities": []
+    }
+  },
+  "bundle": {
+    "active": true,
+    "publisher": "org.nx",
+    "targets": ["app"],
+    "category": "Utility",
+    "shortDescription": "本地加密数据保险库",
+    "externalBin": ["binaries/securevault"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "macOS": { "minimumSystemVersion": "13.3", "signingIdentity": "-" }
+  }
+}

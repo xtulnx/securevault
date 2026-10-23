@@ -1602,3 +1602,5 @@ dialog.description-dialog { margin: auto; padding: 0; }
 }
 
 .nav-button > .authorization-notice-dot:not([hidden]) { display: inline-block; }
+.desktop-directory-actions { display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap; }
+.desktop-current-directory { overflow-wrap: anywhere; user-select: text; }

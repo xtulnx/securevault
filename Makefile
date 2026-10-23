@@ -6,7 +6,7 @@ DEMO_PORT ?= 4180
 MANIFEST := server/Cargo.toml
 TARGET ?= $(shell rustc -vV | sed -n 's/^host: //p')
 
-.PHONY: build debug run check test test-web package demo demo-serve clean help
+.PHONY: build debug run check test test-web package demo demo-serve desktop desktop-package desktop-test clean help
 
 build:
 	$(CARGO) build --locked --release --manifest-path $(MANIFEST) --target $(TARGET)
@@ -26,6 +26,15 @@ test:
 test-web:
 	npm test
 
+desktop:
+	$(PYTHON) scripts/desktop.py dev -- $(ARGS)
+
+desktop-package:
+	$(PYTHON) scripts/desktop.py --target $(TARGET) build
+
+desktop-test:
+	$(PYTHON) scripts/desktop.py test
+
 package: build
 	$(PYTHON) scripts/release.py package --target "$(TARGET)"
 
@@ -40,5 +49,5 @@ clean:
 	rm -rf dist
 
 help:
-	@echo "make [build|debug|run|check|test|package|demo|demo-serve|clean]"
+	@echo "make [build|debug|run|check|test|package|demo|demo-serve|desktop|desktop-package|desktop-test|clean]"
 	@echo "Override TARGET for a Rust target; pass ARGS to make run."

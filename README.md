@@ -181,6 +181,8 @@ python3 samples/scripts/api_demo.py  # 验证应用检索范围与解密权限
 
 ## 构建与运行
 
+项目新增 Tauri 桌面入口，可用 `make desktop` 启动、`make desktop-package` 生成本机应用包。桌面版复用完整工作台，提供原生保存与复制、单实例和退出清理，默认使用独立的系统应用数据目录。构建依赖、打开已有保险库、平台状态与验证方法见 [桌面版说明](docs/DESKTOP.md)。
+
 需要 Rust stable（支持 edition 2024）、C/C++ 编译工具及 Perl；SQLCipher 与 OpenSSL 从源码构建。使用 `make` 命令需要 Make，打包还需要 Python 3。当前发布支持下表中的 Linux 和 macOS 平台。
 
 ```sh

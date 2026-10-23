@@ -1,0 +1,52 @@
+name: Desktop Preview
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install tools
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          npm ci
+      - name: Web regression tests
+        run: npm test
+      - name: Server tests
+        run: cargo test --locked --manifest-path server/Cargo.toml
+      - name: Prepare bundled service
+        run: python3 scripts/desktop.py prepare --target ${{ matrix.target }}
+      - name: Desktop tests
+        run: cargo test --locked --manifest-path desktop/Cargo.toml
+      - name: Service lifecycle checks
+        run: python3 scripts/smoke_desktop.py --binary desktop/binaries/securevault-${{ matrix.target }}
+      - name: Build app
+        run: python3 scripts/desktop.py build --target ${{ matrix.target }}
+      - name: Archive app preserving bundle metadata
+        run: ditto -c -k --sequesterRsrc --keepParent desktop/target/${{ matrix.target }}/release/bundle/macos/SecureVault.app SecureVault-${{ matrix.target }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SecureVault-desktop-${{ matrix.target }}
+          path: SecureVault-${{ matrix.target }}.zip
+          if-no-files-found: error

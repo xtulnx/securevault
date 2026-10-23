@@ -13,6 +13,13 @@
     <div class="ambient ambient-two"></div>
     <div id="app" class="app-shell is-sealed">
       <div id="toast-region" class="toast-region" aria-live="polite"></div>
+      <dialog id="desktop-directory-dialog" class="transfer-dialog" aria-labelledby="desktop-directory-title">
+        <header><h3 id="desktop-directory-title">保险库与数据目录</h3><button id="desktop-directory-close" class="icon-button" type="button" aria-label="关闭数据目录">×</button></header>
+        <p>当前数据目录</p><p id="desktop-current-directory" class="desktop-current-directory"></p>
+        <p>选择已有保险库，或切换到空文件夹后创建新保险库。原目录和数据会保留，不会移动或覆盖。</p>
+        <p id="desktop-directory-error" role="alert" hidden></p>
+        <div class="dialog-actions"><button class="secondary-button" type="button" data-desktop-open>打开已有保险库…</button><button id="desktop-directory-switch" class="primary-button" type="button">切换数据目录…</button></div>
+      </dialog>
 
       <button id="sealed-theme-toggle" class="ghost-button sealed-theme-toggle" type="button" title="切换浅色/暗色主题"><span aria-hidden="true">☾</span> <b>暗色</b></button>
       <section id="sealed-screen" class="sealed-screen" aria-label="封印状态">
@@ -31,6 +38,7 @@
           <button class="primary-button unlock-button" type="submit" disabled><span class="button-icon">↗</span> 解锁数据空间</button>
           <div class="sealed-meta"><span data-service-status="checking" role="status"><i class="status-dot"></i> <span data-service-status-label>正在检测服务…</span></span><span>Argon2id · AES-256-GCM</span></div>
           <p id="vault-mode-note" class="demo-note">主密码用于解封数据密钥，不会保存明文。</p>
+          <div class="desktop-directory-actions" data-desktop-only hidden><button class="secondary-button" type="button" data-desktop-open>打开已有保险库…</button><button class="clear-button" type="button" data-desktop-directory>数据目录…</button></div>
         </form>
       </section>
 
@@ -39,6 +47,7 @@
         <header class="topbar">
           <div class="brand-lockup"><div class="brand-icon">S<span>V</span></div><div><strong>SecureVault</strong><small id="workspace-label">检索</small></div></div>
           <div class="topbar-actions">
+            <button class="ghost-button" type="button" data-desktop-only data-desktop-directory hidden>数据目录…</button>
             <div class="session-pill"><i class="status-dot"></i><span>已解锁</span><b id="idle-countdown" hidden></b></div>
             <button id="theme-toggle" class="ghost-button" title="切换浅色/暗色主题"><span>☼</span> <b>主题</b></button><button id="lock-button" class="ghost-button" title="立即封印"><span>⌁</span> 立即封印</button>
           </div>
