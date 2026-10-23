@@ -492,6 +492,7 @@ mod tests {
         assert!(app_route(&Method::POST, "/supplement/sup_1/secrets/reveal"));
         assert!(app_route(&Method::POST, "/records/rec_1/secrets/reveal"));
         for (method, path) in [
+            (Method::POST, "/imports/text"),
             (Method::POST, "/imports/batch/samples"),
             (Method::POST, "/records/import/report"),
             (Method::POST, "/datasets/transfer/report"),

@@ -813,7 +813,7 @@ function openDatasetEdit(datasetId) {
 }
 
 function renderDatasetManager() {
-  $("#dataset-manager-list").innerHTML = state.datasets.map((dataset) => `<div class="dataset-manager-row"><div><strong>${escapeHtml(dataset.category_path)}</strong><span>${dataset.environment ? `环境：${escapeHtml(dataset.environment)}` : "无环境标签"} · ${dataset.record_count} 条记录 · ${dataset.fields.length} 个字段 · KEY ${dataset.identity_fields.length ? escapeHtml(dataset.identity_fields.join(" + ")) : "未设置"}</span></div><div class="row-actions"><div class="dataset-download"><button class="secondary-button dataset-download-toggle" aria-expanded="false" aria-controls="download-${escapeHtml(dataset.id)}"><span aria-hidden="true">⤓</span> 下载 <span aria-hidden="true">▾</span></button><div id="download-${escapeHtml(dataset.id)}" class="dataset-download-menu" hidden><span class="download-menu-label">选择下载格式</span>${["json", "csv", "xlsx"].map((format) => `<button class="dataset-export-button" data-format="${format}" data-dataset-id="${escapeHtml(dataset.id)}">${format.toUpperCase()}</button>`).join("")}</div></div><button class="secondary-button dataset-view-button" data-dataset-id="${escapeHtml(dataset.id)}">查看</button><button class="secondary-button dataset-supplement-button" data-dataset-id="${escapeHtml(dataset.id)}">附表</button><button class="secondary-button dataset-new-record-button" data-dataset-id="${escapeHtml(dataset.id)}">新增记录</button><button class="secondary-button dataset-edit-button" data-dataset-id="${escapeHtml(dataset.id)}">编辑</button></div></div>`).join("") || '<p class="detail-empty">暂无数据集</p>';
+  $("#dataset-manager-list").innerHTML = state.datasets.map((dataset) => `<div class="dataset-manager-row"><div><strong>${escapeHtml(dataset.category_path)}</strong><span>${dataset.environment ? `环境：${escapeHtml(dataset.environment)}` : "无环境标签"} · ${dataset.record_count} 条记录 · ${dataset.fields.length} 个字段 · KEY ${dataset.identity_fields.length ? escapeHtml(dataset.identity_fields.join(" + ")) : "未设置"}</span></div><div class="row-actions"><div class="dataset-download"><button class="secondary-button dataset-download-toggle" aria-expanded="false" aria-controls="download-${escapeHtml(dataset.id)}"><span aria-hidden="true">⤓</span> 下载 <span aria-hidden="true">▾</span></button><div id="download-${escapeHtml(dataset.id)}" class="dataset-download-menu" hidden><span class="download-menu-label">选择下载格式</span>${["json", "jsonl", "csv", "xlsx", "yaml", "yml", "toml"].map((format) => `<button class="dataset-export-button" data-format="${format}" data-dataset-id="${escapeHtml(dataset.id)}">${format.toUpperCase()}</button>`).join("")}</div></div><button class="secondary-button dataset-view-button" data-dataset-id="${escapeHtml(dataset.id)}">查看</button><button class="secondary-button dataset-supplement-button" data-dataset-id="${escapeHtml(dataset.id)}">附表</button><button class="secondary-button dataset-new-record-button" data-dataset-id="${escapeHtml(dataset.id)}">新增记录</button><button class="secondary-button dataset-edit-button" data-dataset-id="${escapeHtml(dataset.id)}">编辑</button></div></div>`).join("") || '<p class="detail-empty">暂无数据集</p>';
   $$(".dataset-view-button").forEach((button) => button.addEventListener("click", () => openDatasetInfo(button.dataset.datasetId)));
   $$(".dataset-supplement-button").forEach((button) => button.addEventListener("click", () => openSupplement(button.dataset.datasetId)));
   $$(".dataset-new-record-button").forEach((button) => button.addEventListener("click", () => openManualRecord("main", button.dataset.datasetId)));
@@ -851,7 +851,7 @@ function openDatasetInfo(datasetId) {
 
 async function exportDataset(datasetId, format = "json", includeSecrets = false) {
   try {
-    const response = await fetch(`/api/datasets/${encodeURIComponent(datasetId)}/export?format=${format}&include_secrets=${includeSecrets}`, { headers: { Accept: format === "xlsx" ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" : format === "csv" ? "text/csv" : "application/json" } });
+    const response = await fetch(`/api/datasets/${encodeURIComponent(datasetId)}/export?format=${format}&include_secrets=${includeSecrets}`, { headers: { Accept: format === "xlsx" ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" : format === "csv" ? "text/csv" : format === "jsonl" ? "application/x-ndjson" : ["yaml", "yml"].includes(format) ? "application/yaml" : format === "toml" ? "application/toml" : "application/json" } });
     if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error || `导出失败 (${response.status})`); }
     const blob = await response.blob();
     if (!await saveDownload(blob, `securevault-${datasetId}.${format}`)) return;
@@ -1130,16 +1130,21 @@ async function importFile(file, isCurrent = () => state.unlocked) {
     if (!datasetId) throw new Error("请先创建一个数据集");
     const form = new FormData(); form.append("file", file);
     const response = await fetch("/api/imports/upload", { method: "POST", body: form });
-    const batch = await response.json();
     if (!isCurrent()) return;
-    if (!response.ok) throw new Error(batch.error || `上传失败 (${response.status})`);
+    const batch = await transferResponse(response, '上传失败', true, isCurrent);
+    if (!isCurrent()) return;
+    await configureImportBatch(batch, datasetId, isCurrent);
+  } catch (error) { if (isCurrent()) showToast(error.message || "文件无法解析", "error"); }
+}
+
+async function configureImportBatch(batch, datasetId, isCurrent = () => state.unlocked) {
     const existingDataset = state.datasets.find((item) => item.id === datasetId);
     if ($("#delete-missing").checked && !existingDataset?.identity_fields?.length) throw new Error("该数据集尚未配置逻辑唯一 KEY，不能按批次删除旧记录");
-    state.pendingBatchId = batch.batch_id;
-    $("#batch-summary").textContent = `${batch.filename} · ${batch.record_count} 条 · ${batch.source_fields.length} 个源字段`;
     const dataset = state.datasets.find((item) => item.id === datasetId);
     const templateResult = await api(`/datasets/${encodeURIComponent(datasetId)}/templates`);
     if (!isCurrent()) return;
+    state.pendingBatchId = batch.batch_id;
+    $("#batch-summary").textContent = `${batch.filename} · ${batch.record_count} 条 · ${batch.source_fields.length} 个源字段`;
     state.importTemplates = templateResult.templates;
     state.currentBatchSources = batch.source_fields;
     $("#mapping-template-select").innerHTML = `<option value="">不使用已保存模板</option>${state.importTemplates.map((template, index) => `<option value="${index}">${escapeHtml(template.name)}</option>`).join("")}`;
@@ -1158,7 +1163,6 @@ async function importFile(file, isCurrent = () => state.unlocked) {
     }
     $("#batch-options").hidden = false; $("#batch-summary").hidden = false;
     $("#import-file").value = "";
-  } catch (error) { if (isCurrent()) showToast(error.message || "文件无法解析", "error"); }
 }
 
 function renderMappings(sourceFields, targetFields, autoSelect = false, templateMappings = []) {

@@ -1157,6 +1157,8 @@ renderDetailSecrets = function() {
 function openExport(id) {
   const dataset = state.datasets.find(item => item.id === id);
   if (!dataset) return;
+  clearExportText();
+  $('input[name="export-destination"][value="file"]').checked = true;
   state.exportDatasetId = id;
   $('#export-target').textContent = `${datasetLocator(dataset)} · ${datasetLabelText(dataset)}`;
   $('#export-with-secrets').checked = false; $('#export-supplements').checked = false; $('#export-templates').checked = false;
@@ -1168,33 +1170,181 @@ function openExport(id) {
 
 function updateExportOptions() {
   const content = $('input[name="export-content"]:checked').value;
+  const textOutput = $('input[name="export-destination"]:checked').value === 'text';
+  $('#export-format option[value="xlsx"]').disabled = textOutput;
+  if (textOutput && $('#export-format').value === 'xlsx') $('#export-format').value = 'json';
   $('#export-format').disabled = content !== 'data';
   if (content !== 'data') $('#export-format').value = 'json';
   $('#export-secret-wrap').hidden = content === 'schema';
   $('#export-record-scope-wrap').hidden = content === 'schema';
   $('#export-supplement-wrap').hidden = content !== 'package';
   $('#export-template-wrap').hidden = content === 'data';
-  $('#export-content-note').textContent = { schema: '包含字段用途、唯一 KEY、描述、展示规则及附表结构，不含记录值。', data: '只导出记录，JSON / CSV / XLSX 不携带完整结构。', package: '原生数据集包可同时迁移结构与记录。未导出的机密值会保留缺省状态。' }[content];
+  $('#export-content-note').textContent = { schema: '包含字段用途、唯一 KEY、描述、展示规则及附表结构，不含记录值。', data: '只导出记录，不携带完整结构。', package: '原生数据集包可同时迁移结构与记录。未导出的机密值会保留缺省状态。' }[content]
+    + (textOutput ? ' 生成的文本可全选、复制，最多展示 2 MiB；XLSX 需下载文件。' : '')
+    + ($('#export-format').value === 'toml' ? ' TOML 使用 [[records]]，不支持 null 或超出 64 位有符号范围的整数。' : '');
   $('#confirm-export').textContent = content === 'schema' ? '导出结构' : content === 'package' ? '导出结构与数据' : $('#export-with-secrets').checked ? '导出含机密的数据' : '导出数据';
+  if (textOutput) $('#confirm-export').textContent = $('#export-with-secrets').checked && content !== 'schema' ? '生成含机密的文本' : '生成文本';
+}
+
+async function transferResponse(response, fallback, readJson = true, current = () => state.unlocked) {
+  if (response.ok) return readJson ? response.json() : response;
+  const body = await response.json().catch(() => ({}));
+  if (current() && (response.status === 401 || response.status === 423)) await sealVault('会话已失效，请重新解锁', false);
+  throw new Error(body.error || (response.status === 413 ? '内容超过请求大小限制，请缩小批次后重试' : `${fallback} (${response.status})`));
+}
+
+async function readExportText(response, current) {
+  const limit = 2 * 1024 * 1024;
+  const tooLarge = () => new Error('文本超过 2 MiB 展示上限，请缩小数据范围或选择下载文件');
+  if (!response.body?.getReader) {
+    const text = await response.text();
+    if (new Blob([text]).size > limit) throw tooLarge();
+    return text;
+  }
+  const reader = response.body.getReader(), chunks = [];
+  let size = 0, complete = false;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (!current()) return '';
+      if (done) { complete = true; break; }
+      size += value.byteLength;
+      if (size > limit) throw tooLarge();
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } finally {
+    if (!complete) await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
 }
 
 async function downloadExport() {
   const id = state.exportDatasetId;
   if (!id || state.exportBusy) return;
+  const generation = state.exportRequest = (state.exportRequest || 0) + 1, epoch = state.sessionEpoch;
+  const current = () => state.unlocked && state.sessionEpoch === epoch && state.exportDatasetId === id && state.exportRequest === generation;
+  const controller = new AbortController(); state.exportController = controller;
+  const textOutput = $('input[name="export-destination"]:checked').value === 'text';
+  $('#export-error').hidden = true;
+  $('#export-text').value = ''; $('#export-text-result').hidden = true;
   state.exportBusy = true; $('#confirm-export').disabled = true;
   const content = $('input[name="export-content"]:checked').value;
   const format = content === 'data' ? $('#export-format').value : 'json';
   const params = new URLSearchParams({ content, format, include_expired: String($('#export-record-scope').value === 'all'), include_secrets: String(content !== 'schema' && $('#export-with-secrets').checked), include_templates: String(content !== 'data' && $('#export-templates').checked), include_supplements: String(content === 'package' && $('#export-supplements').checked) });
   try {
-    const response = await fetch(`/api/datasets/${encodeURIComponent(id)}/export?${params}`);
-    if (!response.ok) { const body = await response.json(); throw new Error(body.error || '导出失败'); }
+    const response = await fetch(`/api/datasets/${encodeURIComponent(id)}/export?${params}`, { signal: controller.signal });
+    if (!current()) return;
+    await transferResponse(response, '导出失败', false, current);
+    if (textOutput) {
+      const text = await readExportText(response, current);
+      if (!current()) return;
+      const size = new Blob([text]).size;
+      if (size > 2 * 1024 * 1024) throw new Error('文本超过 2 MiB 展示上限，请缩小数据范围或选择下载文件');
+      $('#export-text').value = text;
+      $('#export-text-summary').textContent = `${format.toUpperCase()} · ${text.length.toLocaleString()} 字符 · ${(size / 1024).toFixed(1)} KiB${params.get('include_secrets') === 'true' ? ' · 包含机密字段' : ''}${text ? '' : ' · 当前范围无记录'}`;
+      $('#export-copy-status').textContent = '';
+      $('#export-text-result').hidden = false;
+      $('#export-text').focus();
+      return;
+    }
     const blob = await response.blob();
-    if (!state.unlocked || state.exportDatasetId !== id) return;
+    if (!current()) return;
     if (!await saveDownload(blob, `securevault-${id}${content === 'schema' ? '.schema' : content === 'package' ? '.dataset' : ''}.${format}`)) return;
+    if (!current()) return;
     $('#export-modal').close(); $('#export-with-secrets').checked = false; state.exportDatasetId = null;
     showToast('数据集已导出', 'success');
-  } catch (error) { $('#export-error').textContent = error.message; $('#export-error').hidden = false; }
-  finally { state.exportBusy = false; $('#confirm-export').disabled = false; }
+  } catch (error) { if (current()) { $('#export-error').textContent = error.message; $('#export-error').hidden = false; } }
+  finally { if (current()) { state.exportBusy = false; state.exportController = null; $('#confirm-export').disabled = false; } }
+}
+
+function clearExportText() {
+  state.exportController?.abort(); state.exportController = null;
+  state.exportRequest = (state.exportRequest || 0) + 1;
+  state.exportBusy = false;
+  $('#confirm-export').disabled = false;
+  $('#export-text').value = ''; $('#export-text-result').hidden = true;
+  $('#export-text-summary').textContent = ''; $('#export-copy-status').textContent = '';
+  $('#export-error').hidden = true; $('#export-error').textContent = '';
+}
+
+async function copyExportText() {
+  if (!state.unlocked || $('#export-text-result').hidden) return;
+  const request = state.exportRequest, epoch = state.sessionEpoch;
+  try {
+    await copyText($('#export-text').value);
+    if (state.unlocked && request === state.exportRequest && epoch === state.sessionEpoch) $('#export-copy-status').textContent = '已复制全部文本';
+  } catch {
+    if (state.unlocked && request === state.exportRequest && epoch === state.sessionEpoch) {
+      $('#export-copy-status').textContent = '无法访问剪贴板，已全选文本，请手动复制';
+      $('#export-text').focus(); $('#export-text').select();
+    }
+  }
+}
+
+function clearImportText() {
+  $('#import-text').value = ''; $('#import-text-format').value = 'auto';
+  $('#import-text-error').hidden = true; $('#import-text-error').textContent = '';
+  updateImportTextCount();
+}
+
+function updateImportTextCount() {
+  const text = $('#import-text').value, bytes = new Blob([text]).size;
+  $('#import-text-count').textContent = `${text.length.toLocaleString()} 字符 · ${text ? text.split('\n').length.toLocaleString() : 0} 行 · ${(bytes / 1024).toFixed(1)} / 1024 KiB`;
+  $('#parse-import-text').disabled = !text.trim() || bytes > 1024 * 1024 || state.importLoading || state.importBusy;
+  $('#parse-import-text').textContent = state.pendingBatchId || state.transferPackage ? '重新解析文本' : '解析文本';
+}
+
+function renderImportSource() {
+  const text = $('input[name="import-source"]:checked').value === 'text';
+  $('#import-source-switch').hidden = state.importStep === 3;
+  $('#import-text-panel').hidden = !text || state.importStep === 3;
+  $('#choose-file').hidden = text;
+  $('.import-file-row').hidden = state.importStep === 3 || (text && !state.pendingBatchId && !state.transferPackage);
+  updateImportTextCount();
+}
+
+function invalidateImportText() {
+  if (state.pendingBatchId || state.transferPackage || state.importPreview || state.importLoading) resetImport(true);
+  $('#import-text-error').hidden = true;
+  updateImportTextCount();
+}
+
+async function parseImportText() {
+  if (!state.unlocked || state.importLoading || state.importBusy) return;
+  const text = $('#import-text').value, format = $('#import-text-format').value;
+  resetImport(true);
+  const generation = state.importRequest, epoch = state.sessionEpoch;
+  const current = () => state.unlocked && generation === state.importRequest && epoch === state.sessionEpoch;
+  state.importLoading = true; setFormBusy($('#import-modal'), true);
+  $('#import-text-error').hidden = true;
+  try {
+    if (!text.trim()) throw new Error('请先粘贴需要导入的文本');
+    if (new Blob([text]).size > 1024 * 1024) throw new Error('粘贴文本最多支持 1 MiB，请缩小批次或使用文件导入');
+    if (['auto', 'json'].includes(format)) {
+      let native = false;
+      try { native = JSON.parse(text.replace(/^\uFEFF/, ''))?.format === 'securevault-dataset'; } catch {}
+      if (native && loadNativeText(text, '粘贴文本 · JSON 数据集包')) return;
+    }
+    const datasetId = $('#import-dataset-select').value;
+    if (!datasetId) throw new Error('请先创建或选择目标数据集');
+    const batch = await api('/imports/text', { method: 'POST', body: JSON.stringify({ text, format }) });
+    if (!current()) return;
+    await configureImportBatch(batch, datasetId, current);
+    if (!current()) return;
+    $('#batch-summary').textContent = `粘贴文本 · ${batch.format.toUpperCase()} · ${batch.record_count} 条 · ${batch.source_fields.length} 个源字段`;
+    labelSchemaControls($('#first-schema-fields')); setImportStep(2);
+  } catch (error) {
+    if (current()) {
+      state.pendingBatchId = null; state.transferPackage = null; state.transferRaw = null; setImportStep(1);
+      $('#import-text-error').textContent = error.message; $('#import-text-error').hidden = false; $('#import-text-error').focus();
+    }
+  } finally {
+    if (current()) { state.importLoading = false; setFormBusy($('#import-modal'), false); updateImportTextCount(); }
+  }
 }
 
 function clearImportSamples() {
@@ -1314,14 +1464,16 @@ function setImportStep(step) {
   $('#ordinary-import-target').hidden = Boolean(state.transferPackage) || step === 3;
   $('#native-import-target').hidden = !state.transferPackage || step === 3;
   $('.import-file-row').hidden = step === 3;
+  renderImportSource();
   renderImportContext();
 }
 
 function hasImportDraft() {
-  return Boolean(state.pendingBatchId || state.transferPackage || state.importPreview);
+  return Boolean(state.pendingBatchId || state.transferPackage || state.importPreview || $('#import-text').value);
 }
 
-function resetImport() {
+function resetImport(preserveText = false) {
+  if (!preserveText) clearImportText();
   clearImportDiagnostics(); clearImportSamples();
   state.importRequest++;
   state.importLoading = false; state.importBusy = false;
@@ -1356,6 +1508,23 @@ openImport = function(id = null) {
   reloadReferenceCatalog();
 };
 
+function loadNativeText(raw, label) {
+  raw = raw.replace(/^\uFEFF/, '');
+  const parsed = JSON.parse(raw);
+  if (parsed?.format !== 'securevault-dataset') return false;
+  if (parsed.version !== 1 || !['schema', 'package'].includes(parsed.mode) || !parsed.schema || !Array.isArray(parsed.schema.fields) || (parsed.schema.supplement_fields !== undefined && !Array.isArray(parsed.schema.supplement_fields)) || (parsed.records !== undefined && !Array.isArray(parsed.records))) throw new Error('不支持的数据集文件版本或结构');
+  state.transferPackage = parsed; state.transferRaw = raw;
+  $('#transfer-skip').closest('label').hidden = parsed.mode === 'schema';
+  $('#batch-summary').hidden = false;
+  $('#batch-summary').textContent = `${label} · ${parsed.mode === 'schema' ? '仅结构' : '结构与数据'} · ${parsed.records?.length || 0} 条记录`;
+  $('#transfer-target').innerHTML = '<option value="">新建数据集</option>' + state.datasets.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(datasetLocator(item))} · ${escapeHtml(datasetLabelText(item))}</option>`).join('');
+  $('#transfer-category').value = parsed.schema.category_path || '';
+  state.transferEnvironmentDraft = [...datasetLabels(fileDatasetReference())]; renderTransferEnvironmentDraft();
+  $('#transfer-schema-preview').innerHTML = `<h4>结构预览</h4>${parsed.schema.name ? `<p>数据集名称：${escapeHtml(parsed.schema.name)}</p>` : ''}<div class="model-information">${modelFieldsOverview(parsed.schema)}</div>`;
+  if (parsed.templates?.length) $('#transfer-schema-preview').insertAdjacentHTML('beforeend', `<details class="transfer-templates"><summary>映射模板 · ${parsed.templates.length} 个</summary>${parsed.templates.map((template, index) => `<label>导入模板名称<input data-transfer-template-name="${index}" value="${escapeHtml(template.name)}" /></label>`).join('')}<p>若名称与已有模板冲突，可在这里修改，不影响记录值。</p></details>`);
+  setImportStep(2); return true;
+}
+
 importFile = async function(file) {
   if (!file || !confirmDiscardChanges(hasImportDraft(), '导入配置', state.importBusy || state.importLoading)) return;
   resetImport();
@@ -1367,21 +1536,9 @@ importFile = async function(file) {
       try {
         const raw = await file.text();
         if (!current()) return;
-        const parsed = JSON.parse(raw);
-        if (parsed?.format === 'securevault-dataset') {
-          if (parsed.version !== 1 || !['schema', 'package'].includes(parsed.mode) || !parsed.schema || !Array.isArray(parsed.schema.fields) || (parsed.schema.supplement_fields !== undefined && !Array.isArray(parsed.schema.supplement_fields)) || (parsed.records !== undefined && !Array.isArray(parsed.records))) throw new Error('不支持的数据集文件版本或结构');
-          state.transferPackage = parsed; state.transferRaw = raw;
-          $('#transfer-skip').closest('label').hidden = parsed.mode === 'schema';
-          $('#batch-summary').hidden = false;
-          $('#batch-summary').textContent = `${file.name} · ${parsed.mode === 'schema' ? '仅结构' : '结构与数据'} · ${parsed.records?.length || 0} 条记录`;
-          $('#transfer-target').innerHTML = '<option value="">新建数据集</option>' + state.datasets.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(datasetLocator(item))} · ${escapeHtml(datasetLabelText(item))}</option>`).join('');
-          $('#transfer-category').value = parsed.schema.category_path || '';
-          state.transferEnvironmentDraft = [...datasetLabels(fileDatasetReference())]; renderTransferEnvironmentDraft();
-          $('#transfer-schema-preview').innerHTML = `<h4>结构预览</h4>${parsed.schema.name ? `<p>数据集名称：${escapeHtml(parsed.schema.name)}</p>` : ''}<div class="model-information">${modelFieldsOverview(parsed.schema)}</div>`;
-          if (parsed.templates?.length) $('#transfer-schema-preview').insertAdjacentHTML('beforeend', `<details class="transfer-templates"><summary>映射模板 · ${parsed.templates.length} 个</summary>${parsed.templates.map((template, index) => `<label>导入模板名称<input data-transfer-template-name="${index}" value="${escapeHtml(template.name)}" /></label>`).join('')}<p>若名称与已有模板冲突，可在这里修改，不影响记录值。</p></details>`);
-          setImportStep(2); return;
-        }
+        if (loadNativeText(raw, file.name)) return;
       } catch (error) {
+        if (!current()) return;
         if (state.transferPackage || /不支持/.test(error.message)) { resetImport(); showToast(error.message, 'error'); return; }
         // The ordinary uploader supplies precise JSON validation errors.
       }
@@ -1584,6 +1741,7 @@ async function confirmImport() {
     $('#import-finish').addEventListener('click', () => openManagedDataset(pending.transfer ? result.dataset_id : pending.request.dataset_id, 'basic'));
     clearImportDiagnostics(); clearImportSamples();
     state.pendingBatchId = null; state.transferPackage = null; state.transferRaw = null; state.importPreview = null;
+    clearImportText();
     $('#import-context').hidden = true;
   } catch (error) { if (current()) { $('#import-action-error').textContent = error.message; $('#import-action-error').hidden = false; } }
   finally {
@@ -1675,7 +1833,7 @@ function closeTopOverlay() {
 }
 
 sealVault = async function(...args) {
-  clearImportDiagnostics(); clearImportSamples();
+  clearImportDiagnostics(); clearImportSamples(); clearImportText(); clearExportText();
   if (typeof clearSearchTools === 'function') clearSearchTools();
   clearCopyFeedback();
   clearTimeout(state.searchTimer); state.searchController?.abort(); state.searchController = null; state.searchComposing = false; state.searchOutcome = null;
@@ -1731,17 +1889,31 @@ for (const id of ['close-description', 'cancel-description']) $(`#${id}`).addEve
 $('#description-edit-modal').addEventListener('cancel', event => { event.preventDefault(); closeDescription(); });
 $('#confirm-export').addEventListener('click', downloadExport);
 for (const id of ['close-export', 'cancel-export']) $(`#${id}`).addEventListener('click', () => $('#export-modal').close());
-$$('input[name="export-content"], #export-with-secrets').forEach(input => input.addEventListener('change', updateExportOptions));
-$('#export-modal').addEventListener('close', () => { $('#export-with-secrets').checked = false; state.exportDatasetId = null; });
+$('#export-modal').addEventListener('change', () => { clearExportText(); updateExportOptions(); });
+$('#export-modal').addEventListener('close', () => { clearExportText(); $('#export-with-secrets').checked = false; state.exportDatasetId = null; });
+$('#copy-export-text').addEventListener('click', copyExportText);
+$('#select-export-text').addEventListener('click', () => { $('#export-text').focus(); $('#export-text').select(); });
+$('#clear-export-text').addEventListener('click', clearExportText);
+$('#parse-import-text').addEventListener('click', parseImportText);
+$('#import-text').addEventListener('input', invalidateImportText);
+$('#import-text-format').addEventListener('change', invalidateImportText);
+$('#clear-import-text').addEventListener('click', () => resetImport());
+$$('input[name="import-source"]').forEach(input => input.addEventListener('change', () => {
+  const previous = state.importSource || 'file';
+  if (!confirmDiscardChanges(Boolean(state.pendingBatchId || state.transferPackage), '导入配置', state.importBusy || state.importLoading)) {
+    $(`input[name="import-source"][value="${previous}"]`).checked = true; return;
+  }
+  state.importSource = input.value; resetImport(true); renderImportSource();
+}));
 $('#transfer-options').before($('#import-config-error'));
 $('#preview-transfer').addEventListener('click', () => commitImport());
 $('#confirm-import').addEventListener('click', confirmImport);
 $('#import-back').addEventListener('click', () => { state.importPreview = null; setImportStep(2); });
 $('#import-dataset-select').addEventListener('change', event => {
-  if (!confirmDiscardChanges(hasImportDraft(), '导入配置', state.importBusy || state.importLoading)) {
+  if (!confirmDiscardChanges(Boolean(state.pendingBatchId || state.transferPackage || state.importPreview), '导入配置', state.importBusy || state.importLoading)) {
     event.target.value = state.importTarget || ''; return;
   }
-  resetImport();
+  resetImport(true);
 });
 $('#first-schema-fields').addEventListener('change', () => { if ($('#mapping-summary')) updateMappingSummary(); });
 $('#transfer-target').addEventListener('change', event => {

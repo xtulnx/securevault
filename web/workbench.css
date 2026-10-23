@@ -1607,3 +1607,29 @@ dialog.description-dialog { margin: auto; padding: 0; }
 .brand-caption { display: flex; align-items: baseline; gap: 8px; }
 .desktop-version { color: var(--muted); font-size: 12px; font-weight: 400; line-height: 1.5; }
 .sealed-version { margin: 18px 0 0; }
+
+/* Text interchange shares the existing mapping and confirmation workbench. */
+.transfer-textarea {
+  display: block; box-sizing: border-box; width: 100%; min-width: 0;
+  min-height: 240px; height: 34vh; max-height: 65vh; resize: vertical;
+  padding: 14px; border: 1px solid var(--line-strong); border-radius: 8px;
+  background: var(--bg-2); color: var(--ink); font: 13px/1.65 ui-monospace, SFMono-Regular, Consolas, monospace;
+  tab-size: 2; overflow: auto;
+}
+.transfer-textarea:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.transfer-text-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 12px 0; }
+#import-text-panel > label, #export-text-result > label { display: block; margin: 14px 0 8px; color: var(--muted); font-size: 12px; }
+#import-text-format { max-width: 320px; }
+#import-text-count, #export-text-summary, #export-copy-status { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+#import-source-switch { margin: 16px 0; border: 0; padding: 0; }
+#import-source-switch legend { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+.import-workbench #import-source-switch input[type=radio] { width: 16px; height: 16px; min-height: 0; flex: 0 0 16px; margin: 0; padding: 0; }
+#import-source-switch .segmented-options { max-width: 400px; }
+#import-source-switch label { white-space: nowrap; justify-content: center; }
+#import-text-panel[hidden], #export-text-result[hidden], #choose-file[hidden] { display: none; }
+#import-text-panel:not([hidden]) ~ .import-file-row { grid-template-columns: minmax(0, 1fr); }
+#export-modal:has(input[name="export-destination"][value="text"]:checked) { width: min(960px, calc(100vw - 32px)); max-width: 960px; }
+@media (max-width: 760px) {
+  .transfer-textarea { min-height: 200px; font-size: 12px; }
+  .transfer-text-actions > button { flex: 1 1 auto; }
+}

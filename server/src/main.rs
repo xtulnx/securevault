@@ -36,6 +36,7 @@ mod supplement;
 mod search_rank;
 mod transfer;
 mod import_diagnostics;
+mod record_formats;
 mod security;
 mod authorization_events;
 mod client;
@@ -657,6 +658,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .route("/datasets/tree", get(dataset_tree))
         .route("/vault/summary", get(vault_summary))
         .route("/imports/upload", post(upload_import))
+        .route("/imports/text", post(record_formats::import_text).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)))
         .route("/imports/{id}/samples", post(import_diagnostics::samples))
         .route("/records/import/report", post(import_diagnostics::report))
         .route("/records/import", post(import_records))
@@ -916,7 +918,7 @@ fn flatten_fields(value: &Value, prefix: &str, output: &mut Vec<(String, Value)>
             } else {
                 format!("{prefix}.{key}")
             };
-            if nested.is_object() {
+            if nested.as_object().is_some_and(|object| !object.is_empty()) {
                 flatten_fields(nested, &path, output);
             } else {
                 output.push((path, nested.clone()));
@@ -1685,7 +1687,7 @@ async fn export_dataset(
         return transfer::export(state, dataset_id, query, headers).await;
     }
     let format = query.format.as_deref().unwrap_or("json");
-    if !matches!(format, "json" | "csv" | "xlsx") { return Err(bad_request("export format must be json, csv or xlsx")); }
+    if !matches!(format, "json" | "jsonl" | "csv" | "xlsx" | "yaml" | "yml" | "toml") { return Err(bad_request("export format must be json, jsonl, csv, xlsx, yaml, yml or toml")); }
     with_connection(&state, |connection, keys| {
         authorize_app_dataset(connection, &headers, &dataset_id, if query.include_secrets { "secrets" } else { "search" })?;
         let exists: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM datasets WHERE id=?1)", [&dataset_id], |row| row.get(0)).map_err(internal)?;
@@ -1716,7 +1718,7 @@ async fn export_dataset(
             ("text/csv; charset=utf-8", writer.into_inner().map_err(internal)?)
         } else if format == "xlsx" {
             ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", export_xlsx(&records)?)
-        } else { ("application/json", serde_json::to_vec_pretty(&Value::Array(records)).map_err(internal)?) };
+        } else { record_formats::export(&records, format)? };
         connection.execute("INSERT INTO audit_events(event,record_id,field_name) VALUES('dataset_export',?1,?2)", params![dataset_id, if query.include_secrets { "with_secrets" } else { "without_secrets" }]).map_err(internal)?;
         let mut response = bytes.into_response();
         response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_str(content_type).map_err(internal)?);
@@ -1815,21 +1817,8 @@ fn parse_tabular(bytes: &[u8], filename: &str) -> ApiResult<Vec<Value>> {
         .next()
         .unwrap_or("")
         .to_ascii_lowercase();
-    if extension == "json" {
-        let value: Value =
-            serde_json::from_slice(bytes).map_err(|e| bad_request(format!("invalid JSON: {e}")))?;
-        let records = flatten_sample(&value);
-        if records.iter().any(|v| !v.is_object()) {
-            return Err(bad_request("JSON import must contain objects"));
-        }
-        return Ok(records
-            .into_iter()
-            .map(|record| {
-                let mut flattened = Vec::new();
-                flatten_fields(&record, "", &mut flattened);
-                Value::Object(flattened.into_iter().collect())
-            })
-            .collect());
+    if matches!(extension.as_str(), "json" | "jsonl" | "yaml" | "yml" | "toml") {
+        return record_formats::parse(bytes, &extension);
     }
     if bytes.starts_with(b"PK\x03\x04") {
         let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| bad_request("invalid XLSX archive"))?;
@@ -1841,7 +1830,7 @@ fn parse_tabular(bytes: &[u8], filename: &str) -> ApiResult<Vec<Value>> {
         }
     }
     let (headers, rows): (Vec<String>, Vec<Vec<String>>) = if extension == "csv" {
-        let mut reader = csv::ReaderBuilder::new().flexible(true).from_reader(bytes);
+        let mut reader = csv::ReaderBuilder::new().from_reader(bytes);
         let headers = reader
             .headers()
             .map_err(|e| bad_request(e.to_string()))?
@@ -1876,10 +1865,19 @@ fn parse_tabular(bytes: &[u8], filename: &str) -> ApiResult<Vec<Value>> {
             .collect();
         (headers, rows)
     } else {
-        return Err(bad_request("supported formats are JSON, CSV, and XLSX"));
+        return Err(bad_request("supported formats are JSON, JSONL, CSV, XLSX, YAML (YML), and TOML"));
     };
     if headers.is_empty() {
         return Err(bad_request("file has no header row"));
+    }
+    if headers.iter().any(|key| key.trim().is_empty()) {
+        return Err(bad_request("表头不能包含空字段名，请补全或删除空列"));
+    }
+    if headers.iter().collect::<std::collections::BTreeSet<_>>().len() != headers.len() {
+        return Err(bad_request("表头包含重复字段名，请修改后重新导入"));
+    }
+    if rows.iter().any(|row| row.iter().skip(headers.len()).any(|value| !value.is_empty())) {
+        return Err(bad_request("数据列超出表头范围，请补全字段名"));
     }
     Ok(rows
         .into_iter()
@@ -1925,16 +1923,21 @@ async fn upload_import(
     if bytes.is_empty() {
         return Err(bad_request("file is missing or empty"));
     }
+    stage_import(&state, || Ok((filename.clone(), parse_tabular(&bytes, &filename)?))).await
+}
+
+async fn stage_import(state: &AppState, parse: impl FnOnce() -> ApiResult<(String, Vec<Value>)>) -> ApiResult<Json<Value>> {
     let mut runtime = state.runtime.lock().await;
     if runtime.keys.is_none() {
         return Err(locked());
     }
     expire_runtime(&mut runtime);
     if runtime.keys.is_none() { return Err(locked()); }
-    let records = parse_tabular(&bytes, &filename)?;
+    let (filename, records) = parse()?;
     let id = Uuid::new_v4().simple().to_string();
     let count = records.len();
     let fields = records.iter().filter_map(Value::as_object).flat_map(|o| o.keys().cloned()).collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+    if count == 0 || fields.is_empty() { return Err(bad_request("未找到可导入的记录和字段，请检查内容")); }
     let mut batches = state.batches.lock().await;
     batches.retain(|_, batch| batch.session_id == runtime.session_id && batch.created.elapsed() < Duration::from_secs(3600));
     if count > 10000 { return Err(bad_request("import capacity exceeded (10000 rows per batch)")); }
