@@ -1604,3 +1604,6 @@ dialog.description-dialog { margin: auto; padding: 0; }
 .nav-button > .authorization-notice-dot:not([hidden]) { display: inline-block; }
 .desktop-directory-actions { display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap; }
 .desktop-current-directory { overflow-wrap: anywhere; user-select: text; }
+.brand-caption { display: flex; align-items: baseline; gap: 8px; }
+.desktop-version { color: var(--muted); font-size: 12px; font-weight: 400; line-height: 1.5; }
+.sealed-version { margin: 18px 0 0; }

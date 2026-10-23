@@ -7,6 +7,12 @@
     await waitFor(() => typeof state !== 'undefined' && state.workbenchReady && window.secureVaultRequestClose);
     if (!window.__SECUREVAULT_DESKTOP__ || typeof saveDownload !== 'function') throw new Error('桌面桥接未加载');
     if ([...document.querySelectorAll('[data-desktop-only]')].some(element => element.hidden)) throw new Error('桌面目录入口未显示');
+    const checkVersion = async selector => {
+      const label = document.querySelector(selector);
+      if (!window.__SECUREVAULT_VERSION__ || !label || label.hidden || !label.textContent.endsWith(`v${window.__SECUREVAULT_VERSION__}`)) throw new Error(`桌面版本标签异常：${JSON.stringify({ version: window.__SECUREVAULT_VERSION__, text: label?.textContent, hidden: label?.hidden })}`);
+      await waitFor(() => label.getClientRects().length > 0);
+    };
+    await checkVersion('#sealed-screen [data-desktop-version]');
     const stage = sessionStorage.getItem('desktop-smoke-stage');
     const status = await api('/vault/status');
     if (stage === 'second') {
@@ -34,6 +40,7 @@
     await api('/vault/setup', { method: 'POST', body: JSON.stringify({ password }) });
     await checkStatus();
     await waitFor(() => state.unlocked);
+    await checkVersion('.topbar [data-desktop-version]');
     const summary = await api('/vault/summary');
     if (summary.records !== 0) throw new Error('空保险库记录数异常');
     state.editorDirty = true;

@@ -40,12 +40,13 @@
           <p id="vault-mode-note" class="demo-note">主密码用于解封数据密钥，不会保存明文。</p>
           <div class="desktop-directory-actions" data-desktop-only hidden><button class="secondary-button" type="button" data-desktop-open>打开已有保险库…</button><button class="clear-button" type="button" data-desktop-directory>数据目录…</button></div>
         </form>
+        <p class="desktop-version sealed-version" data-desktop-version data-version-prefix="桌面版 · " hidden></p>
       </section>
 
       <main id="vault-screen" class="vault-screen" aria-label="SecureVault 主控制台">
         <aside class="app-navigation" aria-label="主导航"><nav class="primary-navigation"><button id="search-nav-button" class="nav-button active" type="button">检索</button><button id="dataset-manager-button" class="nav-button"><span>▤</span> 数据集管理</button><button id="app-manager-button" class="nav-button"><span>⌁</span> 接入应用</button></nav><aside class="category-sidebar"><div class="sidebar-heading"><span class="eyebrow">DIRECTORIES</span><strong>分类目录</strong></div><button id="all-categories" class="tree-all selected"><span>▤</span><b>全部数据</b><em id="all-category-count">0</em></button><nav id="category-tree" class="category-tree" aria-label="分类目录树"></nav></aside><div class="navigation-bottom"><button id="security-settings-button" class="nav-button" title="安全设置" aria-label="安全设置"><span aria-hidden="true">⚙</span><b>安全设置</b></button><div class="navigation-stats"><span>本地保险库</span><span><b id="record-count">0</b> 条记录 · <b id="namespace-count">0</b> 个数据集</span><span><b id="secret-count">0</b> 个密文字段</span></div></div></aside>
         <header class="topbar">
-          <div class="brand-lockup"><div class="brand-icon">S<span>V</span></div><div><strong>SecureVault</strong><small id="workspace-label">检索</small></div></div>
+          <div class="brand-lockup"><div class="brand-icon">S<span>V</span></div><div><strong>SecureVault</strong><div class="brand-caption"><small id="workspace-label">检索</small><span class="desktop-version" data-desktop-version hidden></span></div></div></div>
           <div class="topbar-actions">
             <button class="ghost-button" type="button" data-desktop-only data-desktop-directory hidden>数据目录…</button>
             <div class="session-pill"><i class="status-dot"></i><span>已解锁</span><b id="idle-countdown" hidden></b></div>

@@ -1832,6 +1832,15 @@ async function showDesktopDirectory() {
     $('#desktop-directory-dialog').showModal();
   } catch (error) { showToast(String(error.message || error), 'error'); }
 }
+// The installed version is injected before page scripts run; displaying it
+// does not depend on the vault status request or on unlocking the vault.
+if (window.__SECUREVAULT_DESKTOP__ && typeof window.__SECUREVAULT_VERSION__ === 'string') {
+  document.querySelectorAll('[data-desktop-version]').forEach(element => {
+    element.textContent = `${element.dataset.versionPrefix || ''}v${window.__SECUREVAULT_VERSION__}`;
+    element.title = `SecureVault 桌面版 ${window.__SECUREVAULT_VERSION__}`;
+    element.hidden = false;
+  });
+}
 document.querySelectorAll('[data-desktop-only]').forEach(element => { element.hidden = !window.__SECUREVAULT_DESKTOP__; });
 document.querySelectorAll('[data-desktop-directory]').forEach(button => button.addEventListener('click', showDesktopDirectory));
 document.querySelectorAll('[data-desktop-open]').forEach(button => button.addEventListener('click', () => window.secureVaultSelectDirectory(true)));

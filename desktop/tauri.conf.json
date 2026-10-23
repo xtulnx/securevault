@@ -15,6 +15,7 @@
   "bundle": {
     "active": true,
     "publisher": "org.nx",
+    "homepage": "https://github.com/xtulnx/securevault",
     "targets": ["app"],
     "category": "Utility",
     "shortDescription": "本地加密数据保险库",

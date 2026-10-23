@@ -37,6 +37,51 @@ struct Options {
     smoke: bool,
 }
 
+fn version_info() -> String {
+    format!(
+        "SecureVault 桌面版\n版本：{}\n平台：{}\n发布者：{}\n项目仓库：{}",
+        env!("CARGO_PKG_VERSION"),
+        env!("DESKTOP_TARGET"),
+        env!("CARGO_PKG_AUTHORS"),
+        env!("CARGO_PKG_REPOSITORY"),
+    )
+}
+
+fn open_repository(app: &tauri::AppHandle) {
+    if let Err(error) = app
+        .opener()
+        .open_url(env!("CARGO_PKG_REPOSITORY"), None::<&str>)
+    {
+        app.dialog()
+            .message(format!(
+                "无法打开项目仓库：{error}\n{}",
+                env!("CARGO_PKG_REPOSITORY")
+            ))
+            .title("SecureVault")
+            .show(|_| {});
+    }
+}
+
+fn show_about(app: &tauri::AppHandle) {
+    let handle = app.clone();
+    app.dialog()
+        .message(format!(
+            "{}\n应用标识：{}",
+            version_info(),
+            app.config().identifier
+        ))
+        .title("关于 SecureVault")
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "打开 GitHub 仓库".into(),
+            "关闭".into(),
+        ))
+        .show(move |open| {
+            if open {
+                open_repository(&handle);
+            }
+        });
+}
+
 fn options() -> Result<Options, String> {
     let mut result = Options::default();
     let mut args = std::env::args().skip(1);
@@ -54,9 +99,13 @@ fn options() -> Result<Options, String> {
                 )
             }
             "--smoke-test" if cfg!(debug_assertions) => result.smoke = true,
+            "--version" | "-V" => {
+                println!("{}", version_info());
+                std::process::exit(0);
+            }
             "--help" | "-h" => {
                 println!(
-                    "SecureVault 桌面版\n  --data-dir PATH  指定保险库目录\n  --port PORT      指定本机服务端口；0 自动分配。未指定时优先 4173，被占用则自动分配\n目录优先级：--data-dir > SECUREVAULT_DATA_DIR > 上次选择 > 旧版应用目录 > 系统应用数据目录"
+                    "SecureVault 桌面版\n  --data-dir PATH  指定保险库目录\n  --port PORT      指定本机服务端口；0 自动分配。未指定时优先 4173，被占用则自动分配\n  --version, -V    查看当前版本与项目仓库\n目录优先级：--data-dir > SECUREVAULT_DATA_DIR > 上次选择 > 旧版应用目录 > 系统应用数据目录"
                 );
                 std::process::exit(0);
             }
@@ -377,6 +426,8 @@ fn desktop_smoke_result(
 }
 
 fn menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let about = MenuItem::with_id(app, "about", "关于 SecureVault…", true, None::<&str>)?;
+    let repository = MenuItem::with_id(app, "repository", "GitHub 项目主页", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 SecureVault", true, Some("CmdOrCtrl+Q"))?;
     let info = MenuItem::with_id(app, "info", "服务与数据目录…", true, None::<&str>)?;
     let open = MenuItem::with_id(
@@ -394,7 +445,9 @@ fn menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         "SecureVault",
         true,
         &[
-            &PredefinedMenuItem::about(app, Some("关于 SecureVault"), None)?,
+            &about,
+            &repository,
+            &PredefinedMenuItem::separator(app)?,
             &info,
             &open,
             &directory,
@@ -488,9 +541,10 @@ fn setup(app: &tauri::AppHandle, options: Options) -> Result<(), Box<dyn std::er
         .title("SecureVault")
         .inner_size(1280.0, 860.0)
         .min_inner_size(800.0, 600.0)
-        .initialization_script(
-            "Object.defineProperty(window, '__SECUREVAULT_DESKTOP__', {value: true});",
-        )
+        .initialization_script(format!(
+            "Object.defineProperty(window, '__SECUREVAULT_DESKTOP__', {{value: true}});\nObject.defineProperty(window, '__SECUREVAULT_VERSION__', {{value: {}}});",
+            serde_json::to_string(env!("CARGO_PKG_VERSION"))?,
+        ))
         .on_navigation(move |url| {
             if url.origin() == origin && matches!(url.path(), "/" | "/index.html") {
                 return true;
@@ -645,6 +699,8 @@ fn main() {
             Ok(())
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
+            "about" => show_about(app),
+            "repository" => open_repository(app),
             "quit" => request_close(app),
             "open-vault" | "change-directory" => {
                 if let Some(window) = app.get_webview_window("main") {

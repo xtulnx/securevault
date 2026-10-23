@@ -3,6 +3,7 @@ name = "securevault-desktop"
 version = "0.1.0"
 edition = "2024"
 authors = ["org.nx"]
+repository = "https://github.com/xtulnx/securevault"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
