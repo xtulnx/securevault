@@ -1129,10 +1129,15 @@ async function importFile(file, isCurrent = () => state.unlocked) {
     const datasetId = $("#import-dataset-select").value;
     if (!datasetId) throw new Error("请先创建一个数据集");
     const form = new FormData(); form.append("file", file);
+    const nodePath = $("#import-node-path").value.trim(), sheet = $("#import-sheet").value;
+    if (nodePath && !/\.(xlsx|xls|csv)$/i.test(file.name)) form.append("node_path", nodePath);
+    if (sheet && /\.(xlsx|xls)$/i.test(file.name)) form.append("sheet", sheet);
     const response = await fetch("/api/imports/upload", { method: "POST", body: form });
     if (!isCurrent()) return;
     const batch = await transferResponse(response, '上传失败', true, isCurrent);
     if (!isCurrent()) return;
+    applyImportSelection(batch);
+    if (batch.selection_required) return;
     await configureImportBatch(batch, datasetId, isCurrent);
   } catch (error) { if (isCurrent()) showToast(error.message || "文件无法解析", "error"); }
 }
@@ -1144,7 +1149,7 @@ async function configureImportBatch(batch, datasetId, isCurrent = () => state.un
     const templateResult = await api(`/datasets/${encodeURIComponent(datasetId)}/templates`);
     if (!isCurrent()) return;
     state.pendingBatchId = batch.batch_id;
-    $("#batch-summary").textContent = `${batch.filename} · ${batch.record_count} 条 · ${batch.source_fields.length} 个源字段`;
+    $("#batch-summary").textContent = `${batch.filename}${batch.sheet ? ` · 工作表：${batch.sheet}` : ""}${batch.node_path ? ` · 节点：${batch.node_path}` : ""} · ${batch.record_count} 条 · ${batch.source_fields.length} 个源字段`;
     state.importTemplates = templateResult.templates;
     state.currentBatchSources = batch.source_fields;
     $("#mapping-template-select").innerHTML = `<option value="">不使用已保存模板</option>${state.importTemplates.map((template, index) => `<option value="${index}">${escapeHtml(template.name)}</option>`).join("")}`;

@@ -1618,6 +1618,9 @@ dialog.description-dialog { margin: auto; padding: 0; }
 }
 .transfer-textarea:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
 .transfer-text-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 12px 0; }
+#import-record-selection { margin: 16px 0; }
+#import-reparse-file-wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 12px 0; }
+#import-selected-file { color: var(--muted); overflow-wrap: anywhere; }
 #import-text-panel > label, #export-text-result > label { display: block; margin: 14px 0 8px; color: var(--muted); font-size: 12px; }
 #import-text-format { max-width: 320px; }
 #import-text-count, #export-text-summary, #export-copy-status { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }

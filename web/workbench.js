@@ -1298,24 +1298,49 @@ function updateImportTextCount() {
   $('#parse-import-text').textContent = state.pendingBatchId || state.transferPackage ? '重新解析文本' : '解析文本';
 }
 
+function clearImportSelection() {
+  state.importSourceFile = null; state.importSheets = [];
+  $('#import-node-path').value = ''; $('#import-sheet').replaceChildren();
+}
+
+function applyImportSelection(batch) {
+  state.importSheets = batch.sheets || [];
+  $('#import-sheet').innerHTML = (batch.selection_required ? '<option value="">请选择工作表</option>' : '') + state.importSheets.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
+  if (batch.sheet) $('#import-sheet').value = batch.sheet;
+  renderImportSource();
+}
+
+function renderImportSelection() {
+  const text = $('input[name="import-source"]:checked').value === 'text';
+  const file = state.importSourceFile;
+  const tabular = text ? $('#import-text-format').value === 'csv' : /\.(xlsx|xls|csv)$/i.test(file?.name || '');
+  $('#import-record-selection').hidden = state.importStep === 3 || Boolean(state.transferPackage);
+  $('#import-node-path-wrap').hidden = tabular; $('#import-node-path-help').hidden = tabular;
+  $('#import-sheet-wrap').hidden = text || !(state.importSheets?.length);
+  $('#import-reparse-file-wrap').hidden = text || !file;
+  $('#import-selected-file').textContent = file?.name || '';
+  $('#reparse-import-file').disabled = state.importLoading || state.importBusy || Boolean(state.importSheets?.length > 1 && !$('#import-sheet').value);
+}
+
 function renderImportSource() {
   const text = $('input[name="import-source"]:checked').value === 'text';
   $('#import-source-switch').hidden = state.importStep === 3;
   $('#import-text-panel').hidden = !text || state.importStep === 3;
   $('#choose-file').hidden = text;
   $('.import-file-row').hidden = state.importStep === 3 || (text && !state.pendingBatchId && !state.transferPackage);
-  updateImportTextCount();
+  updateImportTextCount(); renderImportSelection();
 }
 
 function invalidateImportText() {
   if (state.pendingBatchId || state.transferPackage || state.importPreview || state.importLoading) resetImport(true);
   $('#import-text-error').hidden = true;
-  updateImportTextCount();
+  updateImportTextCount(); renderImportSelection();
 }
 
 async function parseImportText() {
   if (!state.unlocked || state.importLoading || state.importBusy) return;
   const text = $('#import-text').value, format = $('#import-text-format').value;
+  const nodePath = format === 'csv' ? '' : $('#import-node-path').value.trim();
   resetImport(true);
   const generation = state.importRequest, epoch = state.sessionEpoch;
   const current = () => state.unlocked && generation === state.importRequest && epoch === state.sessionEpoch;
@@ -1327,15 +1352,16 @@ async function parseImportText() {
     if (['auto', 'json'].includes(format)) {
       let native = false;
       try { native = JSON.parse(text.replace(/^\uFEFF/, ''))?.format === 'securevault-dataset'; } catch {}
+      if (native && $('#import-node-path').value.trim()) throw new Error('原生数据集包使用完整根节点，请清空记录节点');
       if (native && loadNativeText(text, '粘贴文本 · JSON 数据集包')) return;
     }
     const datasetId = $('#import-dataset-select').value;
     if (!datasetId) throw new Error('请先创建或选择目标数据集');
-    const batch = await api('/imports/text', { method: 'POST', body: JSON.stringify({ text, format }) });
+    const batch = await api('/imports/text', { method: 'POST', body: JSON.stringify({ text, format, node_path: nodePath }) });
     if (!current()) return;
     await configureImportBatch(batch, datasetId, current);
     if (!current()) return;
-    $('#batch-summary').textContent = `粘贴文本 · ${batch.format.toUpperCase()} · ${batch.record_count} 条 · ${batch.source_fields.length} 个源字段`;
+    $('#batch-summary').textContent = `粘贴文本 · ${batch.format.toUpperCase()}${nodePath ? ` · 节点：${nodePath}` : ''} · ${batch.record_count} 条 · ${batch.source_fields.length} 个源字段`;
     labelSchemaControls($('#first-schema-fields')); setImportStep(2);
   } catch (error) {
     if (current()) {
@@ -1343,7 +1369,7 @@ async function parseImportText() {
       $('#import-text-error').textContent = error.message; $('#import-text-error').hidden = false; $('#import-text-error').focus();
     }
   } finally {
-    if (current()) { state.importLoading = false; setFormBusy($('#import-modal'), false); updateImportTextCount(); }
+    if (current()) { state.importLoading = false; setFormBusy($('#import-modal'), false); updateImportTextCount(); renderImportSelection(); }
   }
 }
 
@@ -1469,11 +1495,11 @@ function setImportStep(step) {
 }
 
 function hasImportDraft() {
-  return Boolean(state.pendingBatchId || state.transferPackage || state.importPreview || $('#import-text').value);
+  return Boolean(state.pendingBatchId || state.transferPackage || state.importPreview || $('#import-text').value || state.importSourceFile);
 }
 
 function resetImport(preserveText = false) {
-  if (!preserveText) clearImportText();
+  if (!preserveText) { clearImportText(); clearImportSelection(); }
   clearImportDiagnostics(); clearImportSamples();
   state.importRequest++;
   state.importLoading = false; state.importBusy = false;
@@ -1525,9 +1551,12 @@ function loadNativeText(raw, label) {
   setImportStep(2); return true;
 }
 
-importFile = async function(file) {
-  if (!file || !confirmDiscardChanges(hasImportDraft(), '导入配置', state.importBusy || state.importLoading)) return;
-  resetImport();
+importFile = async function(file, reparse = false) {
+  if (!file || !confirmDiscardChanges(reparse ? Boolean(state.pendingBatchId || state.importPreview) : hasImportDraft(), '导入配置', state.importBusy || state.importLoading)) return;
+  resetImport(true); clearImportText();
+  state.importSourceFile = file;
+  if (!reparse) { state.importSheets = []; $('#import-sheet').replaceChildren(); }
+  renderImportSource();
   const request = state.importRequest, epoch = state.sessionEpoch;
   const current = () => state.unlocked && request === state.importRequest && epoch === state.sessionEpoch;
   state.importLoading = true; setFormBusy($('#import-modal'), true);
@@ -1536,6 +1565,7 @@ importFile = async function(file) {
       try {
         const raw = await file.text();
         if (!current()) return;
+        if ($('#import-node-path').value.trim() && JSON.parse(raw.replace(/^\uFEFF/, ''))?.format === 'securevault-dataset') throw new Error('不支持对原生数据集包选择节点，请清空记录节点');
         if (loadNativeText(raw, file.name)) return;
       } catch (error) {
         if (!current()) return;
@@ -1546,7 +1576,7 @@ importFile = async function(file) {
     await legacy.importFile(file, current);
     if (current() && state.pendingBatchId) { labelSchemaControls($('#first-schema-fields')); setImportStep(2); }
   } finally {
-    if (current()) { state.importLoading = false; setFormBusy($('#import-modal'), false); }
+    if (current()) { state.importLoading = false; setFormBusy($('#import-modal'), false); renderImportSource(); }
   }
 };
 
@@ -1741,7 +1771,7 @@ async function confirmImport() {
     $('#import-finish').addEventListener('click', () => openManagedDataset(pending.transfer ? result.dataset_id : pending.request.dataset_id, 'basic'));
     clearImportDiagnostics(); clearImportSamples();
     state.pendingBatchId = null; state.transferPackage = null; state.transferRaw = null; state.importPreview = null;
-    clearImportText();
+    clearImportText(); clearImportSelection();
     $('#import-context').hidden = true;
   } catch (error) { if (current()) { $('#import-action-error').textContent = error.message; $('#import-action-error').hidden = false; } }
   finally {
@@ -1833,7 +1863,7 @@ function closeTopOverlay() {
 }
 
 sealVault = async function(...args) {
-  clearImportDiagnostics(); clearImportSamples(); clearImportText(); clearExportText();
+  clearImportDiagnostics(); clearImportSamples(); clearImportText(); clearImportSelection(); clearExportText();
   if (typeof clearSearchTools === 'function') clearSearchTools();
   clearCopyFeedback();
   clearTimeout(state.searchTimer); state.searchController?.abort(); state.searchController = null; state.searchComposing = false; state.searchOutcome = null;
@@ -1895,6 +1925,9 @@ $('#copy-export-text').addEventListener('click', copyExportText);
 $('#select-export-text').addEventListener('click', () => { $('#export-text').focus(); $('#export-text').select(); });
 $('#clear-export-text').addEventListener('click', clearExportText);
 $('#parse-import-text').addEventListener('click', parseImportText);
+$('#import-node-path').addEventListener('input', invalidateImportText);
+$('#import-sheet').addEventListener('change', () => { resetImport(true); renderImportSource(); });
+$('#reparse-import-file').addEventListener('click', () => importFile(state.importSourceFile, true));
 $('#import-text').addEventListener('input', invalidateImportText);
 $('#import-text-format').addEventListener('change', invalidateImportText);
 $('#clear-import-text').addEventListener('click', () => resetImport());
@@ -1903,7 +1936,7 @@ $$('input[name="import-source"]').forEach(input => input.addEventListener('chang
   if (!confirmDiscardChanges(Boolean(state.pendingBatchId || state.transferPackage), '导入配置', state.importBusy || state.importLoading)) {
     $(`input[name="import-source"][value="${previous}"]`).checked = true; return;
   }
-  state.importSource = input.value; resetImport(true); renderImportSource();
+  state.importSource = input.value; state.importSourceFile = null; state.importSheets = []; $('#import-sheet').replaceChildren(); resetImport(true); renderImportSource();
 }));
 $('#transfer-options').before($('#import-config-error'));
 $('#preview-transfer').addEventListener('click', () => commitImport());

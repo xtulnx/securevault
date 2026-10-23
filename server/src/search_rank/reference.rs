@@ -1,4 +1,5 @@
-// Frozen pre-optimization implementation; test oracle and benchmark baseline only.
+// Pre-optimization full-sort oracle and benchmark baseline. Scalar scoring is frozen;
+// array elements follow the current membership semantics so paging remains comparable.
 use super::*;
 use std::collections::HashMap;
 
@@ -88,6 +89,13 @@ fn match_strength(text: &str, clause: &SearchClause) -> (u8, u32) {
     )).max().unwrap_or_default()
 }
 
+fn value_strength(value: &Value, clause: &SearchClause) -> (u8, u32) {
+    if let Value::Array(items) = value {
+        return items.iter().filter(|item| clause_matches("", item, clause)).map(|item| value_strength(item, clause)).max().unwrap_or_default();
+    }
+    match_strength(&value_text(value), clause)
+}
+
 fn field_role(field: &str, value: &Value, record: &Value, schema: Option<&DatasetSchema>) -> u8 {
     if field.starts_with("supplement.") { return 1; }
     if matches!(field, "category" | "environment" | "dataset") { return 0; }
@@ -117,7 +125,7 @@ fn relevance(record: &mut Value, clauses: &[&SearchClause], schema: Option<&Data
         let mut best = Hit::default();
         for (field, value) in candidates(clause, record) {
             if !clause_matches(&field, &value, clause) { continue; }
-            let (quality, coverage) = match_strength(&value_text(&value), clause);
+            let (quality, coverage) = value_strength(&value, clause);
             let hit = Hit { quality, role: field_role(&field, &value, record, schema), coverage };
             best = best.max(hit);
             let entry = fields.entry(field).or_default();
@@ -139,7 +147,7 @@ fn relevance(record: &mut Value, clauses: &[&SearchClause], schema: Option<&Data
             value: clauses.iter().map(|clause| clause.value.as_str()).collect::<Vec<_>>().join(" "), regex: None };
         score.whole_phrase = candidates(&phrase, record).iter().any(|(field, value)| {
             !matches!(field.as_str(), "category" | "environment" | "dataset")
-                && matches_value(&value_text(value), &phrase)
+                && clause_matches(field, value, &phrase)
         });
     }
     // Stronger matched fields also lead the summary, while equal hits retain

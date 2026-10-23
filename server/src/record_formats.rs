@@ -5,11 +5,12 @@ use super::*;
 pub(super) struct TextImport {
     text: String,
     format: Option<String>,
+    node_path: Option<String>,
 }
 
 pub(super) async fn import_text(State(state): State<AppState>, Json(request): Json<TextImport>) -> ApiResult<Json<Value>> {
     let mut result = stage_import(&state, || {
-        let (format, records) = parse_text(&request.text, request.format.as_deref().unwrap_or("auto"))?;
+        let (format, records) = parse_text_at(&request.text, request.format.as_deref().unwrap_or("auto"), request.node_path.as_deref().unwrap_or(""))?;
         Ok((format!("粘贴文本.{format}"), records))
     }).await?;
     let format = result.0["filename"].as_str().unwrap().rsplit('.').next().unwrap().to_owned();
@@ -17,9 +18,13 @@ pub(super) async fn import_text(State(state): State<AppState>, Json(request): Js
     Ok(result)
 }
 
-fn parse_text(text: &str, format: &str) -> ApiResult<(String, Vec<Value>)> {
+#[cfg(test)]
+fn parse_text(text: &str, format: &str) -> ApiResult<(String, Vec<Value>)> { parse_text_at(text, format, "") }
+
+fn parse_text_at(text: &str, format: &str, node_path: &str) -> ApiResult<(String, Vec<Value>)> {
     if text.len() > 1024 * 1024 { return Err(bad_request("粘贴文本最多支持 1 MiB，请缩小批次或使用文件导入")); }
     if text.trim().is_empty() { return Err(bad_request("请先粘贴需要导入的文本")); }
+    validate_node_path(node_path)?;
     let format = format.to_ascii_lowercase();
     if !matches!(format.as_str(), "auto" | "json" | "jsonl" | "csv" | "yaml" | "yml" | "toml") {
         return Err(bad_request("文本格式仅支持 JSON、JSONL、CSV、YAML 和 TOML"));
@@ -32,11 +37,11 @@ fn parse_text(text: &str, format: &str) -> ApiResult<(String, Vec<Value>)> {
         Ok(records)
     };
     if format != "auto" {
-        return Ok((format.clone(), validate(parse_tabular(text.as_bytes(), &format!("text.{format}"))?)?));
+        return Ok((format.clone(), validate(parse_tabular_selected(text.as_bytes(), &format!("text.{format}"), node_path, None)?)?));
     }
     // JSON is also valid YAML. Prefer its unambiguous syntax, preserving JSON numbers.
     for candidate in ["json", "jsonl"] {
-        if let Ok(records) = parse(text.as_bytes(), candidate).and_then(&validate) {
+        if let Ok(records) = parse_at(text.as_bytes(), candidate, node_path).and_then(&validate) {
             return Ok((candidate.into(), records));
         }
     }
@@ -52,18 +57,47 @@ fn parse_text(text: &str, format: &str) -> ApiResult<(String, Vec<Value>)> {
             if headers.iter().collect::<std::collections::BTreeSet<_>>().len() != headers.len() { continue; }
             if reader.records().any(|row| row.is_err()) { continue; }
         }
-        if let Ok(records) = parse_tabular(text.as_bytes(), &format!("text.{candidate}")).and_then(&validate) {
+        if let Ok(records) = parse_tabular_selected(text.as_bytes(), &format!("text.{candidate}"), node_path, None).and_then(&validate) {
             candidates.push((candidate.to_owned(), records));
         }
     }
     match candidates.len() {
         1 => Ok(candidates.remove(0)),
-        0 => Err(bad_request("无法识别文本格式，请手动选择格式并检查语法；CSV 需要表头")),
+        0 => Err(bad_request(if node_path.is_empty() { "无法识别文本格式，请手动选择格式并检查语法；CSV 需要表头" } else { "未找到可导入的记录节点，请检查路径或手动指定格式；节点必须是非空对象或对象数组" })),
         _ => Err(bad_request(format!("文本可按多种格式解析（{}），请手动选择格式", candidates.iter().map(|(format, _)| format.to_uppercase()).collect::<Vec<_>>().join(" / ")))),
     }
 }
 
-pub(super) fn parse(bytes: &[u8], format: &str) -> ApiResult<Vec<Value>> {
+#[cfg(test)]
+pub(super) fn parse(bytes: &[u8], format: &str) -> ApiResult<Vec<Value>> { parse_at(bytes, format, "") }
+
+// Record selection happens before flattening fields. No expressions or wildcards execute.
+fn validate_node_path(path: &str) -> ApiResult<()> {
+    if path.len() > 1024 || (!path.is_empty() && path != "$" && !path.starts_with('/') && path.strip_prefix("$.").unwrap_or(path).split('.').any(str::is_empty)) {
+        return Err(bad_request("记录节点路径无效：使用点分隔字段、数字下标或 JSON Pointer，最多 1024 字节"));
+    }
+    if path.starts_with('/') {
+        let bytes = path.as_bytes();
+        for (i, byte) in bytes.iter().enumerate() {
+            if *byte == b'~' && !matches!(bytes.get(i + 1), Some(b'0' | b'1')) { return Err(bad_request("JSON Pointer 转义只支持 ~0 和 ~1")); }
+        }
+    }
+    Ok(())
+}
+
+fn select_node(value: &Value, path: &str) -> ApiResult<Vec<Value>> {
+    let selected = if path.is_empty() || path == "$" { Some(value) }
+        else if path.starts_with('/') { value.pointer(path) }
+        else { path.strip_prefix("$.").unwrap_or(path).split('.').try_fold(value, |node, key| {
+            if let Some(array) = node.as_array() { key.parse::<usize>().ok().and_then(|i| array.get(i)) } else { node.get(key) }
+        }) };
+    let selected = selected.ok_or_else(|| bad_request("记录节点不存在，请检查路径；数组下标从 0 开始"))?;
+    if !selected.is_object() && !selected.is_array() { return Err(bad_request("记录节点必须是对象或对象数组")); }
+    Ok(flatten_sample(selected))
+}
+
+pub(super) fn parse_at(bytes: &[u8], format: &str, node_path: &str) -> ApiResult<Vec<Value>> {
+    validate_node_path(node_path)?;
     let text = std::str::from_utf8(bytes)
         .map_err(|_| bad_request("导入文件必须使用 UTF-8 编码"))?
         .trim_start_matches('\u{feff}');
@@ -71,7 +105,7 @@ pub(super) fn parse(bytes: &[u8], format: &str) -> ApiResult<Vec<Value>> {
         "json" => {
             let value = serde_json::from_str(text)
                 .map_err(|e| bad_request(format!("invalid JSON: {e}")))?;
-            flatten_sample(&value)
+            select_node(&value, node_path)?
         }
         "jsonl" => text.lines().enumerate().filter(|(_, line)| !line.trim().is_empty())
             .map(|(line, text)| {
@@ -80,8 +114,8 @@ pub(super) fn parse(bytes: &[u8], format: &str) -> ApiResult<Vec<Value>> {
                 if !record.is_object() {
                     return Err(bad_request(format!("JSONL 第 {} 行必须是对象", line + 1)));
                 }
-                Ok(record)
-            }).collect::<ApiResult<Vec<_>>>()?,
+                select_node(&record, node_path)
+            }).collect::<ApiResult<Vec<_>>>()?.into_iter().flatten().collect(),
         "yaml" | "yml" => {
             let mut options = serde_saphyr::Options::default();
             options.budget = Some(serde_saphyr::Budget::default());
@@ -91,17 +125,17 @@ pub(super) fn parse(bytes: &[u8], format: &str) -> ApiResult<Vec<Value>> {
             options.with_snippet = false;
             let documents: Vec<Value> = serde_saphyr::from_multiple_with_options(text, options)
                 .map_err(|_| bad_request("YAML 格式无效或超过解析限制，请检查语法、重复键及字段类型"))?;
-            documents.iter().flat_map(flatten_sample).collect()
+            documents.iter().map(|document| select_node(document, node_path)).collect::<ApiResult<Vec<_>>>()?.into_iter().flatten().collect()
         }
         "toml" => {
             let value: toml::Value = toml::from_str(text)
                 .map_err(|_| bad_request("TOML 格式无效，请检查语法及重复键"))?;
             let mut value = toml_to_json(value)?;
             // A root array is not valid TOML. Exports use a records array of tables.
-            if value.as_object().is_some_and(|map| map.len() == 1 && map.get("records").is_some_and(Value::is_array)) {
+            if node_path.is_empty() && value.as_object().is_some_and(|map| map.len() == 1 && map.get("records").is_some_and(Value::is_array)) {
                 value = value.get_mut("records").unwrap().take();
             }
-            flatten_sample(&value)
+            select_node(&value, node_path)?
         }
         _ => return Err(bad_request("unsupported record format")),
     };
@@ -182,6 +216,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn selects_nested_records_before_flattening_and_preserves_array_fields() {
+        let toml = r#"[[private_key.keys]]
+id="KEY-TEST"
+#invalid = true
+issuer_id="issuer-test"
+private_key="""-----BEGIN PRIVATE KEY-----
+TEST-ONLY
+-----END PRIVATE KEY-----
+"""
+artistName="示例"
+bundle_ids=["com.example.one", "com.example.two"]
+[[private_key.keys]]
+id="SECOND"
+bundle_ids=[]
+"#;
+        let expected = parse_at(toml.as_bytes(), "toml", "private_key.keys").unwrap();
+        assert_eq!(expected.len(), 2);
+        assert_eq!(expected[0]["bundle_ids"], json!(["com.example.one", "com.example.two"]));
+        assert_eq!(expected[1]["bundle_ids"], json!([]));
+        assert!(expected[0].get("invalid").is_none());
+        assert!(expected[0]["private_key"].as_str().unwrap().contains("\nTEST-ONLY\n"));
+        for path in ["private_key.keys", "$.private_key.keys", "/private_key/keys"] {
+            assert_eq!(parse_text_at(toml, "auto", path).unwrap(), ("toml".into(), expected.clone()));
+        }
+        assert_eq!(parse_at(toml.as_bytes(), "toml", "private_key.keys.0").unwrap(), expected[..1]);
+        for path in ["missing", "private_key.keys.0.id", "private_key..keys", "/private_key/~2", "private_key.keys.9", "private_key.keys.0.bundle_ids"] {
+            assert!(parse_at(toml.as_bytes(), "toml", path).is_err(), "{path}");
+        }
+        let yaml = "private_key:\n  keys:\n    - id: KEY-TEST\n      bundle_ids: [com.example.one, com.example.two]\n---\nprivate_key:\n  keys:\n    - id: SECOND\n      bundle_ids: []";
+        let records = parse_text_at(yaml, "yaml", "private_key.keys").unwrap().1;
+        assert_eq!(records.len(), 2); assert_eq!(records[0]["bundle_ids"], expected[0]["bundle_ids"]);
+        assert!(parse_text_at("private_key: {}\n---\nother: []", "yaml", "private_key").is_err());
+        assert_eq!(parse_at(br#"{"a.b":{"c/d":[{"id":1}]}}"#, "json", "/a.b/c~1d").unwrap(), vec![json!({"id":1})]);
+        assert!(parse_tabular_selected(b"id\n1", "data.csv", "items", None).is_err());
+        assert!(parse_text_at("{\"items\":[]}", "json", "items").is_err());
+    }
+
+    #[test]
+    fn spreadsheets_require_explicit_choice_and_validate_the_selected_sheet() {
+        let mut workbook = rust_xlsxwriter::Workbook::new();
+        workbook.add_worksheet().set_name("说明").unwrap().write_string(0, 0, "只作说明").unwrap();
+        let sheet = workbook.add_worksheet(); sheet.set_name("数据 & <2>").unwrap();
+        sheet.write_string(0, 0, "id").unwrap(); sheet.write_string(0, 1, "bundle_ids").unwrap();
+        sheet.write_string(1, 0, "KEY").unwrap(); sheet.write_string(1, 1, r#"["com.example.one","com.example.two"]"#).unwrap();
+        workbook.add_worksheet().set_name("空表").unwrap();
+        let bytes = workbook.save_to_buffer().unwrap();
+        assert!(parse_tabular(&bytes, "data.xlsx").unwrap_err().1.contains("多个工作表"));
+        assert_eq!(parse_tabular_selected(&bytes, "data.xlsx", "", Some("数据 & <2>")).unwrap(), vec![json!({"id":"KEY","bundle_ids":["com.example.one","com.example.two"]})]);
+        for name in ["空表", "不存在"] { assert!(parse_tabular_selected(&bytes, "data.xlsx", "", Some(name)).is_err()); }
+    }
+
+    #[test]
     fn malformed_tables_and_colliding_fields_never_silently_drop_values() {
         for input in ["code,code\n001,002", "code,\n001,Alice", "code,name\n001,Alice,extra", "code,name\n001"] {
             assert!(parse_tabular(input.as_bytes(), "bad.csv").is_err(), "{input}");
@@ -253,7 +339,7 @@ mod tests {
         for records in [vec![], vec![json!({})]] {
             assert!(stage_import(&state, || Ok(("empty.json".into(), records))).await.is_err());
         }
-        let parsed = import_text(State(state.clone()), Json(TextImport { text: "- code: '002'".into(), format: None })).await.unwrap().0;
+        let parsed = import_text(State(state.clone()), Json(TextImport { text: "- code: '002'".into(), format: None, node_path: None })).await.unwrap().0;
         assert_eq!(parsed["format"], "yaml");
         assert_eq!(parsed["record_count"], 1);
         assert_eq!(state.batches.lock().await[parsed["batch_id"].as_str().unwrap()].records, vec![json!({"code":"002"})]);

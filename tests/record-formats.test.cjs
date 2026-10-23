@@ -68,3 +68,40 @@ test('TOML export incompatibility remains visible and allows choosing another fo
   assert.equal(w.document.querySelector('#confirm-export').disabled, false);
   assert.equal(w.stateForTest.exportBusy, false);
 });
+
+test('nested record selection is sent for files and changing it invalidates the old batch', async t => {
+  const w = await setup(t); w.openImport('ds');
+  const path = w.document.querySelector('#import-node-path'); path.value = 'private_key.keys';
+  const sent = [];
+  w.fetch = async (url, options) => { if (url === '/api/imports/upload') sent.push(options.body); return { ok: true, json: async () => url === '/api/imports/upload' ? { batch_id: 'b', filename: 'keys.toml', record_count: 2, source_fields: ['code'], node_path: 'private_key.keys' } : { templates: [] } }; };
+  const file = new w.File(['[[private_key.keys]]\ncode="001"'], 'keys.toml');
+  await w.importFile(file);
+  assert.equal(sent[0].get('node_path'), 'private_key.keys');
+  assert.match(w.document.querySelector('#batch-summary').textContent, /节点：private_key.keys/);
+  path.value = 'private_key.other'; path.dispatchEvent(new w.Event('input', { bubbles: true }));
+  assert.equal(w.stateForTest.pendingBatchId, null); assert.equal(w.stateForTest.importStep, 1);
+  assert.equal(w.stateForTest.importSourceFile, file);
+  await w.importFile(file, true); assert.equal(sent[1].get('node_path'), 'private_key.other');
+  await w.sealVault('locked', false); assert.equal(w.stateForTest.importSourceFile, null); assert.equal(path.value, '');
+});
+
+test('multi-sheet upload requires selection before mapping and reuploads the selected sheet', async t => {
+  const w = await setup(t); w.openImport('ds');
+  const sheets = ['说明', '数据 & <2>']; const requests = [];
+  w.fetch = async (url, options) => {
+    if (url === '/api/imports/upload') requests.push(options.body);
+    const sheet = options?.body?.get?.('sheet');
+    return { ok: true, json: async () => url === '/api/imports/upload' ? sheet ? { batch_id: 'b', filename: 'multi.xlsx', record_count: 1, source_fields: ['code'], sheets, sheet } : { selection_required: true, sheets, filename: 'multi.xlsx' } : { templates: [] } };
+  };
+  const file = new w.File(['xlsx'], 'multi.xlsx'); await w.importFile(file);
+  assert.equal(w.stateForTest.pendingBatchId, null); assert.equal(w.stateForTest.importStep, 1);
+  assert.equal(w.document.querySelector('#import-sheet-wrap').hidden, false);
+  assert.equal(w.document.querySelector('#reparse-import-file').disabled, true);
+  const sheet = w.document.querySelector('#import-sheet'); sheet.value = sheets[1]; sheet.dispatchEvent(new w.Event('change', { bubbles: true }));
+  assert.equal(w.document.querySelector('#reparse-import-file').disabled, false);
+  await w.importFile(file, true);
+  assert.equal(requests[1].get('sheet'), sheets[1]); assert.equal(requests[1].get('node_path'), null);
+  assert.equal(w.stateForTest.importStep, 2); assert.match(w.document.querySelector('#batch-summary').textContent, /工作表：数据 & <2>/);
+  sheet.value = sheets[0]; sheet.dispatchEvent(new w.Event('change', { bubbles: true }));
+  assert.equal(w.stateForTest.pendingBatchId, null); assert.equal(w.stateForTest.importStep, 1);
+});

@@ -135,6 +135,18 @@ impl FieldValue<'_> {
             Self::Json(value) => Cow::Owned(value.to_string()),
         }
     }
+    fn match_strength(&self, clause: &SearchClause, needle: &str) -> Option<(u8, u32)> {
+        match self {
+            Self::Json(Value::Array(items)) => items.iter().filter_map(|item| Self::Json(item).match_strength(clause, needle)).max(),
+            _ => strength(&self.text(), clause, needle),
+        }
+    }
+    fn matches(&self, clause: &SearchClause) -> bool {
+        match self {
+            Self::Json(Value::Array(items)) => items.iter().any(|item| Self::Json(item).matches(clause)),
+            _ => matches_value(&self.text(), clause),
+        }
+    }
     fn meaningful(&self) -> bool {
         match self {
             Self::Text(text) => !text.trim().is_empty(),
@@ -354,7 +366,7 @@ impl<'a> SearchPlan<'a> {
                     {
                         Some((0, 0))
                     } else {
-                        strength(&text, clause, &prepared.needle)
+                        value.match_strength(clause, &prepared.needle)
                     };
                     let Some((quality, coverage)) = ranked else {
                         continue;
@@ -372,7 +384,7 @@ impl<'a> SearchPlan<'a> {
                                     prefix.eq_ignore_ascii_case(&clause.value)
                                 }) && text.as_bytes().get(clause.value.len()) == Some(&b'/')
                         } else {
-                            matches_value(&text, clause)
+                            value.matches(clause)
                         };
                     if !matches {
                         continue;
@@ -410,7 +422,7 @@ impl<'a> SearchPlan<'a> {
         if let Some(phrase) = &self.phrase {
             score.whole_phrase = candidates(phrase, record).iter().any(|(field, value)| {
                 !matches!(field.as_ref(), "category" | "environment" | "dataset")
-                    && value.text().eq_ignore_ascii_case(&phrase.value)
+                    && value.matches(phrase)
             });
         }
         matched_fields.sort_by(|a, b| {
@@ -663,7 +675,7 @@ mod tests {
     }
 
     #[test]
-    fn optimized_pages_match_frozen_full_sort_including_fields_and_highlights() {
+    fn optimized_pages_match_full_sort_including_fields_and_highlights() {
         let rows = fixtures(257);
         for query in [
             "",
@@ -929,6 +941,28 @@ mod tests {
         assert_eq!(match_strength("aaa", &clause[0]), (2, 6666));
         let clause = parse_search_clauses("code:~^").unwrap();
         assert_eq!(match_strength("anything", &clause[0]), (0, 0));
+    }
+
+    #[test]
+    fn array_fields_match_individual_elements_for_all_operators() {
+        let rows = vec![record("keys", json!({"bundle_ids":["com.example.one", "com.example.two"], "empty":[]}), json!({})), record("other", json!({"bundle_ids":["other"]}), json!({}))];
+        for query in ["bundle_ids:=com.example.one", "bundle_ids:^com.example", "bundle_ids:$two", "bundle_ids:~^com\\.example\\.two$", "com.example.one", "bundle_ids:=com.example.one bundle_ids:=com.example.two"] {
+            assert_eq!(ids(&ranked(query, rows.clone())), vec!["keys"], "{query}");
+        }
+        for query in ["bundle_ids:=com.example", "bundle_ids:=missing", "empty:~.*", "bundle_ids:\",\""] {
+            assert!(ranked(query, rows.clone()).is_empty(), "{query}");
+        }
+    }
+
+    #[test]
+    fn array_highlights_use_utf16_offsets_and_only_mark_matching_elements() {
+        let rows = vec![record("keys", json!({"bundle_ids":["😀\"", "com.example.one", "com.example.one.more"]}), json!({}))];
+        let query = "bundle_ids:=com.example.one";
+        let result = ranked(query, rows);
+        let highlights = match_highlights(&parse_search_clauses(query).unwrap(), &result[0]);
+        assert_eq!(highlights["bundle_ids"]["ranges"], json!([[8, 25]]));
+        let repeated = vec![record("one", json!({"bundle_ids":["cat"]}), json!({})), record("two", json!({"bundle_ids":["cat", "cat"]}), json!({}))];
+        assert_eq!(ids(&ranked("bundle_ids:=cat", repeated)), vec!["one", "two"]);
     }
 
     #[test]

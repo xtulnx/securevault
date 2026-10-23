@@ -1310,6 +1310,7 @@ fn clause_fields(clause: &SearchClause, category: &str, environment: Option<&str
 }
 
 fn clause_matches(field: &str, value: &Value, clause: &SearchClause) -> bool {
+    if let Value::Array(items) = value { return items.iter().any(|item| clause_matches(field, item, clause)); }
     let value = value_text(value);
     if field == "category" && matches!(clause.operator, SearchOperator::Exact) {
         return value.eq_ignore_ascii_case(&clause.value)
@@ -1360,6 +1361,19 @@ fn combined_clause_fields(clause: &SearchClause, category: &str, environment: Op
         candidates
 }
 
+// Arrays render as JSON; highlight the matching element including its JSON escaping.
+fn array_match_ranges(value: &Value, clause: &SearchClause, offset: usize, ranges: &mut Vec<Value>) {
+    if let Value::Array(items) = value {
+        let mut cursor = offset + 1;
+        for item in items {
+            array_match_ranges(item, clause, cursor, ranges);
+            cursor += item.to_string().encode_utf16().count() + 1;
+        }
+    } else if clause_matches("", value, clause) {
+        ranges.push(json!([offset, offset + value.to_string().encode_utf16().count()]));
+    }
+}
+
 // Highlight offsets use UTF-16, as JavaScript string slicing does. Regex runs
 // in the same linear-time engine as search, rather than in the browser.
 fn match_highlights(clauses: &[SearchClause], record: &Value) -> Value {
@@ -1387,6 +1401,7 @@ fn match_highlights(clauses: &[SearchClause], record: &Value) -> Value {
                 Some(field)=>key.eq_ignore_ascii_case(field) || key.eq_ignore_ascii_case(&format!("supplement.{field}")),
             };
             if !eligible || !clause_matches(key,value,clause) {continue;}
+            if value.is_array() { array_match_ranges(value, clause, 0, &mut ranges); continue; }
             let literal;
             let regex=if let Some(regex)=clause.regex.as_ref() {regex} else {
                 literal=match regex::RegexBuilder::new(&regex::escape(&clause.value)).case_insensitive(true).build() {Ok(regex)=>regex,Err(_)=>continue};&literal
@@ -1811,15 +1826,10 @@ async fn vault_summary(State(state): State<AppState>) -> ApiResult<Json<Value>> 
     }).await
 }
 
-fn parse_tabular(bytes: &[u8], filename: &str) -> ApiResult<Vec<Value>> {
-    let extension = filename
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if matches!(extension.as_str(), "json" | "jsonl" | "yaml" | "yml" | "toml") {
-        return record_formats::parse(bytes, &extension);
-    }
+#[cfg(test)]
+fn parse_tabular(bytes: &[u8], filename: &str) -> ApiResult<Vec<Value>> { parse_tabular_selected(bytes, filename, "", None) }
+
+fn check_spreadsheet_archive(bytes: &[u8]) -> ApiResult<()> {
     if bytes.starts_with(b"PK\x03\x04") {
         let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| bad_request("invalid XLSX archive"))?;
         if archive.len() > 1024 { return Err(bad_request("XLSX archive has too many entries")); }
@@ -1829,6 +1839,22 @@ fn parse_tabular(bytes: &[u8], filename: &str) -> ApiResult<Vec<Value>> {
             if expanded > 64 * 1024 * 1024 { return Err(bad_request("XLSX expanded size exceeds 64 MiB")); }
         }
     }
+    Ok(())
+}
+
+fn parse_tabular_selected(bytes: &[u8], filename: &str, node_path: &str, sheet: Option<&str>) -> ApiResult<Vec<Value>> {
+    let extension = filename
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if matches!(extension.as_str(), "json" | "jsonl" | "yaml" | "yml" | "toml") {
+        if sheet.is_some() { return Err(bad_request("工作表选择仅适用于 XLSX")); }
+        return record_formats::parse_at(bytes, &extension, node_path);
+    }
+    if !node_path.is_empty() { return Err(bad_request("记录节点仅适用于 JSON、JSONL、YAML 和 TOML")); }
+    if sheet.is_some() && !matches!(extension.as_str(), "xlsx" | "xls") { return Err(bad_request("工作表选择仅适用于 XLSX")); }
+    check_spreadsheet_archive(bytes)?;
     let (headers, rows): (Vec<String>, Vec<Vec<String>>) = if extension == "csv" {
         let mut reader = csv::ReaderBuilder::new().from_reader(bytes);
         let headers = reader
@@ -1848,10 +1874,14 @@ fn parse_tabular(bytes: &[u8], filename: &str) -> ApiResult<Vec<Value>> {
     } else if extension == "xlsx" || extension == "xls" {
         let mut workbook = open_workbook_auto_from_rs(Cursor::new(bytes.to_vec()))
             .map_err(|e| bad_request(format!("cannot read spreadsheet: {e}")))?;
-        let range = workbook
-            .worksheet_range_at(0)
-            .ok_or_else(|| bad_request("spreadsheet has no worksheets"))?
-            .map_err(|e| bad_request(e.to_string()))?;
+        let names = workbook.sheet_names();
+        let name = match sheet {
+            Some(name) if names.iter().any(|item| item == name) => name,
+            Some(_) => return Err(bad_request("所选工作表不存在，请重新选择")),
+            None if names.len() > 1 => return Err(bad_request("文件包含多个工作表，请先选择工作表")),
+            None => names.first().ok_or_else(|| bad_request("spreadsheet has no worksheets"))?,
+        };
+        let range = workbook.worksheet_range(name).map_err(|e| bad_request(e.to_string()))?;
         let mut iterator = range.rows();
         let header_row = iterator
             .next()
@@ -1905,6 +1935,8 @@ async fn upload_import(
 ) -> ApiResult<Json<Value>> {
     let mut filename = String::new();
     let mut bytes = Vec::new();
+    let mut node_path = String::new();
+    let mut sheet = None;
     while let Some(field) = multipart
         .next_field()
         .await
@@ -1917,13 +1949,32 @@ async fn upload_import(
                 .await
                 .map_err(|e| bad_request(e.to_string()))?
                 .to_vec();
-            break;
+        } else if field.name() == Some("node_path") {
+            node_path = field.text().await.map_err(|e| bad_request(e.to_string()))?;
+        } else if field.name() == Some("sheet") {
+            sheet = Some(field.text().await.map_err(|e| bad_request(e.to_string()))?);
         }
     }
     if bytes.is_empty() {
         return Err(bad_request("file is missing or empty"));
     }
-    stage_import(&state, || Ok((filename.clone(), parse_tabular(&bytes, &filename)?))).await
+    let mut sheets = Vec::new();
+    if filename.rsplit('.').next().is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "xlsx" | "xls")) {
+        let mut runtime = state.runtime.lock().await;
+        expire_runtime(&mut runtime);
+        if runtime.keys.is_none() { return Err(locked()); }
+        check_spreadsheet_archive(&bytes)?;
+        let workbook = open_workbook_auto_from_rs(Cursor::new(bytes.clone())).map_err(|_| bad_request("无法读取工作簿"))?;
+        sheets = workbook.sheet_names();
+        if sheets.len() > 1 && sheet.is_none() {
+            return Ok(Json(json!({"selection_required":true,"sheets":sheets,"filename":filename})));
+        }
+    }
+    let mut result = stage_import(&state, || Ok((filename.clone(), parse_tabular_selected(&bytes, &filename, &node_path, sheet.as_deref())?))).await?;
+    result.0["sheets"] = json!(sheets);
+    result.0["sheet"] = json!(sheet.or_else(|| sheets.first().cloned()));
+    result.0["node_path"] = json!(node_path);
+    Ok(result)
 }
 
 async fn stage_import(state: &AppState, parse: impl FnOnce() -> ApiResult<(String, Vec<Value>)>) -> ApiResult<Json<Value>> {

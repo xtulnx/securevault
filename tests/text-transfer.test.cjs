@@ -234,3 +234,16 @@ test('streamed text export bounds memory, preserves split Unicode and cancels ov
   await assert.rejects(w.readExportText(response(chunks), () => true), /2 MiB/);
   assert.equal(cancelled, true); assert.equal(chunks.length, 1);
 });
+
+test('text node paths survive edits, are submitted, and never reuse an old preview', async t => {
+  const w = await setup(t); openTextImport(w);
+  textInput(w, '[[private_key.keys]]\ncode="001"');
+  const path = w.document.querySelector('#import-node-path'); path.value = 'private_key.keys';
+  const requests = [];
+  w.fetch = async (url, options) => { if (url === '/api/imports/text') requests.push(JSON.parse(options.body)); return { ok: true, json: async () => url === '/api/imports/text' ? { batch_id: 'b', format: 'toml', record_count: 1, source_fields: ['code'] } : { templates: [] } }; };
+  await w.parseImportText(); assert.equal(requests[0].node_path, 'private_key.keys');
+  path.value = 'private_key.keys.0'; path.dispatchEvent(new w.Event('input', { bubbles: true }));
+  assert.equal(w.stateForTest.pendingBatchId, null); assert.equal(w.stateForTest.importPreview, null);
+  await w.parseImportText(); assert.equal(requests[1].node_path, 'private_key.keys.0');
+  w.resetImport(); assert.equal(path.value, '');
+});
