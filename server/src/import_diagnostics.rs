@@ -3,6 +3,37 @@ use super::*;
 use std::collections::HashSet;
 
 const ISSUE_LIMIT: usize = 10_000;
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NewDataset {
+    category_path: String,
+    #[serde(default)] name: String,
+    schema_name: String,
+    #[serde(default)] schema_description: String,
+    #[serde(default)] description: String,
+    #[serde(default)] environment_names: Vec<String>,
+}
+
+fn prepare_target(db: &Connection, keys: &KeySet, request: &mut ImportRequest) -> ApiResult<Option<Value>> {
+    let Some(target) = request.new_dataset.take() else { return Ok(None); };
+    if !request.dataset_id.is_empty() || request.delete_missing || request.skip_existing {
+        return Err(bad_request("新建导入不能同时指定已有数据集、跳过已有记录或删除缺失记录"));
+    }
+    let schema_name = target.schema_name.trim();
+    if schema_name.is_empty() || schema_name.chars().count() > 120 || schema_name.chars().any(char::is_control) {
+        return Err(bad_request("请填写 1 至 120 个字符的数据模型名称"));
+    }
+    if request.evolved_fields.is_empty() { return Err(bad_request("请根据导入数据定义至少一个模型字段")); }
+    let create: DatasetCreateRequest = serde_json::from_value(json!({
+        "category_path":target.category_path,"name":target.name,"description":target.description,
+        "environment_names":target.environment_names,"fields":request.evolved_fields,"identity_fields":request.evolved_identity_fields
+    })).map_err(internal)?;
+    let result = create_dataset_in_connection(db, keys, create)?;
+    request.dataset_id = result["dataset_id"].as_str().unwrap().to_owned();
+    db.execute("UPDATE shared_schemas SET name=?2,description=?3 WHERE id=(SELECT schema_id FROM datasets WHERE id=?1)",params![request.dataset_id,schema_name,target.schema_description]).map_err(internal)?;
+    request.evolved_fields.clear(); request.evolved_identity_fields.clear();
+    Ok(Some(json!({"schema_name":schema_name,"schema_id":result["schema_id"],"fields":result["fields"],"identity_fields":result["identity_fields"]})))
+}
 #[derive(Serialize)]
 pub(super) struct Issue {
     scope: String,
@@ -213,16 +244,18 @@ fn scan(db: &Connection, inputs: &[Value], request: &ImportRequest) -> ApiResult
     }
     Ok((mapped, report))
 }
-pub(super) async fn run(state: AppState, request: ImportRequest, preview: bool) -> ApiResult<Json<Value>> {
-    with_batch(&state, &request.batch_id, |inputs, keys| {
+pub(super) async fn run(state: AppState, mut request: ImportRequest, preview: bool) -> ApiResult<Json<Value>> {
+    with_batch(&state, &request.batch_id.clone(), |inputs, keys| {
         let db = open_database(&database_path(&state), &keys.db)?;
-        let (mapped, report) = scan(&db, inputs, &request)?;
+        let tx = db.unchecked_transaction().map_err(internal)?;
+        let created = prepare_target(&tx, keys, &mut request)?;
+        let (mapped, report) = scan(&tx, inputs, &request)?;
         if report.error_count > 0 {
             if preview { return Ok(Json(json!({"valid":false,"diagnostics":report}))); }
             return Err(bad_request(format!("导入包含 {} 项错误，请先预检并下载错误报告；未写入任何记录", report.error_count)));
         }
-        let tx = db.unchecked_transaction().map_err(internal)?;
         let mut result = import_records_in_connection(&tx, keys, &request, &mapped)?;
+        if let Some(created) = created { result["created_dataset"] = json!(true); result["model"] = created; result["dataset_id"] = json!(request.dataset_id); }
         if preview { tx.rollback().map_err(internal)?; } else { tx.commit().map_err(internal)?; }
         result["diagnostics"] = serde_json::to_value(report).map_err(internal)?;
         result["valid"] = json!(true);
@@ -231,10 +264,14 @@ pub(super) async fn run(state: AppState, request: ImportRequest, preview: bool) 
 }
 #[derive(Deserialize)]
 pub(super) struct Format { pub format: Option<String> }
-pub(super) async fn report(State(state): State<AppState>, Query(format): Query<Format>, Json(request): Json<ImportRequest>) -> ApiResult<Response> {
-    with_batch(&state, &request.batch_id, |inputs, keys| {
+pub(super) async fn report(State(state): State<AppState>, Query(format): Query<Format>, Json(mut request): Json<ImportRequest>) -> ApiResult<Response> {
+    with_batch(&state, &request.batch_id.clone(), |inputs, keys| {
         let db = open_database(&database_path(&state), &keys.db)?;
-        scan(&db, inputs, &request)?.1.response(format.format.as_deref())
+        let tx = db.unchecked_transaction().map_err(internal)?;
+        prepare_target(&tx, keys, &mut request)?;
+        let response = scan(&tx, inputs, &request)?.1.response(format.format.as_deref())?;
+        tx.rollback().map_err(internal)?;
+        Ok(response)
     }).await
 }
 #[derive(Deserialize)]
@@ -269,6 +306,43 @@ pub(super) async fn samples(State(state): State<AppState>, Path(id): Path<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn new_import_creates_model_dataset_and_records_atomically_only_on_commit() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("samples/.build"); fs::create_dir_all(&root).unwrap();
+        let directory = root.join(format!("new-import-{}",Uuid::new_v4()));
+        struct Cleanup(PathBuf); impl Drop for Cleanup { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+        let _cleanup = Cleanup(directory.clone()); private_dir(&directory).unwrap();
+        let state = rotation::state_for(directory); let (keys,_) = initialize_vault(&state,"new-import-test-password-2026").unwrap(); activate(&state,keys,true).await;
+        state.batches.lock().await.insert("new".into(),ImportBatch::new(vec![json!({"code":"001","artist_id":"00123"})],None));
+        let body = json!({"batch_id":"new","new_dataset":{"category_path":"导入/新建","name":"新建实例","schema_name":"艺人模型","schema_description":"模型说明","environment_names":["测试标签"]},"evolved_fields":[{"source_key":"code","zone":"indexes"},{"source_key":"payload","zone":"secrets"}],"evolved_identity_fields":["code"],"template_name":"new-template","mappings":[{"source_key":"code","target_key":"code"},{"source_key":"artist_id","target_key":"payload","target_path":"artist.id"}]});
+        let preview = run(state.clone(),serde_json::from_value(body.clone()).unwrap(),true).await.unwrap().0;
+        assert_eq!(preview["valid"],true); assert_eq!(preview["imported"],1); assert_eq!(preview["model"]["schema_name"],"艺人模型");
+        report(State(state.clone()),Query(Format {format:Some("csv".into())}),Json(serde_json::from_value(body.clone()).unwrap())).await.unwrap();
+        let mut invalid = body.clone(); invalid["mappings"][1]["target_path"] = json!("artist..id");
+        assert_eq!(run(state.clone(),serde_json::from_value(invalid.clone()).unwrap(),true).await.unwrap().0["valid"],false);
+        assert!(run(state.clone(),serde_json::from_value(invalid).unwrap(),false).await.is_err());
+        with_connection(&state,|db,_| {
+            for table in ["datasets","shared_schemas","environments","records","import_templates"] {
+                assert_eq!(db.query_row(&format!("SELECT COUNT(*) FROM {table}"),[],|r|r.get::<_,i64>(0)).unwrap(),0);
+            } Ok(())
+        }).await.unwrap();
+        let result = run(state.clone(),serde_json::from_value(body.clone()).unwrap(),false).await.unwrap().0;
+        assert_eq!(result["created_dataset"],true); assert_eq!(result["imported"],1);
+        // A template conflict must roll back the second model, instance, labels and records.
+        let mut conflicting = body.clone(); conflicting["new_dataset"]["environment_names"] = json!(["不能残留"]);
+        assert!(run(state.clone(),serde_json::from_value(conflicting).unwrap(),false).await.is_err());
+        with_connection(&state,|db,_| {
+            for table in ["datasets","shared_schemas","environments","records","import_templates","protected_fields"] {
+                assert_eq!(db.query_row(&format!("SELECT COUNT(*) FROM {table}"),[],|r|r.get::<_,i64>(0)).unwrap(),1);
+            }
+            let (name,description):(String,String) = db.query_row("SELECT name,description FROM shared_schemas",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+            assert_eq!(name,"艺人模型"); assert_eq!(description,"模型说明"); Ok(())
+        }).await.unwrap();
+        for property in ["skip_existing","delete_missing"] {
+            let mut invalid = body.clone(); invalid[property] = json!(true);
+            assert!(run(state.clone(),serde_json::from_value(invalid).unwrap(),true).await.is_err());
+        }
+    }
     fn request(batch: &str) -> ImportRequest {
         serde_json::from_value(json!({"dataset_id":"test","batch_id":batch,"mappings":[{"source_key":"payload","target_key":"key","json_path":"items.0.id"}]})).unwrap()
     }

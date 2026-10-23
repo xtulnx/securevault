@@ -313,7 +313,7 @@ function renderImportContext() {
     entries.dataset = { kind: 'dataset', value: next, caption: '将新建的数据集' };
     entries.model = { kind: 'model', value: model, caption: '将新建的独立数据模型' };
     html = `<h4 class="reference-group-title">将新建的数据集与模型</h4><div class="reference-grid">${referenceCard('dataset', next, 'dataset', '数据集')}${referenceCard('model', model, 'model', '数据模型')}</div>`;
-  } else html = '<p class="security-note">请先选择目标数据集；原生数据集文件也可直接导入并新建数据集。</p>';
+  } else html = '<p class="security-note">将根据导入数据创建独立的数据模型与数据集，字段定义在解析后配置。</p>';
   if (source && target) {
     const model = fileModelReference(source);
     entries.source = { kind: 'dataset', value: source, caption: '文件中的数据集' };
@@ -323,7 +323,7 @@ function renderImportContext() {
   if (state.referenceCatalogError && target?.schema_id) html += '<p class="security-note">模型说明未能加载。<button type="button" class="clear-button" data-retry-reference>重新加载</button></p>';
   if (state.importStep > 1) {
     const expanded = container.querySelector('.import-target-details')?.open;
-    const context = target ? `${datasetLocator(target)} · 模型：${target.schema_name || '独立模型'}` : `新建数据集：${$('#transfer-category').value || source?.category_path || ''}`;
+    const context = target ? `${datasetLocator(target)} · 模型：${target.schema_name || '独立模型'}` : `新建数据集：${source ? $('#transfer-category').value || source.category_path : $('#import-new-category').value}`;
     html = `<details class="import-target-details" ${expanded ? 'open' : ''}><summary>目标：${escapeHtml(context)} · 查看说明</summary>${html}</details>`;
   }
   container.innerHTML = html;
@@ -972,6 +972,10 @@ function renderManagedDataset() {
   }
   $('#dataset-detail-body .dataset-model-fields:last-of-type .dataset-field-heading').insertAdjacentHTML('beforeend', `<button id="managed-supplement" class="clear-button">${state.canManage ? '管理附表数据' : '查看附表数据'}</button>`);
   $('#managed-edit')?.addEventListener('click', () => openDatasetEdit(dataset.id, 'basic'));
+  if (state.canManage) {
+    $('#dataset-detail-heading .heading-actions').insertAdjacentHTML('beforeend', '<button id="managed-delete" class="secondary-button danger-button">物理删除…</button>');
+    $('#managed-delete').addEventListener('click', () => openPhysicalDelete('datasets', dataset.id));
+  }
   $('#managed-edit-description')?.addEventListener('click', () => openDescription(dataset.id));
   $('#managed-supplement')?.addEventListener('click', () => openSupplement(dataset.id));
   $('#managed-import')?.addEventListener('click', () => openImport(dataset.id));
@@ -1328,6 +1332,9 @@ function renderImportSource() {
   $('#import-text-panel').hidden = !text || state.importStep === 3;
   $('#choose-file').hidden = text;
   $('.import-file-row').hidden = state.importStep === 3 || (text && !state.pendingBatchId && !state.transferPackage);
+  const creating = $('#import-dataset-select').value === '__new' && !state.transferPackage;
+  $('#import-new-dataset').hidden = !creating || state.importStep === 3;
+  for (const id of ['skip-existing', 'delete-missing']) { $('#' + id).closest('label').hidden = creating; if (creating) $('#' + id).checked = false; }
   updateImportTextCount(); renderImportSelection();
 }
 
@@ -1495,11 +1502,11 @@ function setImportStep(step) {
 }
 
 function hasImportDraft() {
-  return Boolean(state.pendingBatchId || state.transferPackage || state.importPreview || $('#import-text').value || state.importSourceFile);
+  return Boolean(state.pendingBatchId || state.transferPackage || state.importPreview || $('#import-text').value || state.importSourceFile || $$('#import-new-dataset input, #import-new-dataset textarea').some(input => input.value));
 }
 
 function resetImport(preserveText = false) {
-  if (!preserveText) { clearImportText(); clearImportSelection(); }
+  if (!preserveText) { clearImportText(); clearImportSelection(); $$('#import-new-dataset input, #import-new-dataset textarea').forEach(input => { input.value = ''; }); }
   clearImportDiagnostics(); clearImportSamples();
   state.importRequest++;
   state.importLoading = false; state.importBusy = false;
@@ -1552,7 +1559,8 @@ function loadNativeText(raw, label) {
 }
 
 importFile = async function(file, reparse = false) {
-  if (!file || !confirmDiscardChanges(reparse ? Boolean(state.pendingBatchId || state.importPreview) : hasImportDraft(), '导入配置', state.importBusy || state.importLoading)) return;
+  const replacingSource = Boolean(state.pendingBatchId || state.transferPackage || state.importPreview || $('#import-text').value || state.importSourceFile);
+  if (!file || !confirmDiscardChanges(reparse ? Boolean(state.pendingBatchId || state.importPreview) : replacingSource, '导入配置', state.importBusy || state.importLoading)) return;
   resetImport(true); clearImportText();
   state.importSourceFile = file;
   if (!reparse) { state.importSheets = []; $('#import-sheet').replaceChildren(); }
@@ -1676,8 +1684,14 @@ function showImportConfigError(message) {
 
 function buildImportRequest() {
   clearImportConfigErrors();
-  const dataset = state.datasets.find(item => item.id === $('#import-dataset-select').value);
+  const creating = $('#import-dataset-select').value === '__new';
+  const dataset = creating ? { id: '', fields: [], identity_fields: [] } : state.datasets.find(item => item.id === $('#import-dataset-select').value);
   if (!dataset || !state.pendingBatchId) throw new Error('请先选择目标数据集并上传文件');
+  let newDataset;
+  if (creating) {
+    newDataset = { name: $('#import-new-name').value.trim(), category_path: $('#import-new-category').value.trim(), schema_name: $('#import-new-schema-name').value.trim(), description: $('#import-new-description').value, schema_description: $('#import-new-schema-description').value, environment_names: $('#import-new-tags').value.split(/[,，;；\n]/).map(value => value.trim()).filter(Boolean) };
+    if (!newDataset.category_path || !newDataset.schema_name) throw new Error('请填写目标目录和新数据模型名称');
+  }
   const unresolved = $$('[data-map-source]').filter(select => mappingDisposition(select) === 'pending');
   if (unresolved.length) {
     unresolved.forEach(select => importFieldError(select, '请选择映射、新增或明确忽略'));
@@ -1732,7 +1746,7 @@ function buildImportRequest() {
     fields = [...new Map(fields.map(field => [field.source_key, field])).values()];
   }
   if ($('#delete-missing').checked && !identity.length) throw new Error('删除缺失记录需要完整的逻辑唯一 KEY');
-  return { dataset_id: dataset.id, batch_id: state.pendingBatchId, mappings, evolved_fields: fields, evolved_identity_fields: identity, template_name: $('#mapping-template').value.trim() || null, skip_existing: $('#skip-existing').checked, delete_missing: $('#delete-missing').checked };
+  return { dataset_id: dataset.id, ...(newDataset ? { new_dataset: newDataset } : {}), batch_id: state.pendingBatchId, mappings, evolved_fields: fields, evolved_identity_fields: identity, template_name: $('#mapping-template').value.trim() || null, skip_existing: !creating && $('#skip-existing').checked, delete_missing: !creating && $('#delete-missing').checked };
 }
 
 function buildTransferRequest() {
@@ -1762,10 +1776,11 @@ commitImport = async function() {
     }
     state.importPreview = { transfer, request, preview, mode: state.transferPackage?.mode };
     const stats = transfer ? preview.result : preview;
-    const dataset = state.datasets.find(item => item.id === request.dataset_id);
+    const dataset = request.new_dataset || state.datasets.find(item => item.id === request.dataset_id);
     const target = transfer ? `${request.category_path} · ${datasetLabelText(request)}` : `${datasetLocator(dataset)} · ${datasetLabelText(dataset)}`;
     $('#import-confirm-summary').innerHTML = `<dl class="dataset-info-summary"><div><dt>目标</dt><dd>${escapeHtml(target)}</dd></div><div><dt>导入内容</dt><dd>${transfer ? state.transferPackage?.mode === 'schema' ? '仅结构' : '结构与数据' : '记录数据'}</dd></div><div><dt>新增</dt><dd>${stats.imported || 0} 条</dd></div><div><dt>更新</dt><dd>${stats.updated || 0} 条</dd></div><div><dt>跳过</dt><dd>${stats.skipped || 0} 条</dd></div><div><dt>删除旧记录</dt><dd>${stats.deleted_missing || 0} 条</dd></div></dl>${transfer && preview.changes.length ? `<h4>结构变更</h4><ul>${preview.changes.map(change => `<li>${escapeHtml(change)}</li>`).join('')}</ul>` : ''}<p>以上为当前预检结果。确认前尚未写入数据。</p>`;
-    if (!transfer && !request.skip_existing) $('#import-confirm-summary').insertAdjacentHTML('beforeend', '<p class="import-deletion-warning" role="note">更新匹配的逻辑 KEY 会替换该记录的字段值，本批次未写入或忽略的旧字段也会被清除。若需保留整条旧记录，请返回配置并选择“跳过已存在的唯一 KEY”。</p>');
+    if (request.new_dataset) $('#import-confirm-summary').insertAdjacentHTML('beforeend', `<h4>将创建独立数据模型：${escapeHtml(request.new_dataset.schema_name)}</h4>${modelFieldsOverview({ fields: request.evolved_fields, identity_fields: request.evolved_identity_fields })}<p>数据集、模型、标签和记录将在确认后一起保存。</p>`);
+    if (!transfer && !request.skip_existing && !request.new_dataset) $('#import-confirm-summary').insertAdjacentHTML('beforeend', '<p class="import-deletion-warning" role="note">更新匹配的逻辑 KEY 会替换该记录的字段值，本批次未写入或忽略的旧字段也会被清除。若需保留整条旧记录，请返回配置并选择“跳过已存在的唯一 KEY”。</p>');
     if (!transfer && request.mappings.some(mapping => mapping.target_path)) $('#import-confirm-summary').insertAdjacentHTML('beforeend', '<p class="security-note">目标 JSON 按本批映射重新组装并整字段替换；旧属性不合并。来源缺失的属性省略，显式 null 保留。所有属性使用目标字段统一的用途与加密设置。</p>');
     if (stats.deleted_missing) $('#import-confirm-summary').insertAdjacentHTML('afterbegin', `<p class="import-deletion-warning" role="note">将从目标数据集 ${escapeHtml(target)} 删除 ${stats.deleted_missing} 条本批次缺失的旧记录。请核对文件是否覆盖需要保留的记录。</p>`);
     if (ignored.length) $('#import-confirm-summary').insertAdjacentHTML('beforeend', `<section class="ignored-import-fields"><h4>不会导入的源字段（${ignored.length}）</h4><ul>${ignored.map(source => `<li><code>${escapeHtml(source)}</code></li>`).join('')}</ul></section>`);
@@ -1792,10 +1807,11 @@ async function confirmImport() {
     $('#import-confirmation').hidden = true; $('#import-result').hidden = false;
     const structureOnly = pending.transfer && pending.mode === 'schema';
     $('#import-result').innerHTML = `<h3>${structureOnly ? '结构已导入' : '导入完成'}</h3>${pending.transfer ? `<p>${escapeHtml(pending.request.category_path)} · ${escapeHtml(datasetLabelText(pending.request))}</p>` : ''}<p>${structureOnly ? `${pending.request.dataset_id ? '已更新结构，保留已有记录' : '已创建空数据集'} · ${pending.preview.field_count} 个字段` : `新增 ${result.imported || 0} 条 · 更新 ${result.updated || 0} 条 · 跳过 ${result.skipped || 0} 条${result.deleted_missing ? ` · 删除 ${result.deleted_missing} 条` : ''}`}</p><button id="import-finish" class="primary-button">查看目标数据集</button>`;
-    $('#import-finish').addEventListener('click', () => openManagedDataset(pending.transfer ? result.dataset_id : pending.request.dataset_id, 'basic'));
+    $('#import-finish').addEventListener('click', () => openManagedDataset(pending.transfer || pending.request.new_dataset ? result.dataset_id : pending.request.dataset_id, 'basic'));
     clearImportDiagnostics(); clearImportSamples();
     state.pendingBatchId = null; state.transferPackage = null; state.transferRaw = null; state.importPreview = null;
     clearImportText(); clearImportSelection();
+    $$('#import-new-dataset input, #import-new-dataset textarea').forEach(input => { input.value = ''; });
     $('#import-context').hidden = true;
   } catch (error) { if (current()) { $('#import-action-error').textContent = error.message; $('#import-action-error').hidden = false; } }
   finally {
@@ -1881,12 +1897,14 @@ function closeTopOverlay() {
   if (top.id === 'shared-schema-modal') { closeSharedSchemaEditor(); return; }
   if (top.id === 'schema-preview-modal') { closeSchemaPreview(); return; }
   if (top.id === 'schema-merge-modal' && state.schemaBusy) return;
+  if (top.id === 'physical-delete-modal' && state.deletionBusy) return;
   if (top.tagName === 'DIALOG') { top.close(); return; }
   const close = { 'manual-record-modal': closeManualRecord, 'supplement-modal': closeSupplement, 'record-detail-modal': closeRecordDetail, 'secrets-modal': () => { $('#secrets-modal').hidden = true; $('#secret-fields-list').replaceChildren(); state.secretModalRecordId = null; state.reveal = null; }, 'reveal-modal': () => { $('#reveal-modal').hidden = true; state.pendingReveal = null; } };
   close[top.id]?.();
 }
 
 sealVault = async function(...args) {
+  $$('#import-new-dataset input, #import-new-dataset textarea').forEach(input => { input.value = ''; });
   clearImportDiagnostics(); clearImportSamples(); clearImportText(); clearImportSelection(); clearExportText();
   if (typeof clearSearchTools === 'function') clearSearchTools();
   clearCopyFeedback();
@@ -2445,7 +2463,7 @@ function renderCatalog() {
     button.tabIndex = button.dataset.catalogTab === kind ? 0 : -1;
   });
   $('#catalog-list').innerHTML = state.catalog[kind].map(item => kind === 'schemas'
-    ? `<article class="catalog-item"><div><button class="catalog-model-link" data-view-schema="${escapeHtml(item.id)}">${escapeHtml(item.name)}</button><small>${item.definition.fields.length} 个字段 · ${item.dataset_ids.length} 个数据集</small><small>${escapeHtml(item.dataset_ids.slice(0, 3).map(id => { const d = state.datasets.find(dataset => dataset.id === id); return d ? [d.category_path, datasetLabelText(d)].filter(Boolean).join(' · ') : id; }).join('；'))}${item.dataset_ids.length > 3 ? '…' : ''}</small>${item.description ? `<details class="catalog-model-note"><summary>模型说明</summary><div class="markdown-content">${renderMarkdown(item.description)}</div></details>` : ''}</div><div class="row-actions"><button class="secondary-button" data-edit-schema="${escapeHtml(item.id)}">编辑模型</button><button class="secondary-button" data-merge-schema="${escapeHtml(item.id)}">合并数据集</button>${!item.dataset_ids.length ? `<button class="clear-button" data-delete-catalog="${escapeHtml(item.id)}">删除</button>` : ''}</div></article>`
+    ? `<article class="catalog-item"><div><button class="catalog-model-link" data-view-schema="${escapeHtml(item.id)}">${escapeHtml(item.name)}</button><small>${item.definition.fields.length} 个字段 · ${item.dataset_ids.length} 个数据集</small><small>${escapeHtml(item.dataset_ids.slice(0, 3).map(id => { const d = state.datasets.find(dataset => dataset.id === id); return d ? [d.category_path, datasetLabelText(d)].filter(Boolean).join(' · ') : id; }).join('；'))}${item.dataset_ids.length > 3 ? '…' : ''}</small>${item.description ? `<details class="catalog-model-note"><summary>模型说明</summary><div class="markdown-content">${renderMarkdown(item.description)}</div></details>` : ''}</div><div class="row-actions"><button class="secondary-button" data-edit-schema="${escapeHtml(item.id)}">编辑模型</button><button class="secondary-button" data-merge-schema="${escapeHtml(item.id)}">合并数据集</button><button class="clear-button" data-delete-catalog="${escapeHtml(item.id)}">物理删除…</button></div></article>`
     : `<article class="catalog-item"><label class="catalog-rename"><span class="sr-only">${title}名称</span><input value="${escapeHtml(item.name)}" maxlength="120" data-name-catalog="${escapeHtml(item.id)}" /></label><div class="row-actions"><button class="secondary-button" data-rename-catalog="${escapeHtml(item.id)}">保存名称</button><button class="clear-button" data-delete-catalog="${escapeHtml(item.id)}">删除</button></div></article>`).join('') || '<p class="detail-empty">暂无项目</p>';
   $$('[data-view-schema]').forEach(b => b.addEventListener('click', () => openSharedSchemaView(b.dataset.viewSchema)));
   $$('[data-edit-schema]').forEach(b => b.addEventListener('click', () => openSharedSchemaEditor(b.dataset.editSchema)));
@@ -2456,6 +2474,7 @@ function renderCatalog() {
   })));
   $$('[data-delete-catalog]').forEach(b => b.addEventListener('click', () => {
     const item = state.catalog[kind].find(item => item.id === b.dataset.deleteCatalog);
+    if (kind === 'schemas') { openPhysicalDelete('schemas', b.dataset.deleteCatalog); return; }
     if (!window.confirm(`删除${title}「${item?.name || ''}」？此操作无法撤销。`)) return;
     mutateCatalog(async () => {
       await api(kind === 'schemas' ? `/schemas/${encodeURIComponent(b.dataset.deleteCatalog)}` : `/catalog/${kind}/${encodeURIComponent(b.dataset.deleteCatalog)}`, { method: 'DELETE' });
@@ -2746,10 +2765,76 @@ function clearCatalogState() {
 }
 
 for (const eventName of ['input', 'change']) $('#import-modal').addEventListener(eventName, event => {
-  if (event.target.closest('#batch-options, #transfer-options, #native-import-target, #ordinary-import-target')) {
+  if (event.target.closest('#batch-options, #transfer-options, #native-import-target, #ordinary-import-target, #import-new-dataset')) {
     state.importConfigVersion = (state.importConfigVersion || 0) + 1;
     clearImportSamples(); clearImportDiagnostics(); state.importPreview = null;
   }
+});
+
+async function openPhysicalDelete(kind, id) {
+  if (!state.canManage || state.deletionBusy) return;
+  const epoch = state.sessionEpoch, request = (state.deletionRequest || 0) + 1;
+  state.deletionRequest = request; state.deletionPreview = null;
+  const current = () => state.unlocked && state.canManage && epoch === state.sessionEpoch && request === state.deletionRequest && $('#physical-delete-modal').open;
+  $('#physical-delete-title').textContent = `物理删除${kind === 'datasets' ? '数据集' : '数据模型'}`;
+  $('#physical-delete-impact').textContent = '正在检查删除影响…';
+  $('#physical-delete-name').value = ''; $('#physical-delete-name-wrap').hidden = true;
+  $('#physical-delete-error').hidden = true; $('#confirm-physical-delete').disabled = true;
+  openDialog('physical-delete-modal');
+  try {
+    const preview = await api(`/${kind}/${encodeURIComponent(id)}/deletion-preview`, { method: 'POST' });
+    if (!current()) return;
+    state.deletionPreview = { kind, id, preview };
+    const heading = `<h4>${escapeHtml(preview.name)}</h4>${preview.category_path ? `<p>${escapeHtml(preview.category_path)}</p>` : ''}`;
+    $('#physical-delete-impact').innerHTML = heading + (!preview.allowed
+      ? `<p class="inline-error">模型仍被 ${preview.datasets.length} 个数据集引用。请先迁移引用或删除关联数据集，再删除模型。</p><ul>${preview.datasets.map(dataset => `<li>${escapeHtml(datasetLocator(dataset))}</li>`).join('')}</ul>`
+      : kind === 'datasets'
+        ? `<p>将永久删除 ${preview.records} 条主表记录（包含过期记录）、${preview.protected_fields} 个加密字段、${preview.supplements} 条附表记录及 ${preview.templates} 个映射模板。</p><p>清除 ${preview.scoped_apps} 个应用中的此数据集授权；其中 ${preview.disabled_apps} 个应用因不再具有任何指定数据集，将自动禁用，避免授权范围扩大。</p><p>共享数据模型、标签及审计记录保留。此操作没有回收站，无法撤销；已有导出与备份不受影响。</p>`
+        : '<p>将永久删除此数据模型及字段定义。此模型没有引用数据集，此操作没有回收站，无法撤销。</p>');
+    $('#physical-delete-name-wrap').hidden = !preview.allowed;
+    if (preview.allowed) $('#physical-delete-name').focus();
+  } catch (error) { if (current()) catalogError('physical-delete-error', error); }
+}
+
+async function confirmPhysicalDelete() {
+  const pending = state.deletionPreview, epoch = state.sessionEpoch;
+  if (!state.canManage || !pending?.preview.allowed || state.deletionBusy || $('#physical-delete-name').value !== pending.preview.name) return;
+  state.deletionBusy = true; setFormBusy($('#physical-delete-modal'), true);
+  $('#physical-delete-error').hidden = true;
+  try {
+    await api(`/${pending.kind}/${encodeURIComponent(pending.id)}`, { method: 'DELETE', body: JSON.stringify({ confirmation_token: pending.preview.confirmation_token, expires_at: pending.preview.expires_at, expected_name: $('#physical-delete-name').value }) });
+    if (!state.unlocked || epoch !== state.sessionEpoch || state.deletionPreview !== pending) return;
+    if (pending.kind === 'datasets') {
+      if (state.selectedDatasetId === pending.id) state.selectedDatasetId = null;
+      if (state.recordDetail?.dataset_id === pending.id) closeRecordDetail();
+      state.managedDatasetId = null; state.apps = [];
+      showWorkspace('datasets');
+    } else if (state.schemaFilter === pending.id) state.schemaFilter = '';
+    $('#physical-delete-modal').close();
+    await refreshAfterWrite();
+    if (!state.unlocked || epoch !== state.sessionEpoch) return;
+    if ($('#catalog-modal').open && await loadCatalog()) renderCatalog();
+    showToast('已物理删除', 'success');
+  } catch (error) {
+    if (state.unlocked && epoch === state.sessionEpoch && state.deletionPreview === pending) {
+      state.deletionPreview = null; $('#physical-delete-name-wrap').hidden = true;
+      catalogError('physical-delete-error', error);
+      $('#physical-delete-error').append(document.createTextNode(' 请关闭后重新检查删除影响。'));
+    }
+  } finally {
+    state.deletionBusy = false; setFormBusy($('#physical-delete-modal'), false);
+    $('#confirm-physical-delete').disabled = !state.deletionPreview?.preview.allowed || $('#physical-delete-name').value !== state.deletionPreview.preview.name;
+  }
+}
+$('#physical-delete-name').addEventListener('input', () => {
+  $('#confirm-physical-delete').disabled = state.deletionBusy || !state.deletionPreview?.preview.allowed || $('#physical-delete-name').value !== state.deletionPreview.preview.name;
+});
+$('#confirm-physical-delete').addEventListener('click', confirmPhysicalDelete);
+for (const id of ['close-physical-delete', 'cancel-physical-delete']) $('#' + id).addEventListener('click', () => { if (!state.deletionBusy) $('#physical-delete-modal').close(); });
+$('#physical-delete-modal').addEventListener('cancel', event => { if (state.deletionBusy) event.preventDefault(); });
+$('#physical-delete-modal').addEventListener('close', () => {
+  state.deletionRequest = (state.deletionRequest || 0) + 1; state.deletionPreview = null;
+  $('#physical-delete-name').value = ''; $('#physical-delete-impact').replaceChildren(); $('#physical-delete-error').replaceChildren();
 });
 
 // Secondary actions float above the list so expanding a disclosure never resizes its row.

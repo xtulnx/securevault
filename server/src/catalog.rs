@@ -523,22 +523,6 @@ pub(super) async fn delete_named(
     })
     .await
 }
-pub(super) async fn delete_schema(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> ApiResult<Json<Value>> {
-    with_connection(&state, |db, _| {
-        exists(db, "shared_schemas", &id)?;
-        if !linked(db, &id)?.is_empty() {
-            return Err(bad_request("数据模型仍被数据集引用，不能删除"));
-        }
-        db.execute("DELETE FROM shared_schemas WHERE id=?1", [id])
-            .map_err(internal)?;
-        Ok(Json(json!({"deleted":true})))
-    })
-    .await
-}
-
 fn request_definition(db: &Connection, request: &PublishRequest) -> ApiResult<Definition> {
     let definition = if let Some(d) = &request.definition {
         d.clone()
@@ -2144,9 +2128,10 @@ mod runtime_tests {
         )
         .await
         .is_err());
-        assert!(delete_schema(
+        assert!(lifecycle::delete_schema(
             State(state.clone()),
-            Path(a["schema_id"].as_str().unwrap().into())
+            Path(a["schema_id"].as_str().unwrap().into()),
+            Json(serde_json::from_value(json!({"confirmation_token":"", "expected_name":"", "expires_at":0})).unwrap())
         )
         .await
         .is_err());

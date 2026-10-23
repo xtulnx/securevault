@@ -109,6 +109,20 @@ def run(serve=False):
                     assert saved[0]['mappings'][1]['target_path'] == 'artist.id'
                     return request
 
+                def create_from_import(batch, label):
+                    request = dict(batch_id=batch['batch_id'], new_dataset=dict(name=label, category_path='导入新建/' + label, schema_name='模型-' + label, schema_description='测试模型说明', environment_names=['新建测试']), mappings=assembly_mappings, evolved_fields=assembly_fields, evolved_identity_fields=['code'])
+                    before = client.request('/datasets')
+                    catalog = client.request('/catalog')
+                    preview = client.request('/records/import/preview', request)
+                    assert preview['valid'] and preview['created_dataset'] and preview['imported'] == 2
+                    assert client.request('/datasets') == before
+                    assert client.request('/catalog') == catalog, 'preview persisted schema or labels'
+                    result = client.request('/records/import', request)
+                    assert values(result['dataset_id']) == assembly_expected
+                    model = next(item for item in client.request('/catalog')['schemas'] if item['id'] == result['model']['schema_id'])
+                    assert model['name'] == '模型-' + label and model['description'] == '测试模型说明'
+                    return result
+
                 source = dataset('来源', rows)
                 search = client.search(dataset_id=source)['records']
                 expired_id = next(row['id'] for row in search if row['indexes']['code'] == '002')
@@ -139,11 +153,46 @@ def run(serve=False):
                     target = assembly_dataset('文件-' + fmt)
                     assembly_request = assembly_import(target, upload(assembly_body, 'source.' + fmt), '组装-文件-' + fmt)
                     checks.append(f'{fmt} file JSON assembly preview/replace/skip, exact types, protected JSON and saved mappings')
+                    created = create_from_import(upload(assembly_body, 'create.' + fmt), '文件-' + fmt)
+                    checks.append(f'{fmt} file creates a model and dataset atomically from parsed fields')
                     if fmt != 'xlsx':
                         parsed = client.request('/imports/text', dict(text=assembly_body.decode(), format=fmt))
                         target = assembly_dataset('文本-' + fmt)
                         assembly_request = assembly_import(target, parsed, '组装-文本-' + fmt)
                         checks.append(f'{fmt} text JSON assembly preview/replace/skip and template paths')
+                        created = create_from_import(parsed, '文本-' + fmt)
+                        checks.append(f'{fmt} text creates a model and dataset atomically from parsed fields')
+
+                # Physical deletion requires fresh impact and exact name; models in use remain protected.
+                delete_id, delete_schema = created['dataset_id'], created['model']['schema_id']
+                model_impact = client.request(f'/schemas/{delete_schema}/deletion-preview', {})
+                assert not model_impact['allowed'] and len(model_impact['datasets']) == 1
+                def confirmation(info):
+                    return dict(expected_name=info['name'], confirmation_token=info['confirmation_token'], expires_at=info['expires_at'])
+                client.request(f'/schemas/{delete_schema}', confirmation(model_impact), method='DELETE', expected=400)
+                scoped_app = client.request('/apps', dict(name='删除后撤权', permission='search', datasets=[delete_id]))
+                deletion = client.request(f'/datasets/{delete_id}/deletion-preview', {})
+                assert deletion['records'] == 2 and deletion['protected_fields'] == 2 and deletion['disabled_apps'] == 1
+                row_id = client.search(dataset_id=delete_id)['records'][0]['id']
+                client.request(f'/records/{row_id}/expired', dict(expired=True))
+                client.request(f'/datasets/{delete_id}', confirmation(deletion), method='DELETE', expected=409)
+                deletion = client.request(f'/datasets/{delete_id}/deletion-preview', {})
+                client.request(f'/datasets/{delete_id}', {**confirmation(deletion), 'expected_name': 'wrong'}, method='DELETE', expected=400)
+                stranger = Client(port)
+                creds = {'X-App-Id': scoped_app['id'], 'X-App-Key': scoped_app['key']}
+                stranger.request(f'/datasets/{delete_id}/deletion-preview', {}, expected=401)
+                stranger.request(f'/datasets/{delete_id}/deletion-preview', {}, headers=creds, expected=403)
+                stranger.request(f'/datasets/{delete_id}', confirmation(deletion), method='DELETE', headers=creds, expected=403)
+                client.request(f'/datasets/{delete_id}', confirmation(deletion), method='DELETE', headers={'Origin': 'https://invalid.example.test'}, expected=403)
+                client.request(f'/datasets/{delete_id}', confirmation(deletion), method='DELETE')
+                client.request(f'/datasets/{delete_id}/deletion-preview', {}, expected=404)
+                app_state = next(item for item in client.request('/apps')['apps'] if item['id'] == scoped_app['id'])
+                assert app_state['disabled'] and app_state['datasets'] == []
+                model_impact = client.request(f'/schemas/{delete_schema}/deletion-preview', {})
+                assert model_impact['allowed']
+                client.request(f'/schemas/{delete_schema}', confirmation(model_impact), method='DELETE')
+                client.request(f'/schemas/{delete_schema}/deletion-preview', {}, expected=404)
+                checks.append('physical deletion, referenced-model blocking, stale preview, name, owner/CSRF and scoped-app revocation')
 
                 # Null is written, absence is omitted, and objects/arrays retain their types.
                 typed = dict(code='typed', artist_id=9007199254740993, bundle_ids=['app.one', 'app.two'], nil=None, empty='', encoded=json.dumps({'item': {'enabled': False, 'count': 0}}))

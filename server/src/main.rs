@@ -36,6 +36,7 @@ mod supplement;
 mod search_rank;
 mod transfer;
 mod import_diagnostics;
+mod lifecycle;
 mod record_formats;
 mod security;
 mod authorization_events;
@@ -316,7 +317,10 @@ fn default_conflict() -> String {
 
 #[derive(Deserialize, Serialize)]
 struct ImportRequest {
+    #[serde(default)]
     dataset_id: String,
+    #[serde(default)]
+    new_dataset: Option<import_diagnostics::NewDataset>,
     batch_id: String,
     #[serde(default)]
     mappings: Vec<FieldMapping>,
@@ -651,10 +655,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .route("/catalog/{kind}/{id}", axum::routing::patch(catalog::rename_named).delete(catalog::delete_named))
         .route("/schemas/preview", post(catalog::preview))
         .route("/schemas/publish", post(catalog::publish))
-        .route("/schemas/{id}", axum::routing::delete(catalog::delete_schema))
+        .route("/schemas/{id}", axum::routing::delete(lifecycle::delete_schema))
+        .route("/schemas/{id}/deletion-preview", post(lifecycle::preview_schema))
         .route("/datasets", get(list_datasets).post(create_dataset))
         .route("/client/datasets", get(client::datasets))
-        .route("/datasets/{id}", axum::routing::patch(update_dataset))
+        .route("/datasets/{id}", axum::routing::patch(update_dataset).delete(lifecycle::delete_dataset))
+        .route("/datasets/{id}/deletion-preview", post(lifecycle::preview_dataset))
         .route("/datasets/{id}/export", get(export_dataset))
         .route("/datasets/{id}/templates", get(list_import_templates))
         .route("/datasets/tree", get(dataset_tree))
@@ -1486,8 +1492,17 @@ fn insert_records(
 
 async fn create_dataset(
     State(state): State<AppState>,
-    Json(mut request): Json<DatasetCreateRequest>,
+    Json(request): Json<DatasetCreateRequest>,
 ) -> ApiResult<Json<Value>> {
+    with_connection(&state, |db, keys| {
+        let tx = db.unchecked_transaction().map_err(internal)?;
+        let result = create_dataset_in_connection(&tx, keys, request)?;
+        tx.commit().map_err(internal)?;
+        Ok(Json(result))
+    }).await
+}
+
+fn create_dataset_in_connection(connection: &Connection, keys: &KeySet, mut request: DatasetCreateRequest) -> ApiResult<Value> {
     let category = normalize_category(&request.category_path)?;
     let name = normalize_dataset_name(&request.name)?;
     let requested_environment = request.environment.clone().filter(|value| !value.trim().is_empty());
@@ -1502,37 +1517,32 @@ async fn create_dataset(
         ));
     }
     let dataset_id = format!("ds_{}", Uuid::new_v4().simple());
-    with_connection(&state, |db, keys| {
-        let tx = db.unchecked_transaction().map_err(internal)?;
-        let connection = &tx;
-        let shared = request.schema_id.as_deref().map(|id| catalog::read(connection,id)).transpose()?;
-        if let Some(definition) = &shared {
-            request.fields = definition.fields.clone(); request.identity_fields = definition.identity_fields.clone();
-            request.list_fields = definition.list_fields.clone(); request.display_config = definition.display_config.clone();
-        }
-        validate_schema(&request.fields, &request.identity_fields, &request.list_fields)?;
-        validate_display_config(&request.display_config, &request.fields)?;
-        let environment_ids=catalog::resolve_environments(connection,request.environment_ids.as_deref(),request.environment_names.as_deref(),request.environment_id.as_deref(),requested_environment.as_deref(),false)?.unwrap_or_default();
-        let environment=environment_ids.first().map(|id|catalog::environment_name(connection,id)).transpose()?;
-        let definitions_json = serde_json::to_string(&request.fields).map_err(internal)?;
-        let identity_json = serde_json::to_string(&request.identity_fields).map_err(internal)?;
-        let list_fields = if request.list_fields.is_empty() && shared.is_none() {
-            request.fields.iter().filter(|field| matches!(field.zone.as_str(), "indexes" | "display")).enumerate().map(|(position, field)| ListFieldDefinition { source_key: field.source_key.clone(), display_name: field.display_name.clone(), position, format: default_list_format(), visible: true }).collect::<Vec<_>>()
-        } else { request.list_fields.clone() };
-        let list_fields_json = serde_json::to_string(&list_fields).map_err(internal)?;
-        connection.execute("INSERT INTO datasets(id,category_path,environment,fields_json,identity_fields_json,conflict_strategy,list_fields_json,description,display_config_json,name) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![dataset_id, category, environment, definitions_json, identity_json, request.conflict_strategy, list_fields_json, request.description, serde_json::to_string(&request.display_config).map_err(internal)?, name]).map_err(internal)?;
-        if let Some(schema) = request.schema_id.as_deref() {
-            connection.execute("UPDATE datasets SET schema_id=?2 WHERE id=?1",params![dataset_id,schema]).map_err(internal)?;
-            supplement::save_schema_in_connection(connection,keys,&dataset_id,&shared.as_ref().unwrap().supplement_fields)?;
-        } else { catalog::ensure_dataset(connection,&dataset_id)?; }
-        catalog::set_environments(connection,&dataset_id,&environment_ids)?;
-        catalog::assign_metadata(connection,&dataset_id)?;
-        let import = if records.is_empty() { json!({"imported":0,"record_ids":[],"duplicates":[]}) } else { insert_records(connection, keys, &dataset_id, &category, environment.as_deref(), &request.fields, &request.identity_fields, &records, false)? };
-        let mut result = json!({ "dataset_id": dataset_id, "category_path": category, "environment": environment, "description": request.description, "fields": request.fields, "identity_fields": request.identity_fields, "import": import });
-        catalog::enrich(connection,&mut result)?;
-        tx.commit().map_err(internal)?;
-        Ok(Json(result))
-    }).await
+    let shared = request.schema_id.as_deref().map(|id| catalog::read(connection,id)).transpose()?;
+    if let Some(definition) = &shared {
+        request.fields = definition.fields.clone(); request.identity_fields = definition.identity_fields.clone();
+        request.list_fields = definition.list_fields.clone(); request.display_config = definition.display_config.clone();
+    }
+    validate_schema(&request.fields, &request.identity_fields, &request.list_fields)?;
+    validate_display_config(&request.display_config, &request.fields)?;
+    let environment_ids=catalog::resolve_environments(connection,request.environment_ids.as_deref(),request.environment_names.as_deref(),request.environment_id.as_deref(),requested_environment.as_deref(),false)?.unwrap_or_default();
+    let environment=environment_ids.first().map(|id|catalog::environment_name(connection,id)).transpose()?;
+    let definitions_json = serde_json::to_string(&request.fields).map_err(internal)?;
+    let identity_json = serde_json::to_string(&request.identity_fields).map_err(internal)?;
+    let list_fields = if request.list_fields.is_empty() && shared.is_none() {
+        request.fields.iter().filter(|field| matches!(field.zone.as_str(), "indexes" | "display")).enumerate().map(|(position, field)| ListFieldDefinition { source_key: field.source_key.clone(), display_name: field.display_name.clone(), position, format: default_list_format(), visible: true }).collect::<Vec<_>>()
+    } else { request.list_fields.clone() };
+    let list_fields_json = serde_json::to_string(&list_fields).map_err(internal)?;
+    connection.execute("INSERT INTO datasets(id,category_path,environment,fields_json,identity_fields_json,conflict_strategy,list_fields_json,description,display_config_json,name) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![dataset_id, category, environment, definitions_json, identity_json, request.conflict_strategy, list_fields_json, request.description, serde_json::to_string(&request.display_config).map_err(internal)?, name]).map_err(internal)?;
+    if let Some(schema) = request.schema_id.as_deref() {
+        connection.execute("UPDATE datasets SET schema_id=?2 WHERE id=?1",params![dataset_id,schema]).map_err(internal)?;
+        supplement::save_schema_in_connection(connection,keys,&dataset_id,&shared.as_ref().unwrap().supplement_fields)?;
+    } else { catalog::ensure_dataset(connection,&dataset_id)?; }
+    catalog::set_environments(connection,&dataset_id,&environment_ids)?;
+    catalog::assign_metadata(connection,&dataset_id)?;
+    let import = if records.is_empty() { json!({"imported":0,"record_ids":[],"duplicates":[]}) } else { insert_records(connection, keys, &dataset_id, &category, environment.as_deref(), &request.fields, &request.identity_fields, &records, false)? };
+    let mut result = json!({ "dataset_id": dataset_id, "category_path": category, "environment": environment, "description": request.description, "fields": request.fields, "identity_fields": request.identity_fields, "import": import });
+    catalog::enrich(connection,&mut result)?;
+    Ok(result)
 }
 
 async fn update_dataset(

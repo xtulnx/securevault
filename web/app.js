@@ -615,8 +615,8 @@ function renderStats() {
 }
 
 function datasetOptions() {
-  $("#import-dataset-select").innerHTML = state.datasets.map((dataset) => `<option value="${escapeHtml(dataset.id)}">${escapeHtml(datasetLocator(dataset))} · ${escapeHtml(datasetLabelText(dataset))}</option>`).join("");
-  $("#import-button").disabled = state.datasets.length === 0;
+  $("#import-dataset-select").innerHTML = '<option value="__new">＋ 根据导入数据新建数据集与模型</option>' + state.datasets.map((dataset) => `<option value="${escapeHtml(dataset.id)}">${escapeHtml(datasetLocator(dataset))} · ${escapeHtml(datasetLabelText(dataset))}</option>`).join("");
+  $("#import-button").disabled = false;
 }
 
 async function refreshAfterWrite() {
@@ -1146,7 +1146,7 @@ async function configureImportBatch(batch, datasetId, isCurrent = () => state.un
     const existingDataset = state.datasets.find((item) => item.id === datasetId);
     if ($("#delete-missing").checked && !existingDataset?.identity_fields?.length) throw new Error("该数据集尚未配置逻辑唯一 KEY，不能按批次删除旧记录");
     const dataset = state.datasets.find((item) => item.id === datasetId);
-    const templateResult = await api(`/datasets/${encodeURIComponent(datasetId)}/templates`);
+    const templateResult = datasetId === '__new' ? { templates: [] } : await api(`/datasets/${encodeURIComponent(datasetId)}/templates`);
     if (!isCurrent()) return;
     state.pendingBatchId = batch.batch_id;
     $("#batch-summary").textContent = `${batch.filename}${batch.sheet ? ` · 工作表：${batch.sheet}` : ""}${batch.node_path ? ` · 节点：${batch.node_path}` : ""} · ${batch.record_count} 条 · ${batch.source_fields.length} 个源字段`;

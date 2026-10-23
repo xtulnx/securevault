@@ -73,6 +73,14 @@ XLSX 单工作表沿用直接解析，多工作表先列出工作表名称，明
 
 预检与提交请求的 mappings 元素新增可选 target_path；原有 json_path 保持来源抽取含义。例如 {"source_key":"artist_id","target_key":"payload","target_path":"artist.id"}。旧模板省略 target_path 时兼容原行为；保存、恢复和原生数据集包迁移保留两个路径。诊断中 scope=mappings 的 row 指映射行，scope=records 的 row 指源记录；JSON 和 CSV 报告包含 target_path，报告不包含记录值。
 
+根据普通导入数据新建数据集
+--------------------------
+目标数据集选择“根据导入数据新建数据集与模型”。无需先建立空数据集，空保险库也可直接进入导入。填写目标目录、新模型名称，可选数据集名称、标签、数据集描述和模型说明；上传文件或粘贴文本后，根据解析出的来源字段配置映射、字段用途、显示名称和逻辑 KEY。JSON 组装、记录节点和 XLSX 工作表选择沿用已有流程。
+
+确认页列出将创建的独立模型及字段定义。预检和错误报告会回滚临时创建的所有对象，确认后才在一个事务中保存数据集、独立模型、标签、模板及记录；任何错误均整批回滚。取消、解析失败或映射冲突不会留下空数据集。新建模式不提供“跳过已有记录”和“删除缺失记录”；批次内部相同逻辑 KEY 沿用顺序更新规则。模型即使同名也不自动合并，可在创建后通过数据模型管理手动合并。
+
+普通预检、报告和提交 API 支持 new_dataset 对象，包含 category_path、schema_name，及可选 name、description、schema_description、environment_names。此时 dataset_id 留空或省略，evolved_fields 与 evolved_identity_fields 定义新模型，mappings 定义来源到目标的关系。new_dataset 不能与已有 dataset_id、skip_existing=true 或 delete_missing=true 混用。提交返回 created_dataset=true、实际 dataset_id 和 model；预检返回的临时 ID 不可作为后续目标使用，应以原请求提交并使用最终返回的 ID。
+
 数组索引字段
 
 索引字段允许 JSON 数组，不需要将 bundle_ids 拼成字符串。检索按任一元素匹配，例如 bundle_ids:=com.example.one；包含、前缀、后缀、正则同样按元素计算。多个条件仍是 AND，可分别命中同一数组中的不同元素。空数组不命中任何条件。数组字段在摘要中按实际命中的元素高亮，评分取该条件最佳元素，元素重复不额外加分。
