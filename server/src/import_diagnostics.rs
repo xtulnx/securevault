@@ -11,6 +11,8 @@ pub(super) struct Issue {
     source_key: String,
     target_key: String,
     json_path: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    target_path: String,
     code: String,
     message: String,
 }
@@ -28,20 +30,25 @@ impl Report {
     pub fn add(&mut self, scope: &str, row: usize, error: bool, source: &str, target: &str, path: &str, code: &str, message: &str) {
         if error { self.error_count += 1; } else { self.warning_count += 1; }
         if self.issues.len() < ISSUE_LIMIT {
-            self.issues.push(Issue { scope: scope.into(), row, severity: if error { "error" } else { "warning" }.into(), source_key: source.into(), target_key: target.into(), json_path: path.into(), code: code.into(), message: message.into() });
+            self.issues.push(Issue { scope: scope.into(), row, severity: if error { "error" } else { "warning" }.into(), source_key: source.into(), target_key: target.into(), json_path: path.into(), target_path: String::new(), code: code.into(), message: message.into() });
         } else { self.truncated = true; }
+    }
+    fn mapping_issue(&mut self, scope: &str, row: usize, error: bool, mapping: &FieldMapping, code: &str, message: &str) {
+        let previous = self.issues.len();
+        self.add(scope, row, error, &mapping.source_key, &mapping.target_key, mapping.json_path.as_deref().unwrap_or(""), code, message);
+        if self.issues.len() > previous { self.issues.last_mut().unwrap().target_path = mapping.target_path.clone().unwrap_or_default(); }
     }
     pub fn response(&self, format: Option<&str>) -> ApiResult<Response> {
         let mut response = match format.unwrap_or("json") {
             "json" => Json(self).into_response(),
             "csv" => {
                 let mut writer = csv::Writer::from_writer(Vec::new());
-                writer.write_record(["scope", "row", "severity", "source_key", "target_key", "json_path", "code", "message"]).map_err(internal)?;
+                writer.write_record(["scope", "row", "severity", "source_key", "target_key", "json_path", "target_path", "code", "message"]).map_err(internal)?;
                 for item in &self.issues {
-                    writer.write_record([item.scope.clone(), item.row.to_string(), item.severity.clone(), item.source_key.clone(), item.target_key.clone(), item.json_path.clone(), item.code.clone(), item.message.clone()].iter().map(|v| csv_safe(v))).map_err(internal)?;
+                    writer.write_record([item.scope.clone(), item.row.to_string(), item.severity.clone(), item.source_key.clone(), item.target_key.clone(), item.json_path.clone(), item.target_path.clone(), item.code.clone(), item.message.clone()].iter().map(|v| csv_safe(v))).map_err(internal)?;
                 }
                 // Metadata remains in the downloaded report even when the retained issue list is capped.
-                writer.write_record(["summary".to_owned(), self.checked_rows.to_string(), format!("errors={};warnings={};truncated={}", self.error_count, self.warning_count, self.truncated), String::new(), String::new(), String::new(), String::new(), format!("issue_limit={ISSUE_LIMIT}")]).map_err(internal)?;
+                writer.write_record(["summary".to_owned(), self.checked_rows.to_string(), format!("errors={};warnings={};truncated={}", self.error_count, self.warning_count, self.truncated), String::new(), String::new(), String::new(), String::new(), String::new(), format!("issue_limit={ISSUE_LIMIT}")]).map_err(internal)?;
                 let mut bytes = vec![0xef, 0xbb, 0xbf]; bytes.extend(writer.into_inner().map_err(internal)?);
                 ([(header::CONTENT_TYPE, "text/csv; charset=utf-8"), (header::CONTENT_DISPOSITION, "attachment; filename=\"securevault-import-report.csv\"")], bytes).into_response()
             }
@@ -59,7 +66,7 @@ pub(super) fn validate_path(path: &str) -> ApiResult<()> {
     }
     Ok(())
 }
-pub(super) fn extract(input: &Value, source: &str, path: Option<&str>) -> Result<Value, &'static str> {
+fn extract_value(input: &Value, source: &str, path: Option<&str>) -> Result<Value, &'static str> {
     let Some(mut value) = input.get(source).cloned() else { return Err("source_missing"); };
     if let Some(path) = path.filter(|p| !p.is_empty()) {
         if let Value::String(text) = value { value = serde_json::from_str(&text).map_err(|_| "invalid_json")?; }
@@ -69,7 +76,24 @@ pub(super) fn extract(input: &Value, source: &str, path: Option<&str>) -> Result
             } else { value.get(segment).cloned() }.ok_or("path_missing")?;
         }
     }
-    if value.is_null() { Err("matched_null") } else { Ok(value) }
+    Ok(value)
+}
+pub(super) fn extract(input: &Value, source: &str, path: Option<&str>) -> Result<Value, &'static str> {
+    extract_value(input, source, path).and_then(|value| if value.is_null() { Err("matched_null") } else { Ok(value) })
+}
+fn fits_depth(value: &Value, remaining: usize) -> bool {
+    match value {
+        Value::Array(items) => remaining > 0 && items.iter().all(|value| fits_depth(value, remaining - 1)),
+        Value::Object(items) => remaining > 0 && items.values().all(|value| fits_depth(value, remaining - 1)),
+        _ => true,
+    }
+}
+fn extract_for_target(input: &Value, source: &str, path: Option<&str>, target_depth: usize) -> Result<Value, &'static str> {
+    if target_depth == 0 { return extract(input, source, path); }
+    let value = extract_value(input, source, path)?;
+    // Leave room for record/export envelopes under the JSON reader's recursion limit.
+    if !fits_depth(&value, 64 - target_depth) { return Err("assembled_depth_exceeded"); }
+    Ok(value)
 }
 fn reason(code: &str) -> &'static str {
     match code {
@@ -77,31 +101,78 @@ fn reason(code: &str) -> &'static str {
         "invalid_json" => "源字段不是有效 JSON，无法按路径抽取",
         "path_missing" => "路径未命中，不写入此字段；更新匹配记录时会清除旧值",
         "matched_null" => "结果为 null，不写入此字段；更新匹配记录时会清除旧值",
+        "assembled_depth_exceeded" => "目标 JSON 组装后超过 64 层，请缩短目标属性路径或简化来源对象",
         _ => "抽取成功",
     }
 }
-fn validate_mappings(mappings: &[FieldMapping]) -> ApiResult<()> {
+fn target_parts(path: &str) -> ApiResult<Vec<&str>> {
+    if path.is_empty() { return Ok(Vec::new()); }
+    let parts: Vec<_> = path.split('.').collect();
+    if path.len() > 1024 || parts.len() > 32 || parts.iter().any(|part| part.is_empty() || part.trim() != *part || part.chars().any(|c| c.is_control() || "[]*$".contains(c)) || part.chars().all(|c| c.is_ascii_digit())) {
+        return Err(bad_request("目标属性路径最多 1024 字节、32 层，仅支持点分隔的对象属性；不支持空段、数组下标或通配符"));
+    }
+    Ok(parts)
+}
+fn target_conflicts(a: &FieldMapping, b: &FieldMapping) -> bool {
+    if a.target_key != b.target_key { return false; }
+    let a = a.target_path.as_deref().unwrap_or("");
+    let b = b.target_path.as_deref().unwrap_or("");
+    a.is_empty() || b.is_empty() || a == b || a.strip_prefix(b).is_some_and(|suffix| suffix.starts_with('.')) || b.strip_prefix(a).is_some_and(|suffix| suffix.starts_with('.'))
+}
+fn mapping_report(mappings: &[FieldMapping], report: &mut Report) -> ApiResult<()> {
     if mappings.len() > 256 { return Err(bad_request("单批最多 256 个字段映射")); }
-    let mut targets = HashSet::new();
-    for m in mappings {
-        if m.source_key.is_empty() || m.target_key.is_empty() || m.source_key.len() > 1024 || m.target_key.len() > 1024 || !targets.insert(&m.target_key) {
-            return Err(bad_request("映射字段不能为空、超过 1024 字节或重复写入同一目标字段"));
+    for (index, m) in mappings.iter().enumerate() {
+        if m.source_key.is_empty() || m.target_key.is_empty() || m.source_key.len() > 1024 || m.target_key.len() > 1024 {
+            report.mapping_issue("mappings", index + 1, true, m, "invalid_mapping", "来源和目标字段不能为空或超过 1024 字节");
         }
-        validate_path(m.json_path.as_deref().unwrap_or(""))?;
+        if let Err(error) = validate_path(m.json_path.as_deref().unwrap_or("")) {
+            report.mapping_issue("mappings", index + 1, true, m, "invalid_source_path", &error.1);
+        }
+        if let Err(error) = target_parts(m.target_path.as_deref().unwrap_or("")) {
+            report.mapping_issue("mappings", index + 1, true, m, "invalid_target_path", &error.1);
+        }
+        if mappings.iter().enumerate().any(|(other, candidate)| other != index && target_conflicts(m, candidate)) {
+            report.mapping_issue("mappings", index + 1, true, m, "target_path_conflict", "同一目标字段存在重复或父子路径，或混用整字段赋值和属性写入；请保留互不重叠的目标路径");
+        }
     }
     Ok(())
 }
+pub(super) fn validate_mapping_configuration(mappings: &[FieldMapping]) -> ApiResult<()> {
+    let mut report = Report::new(0);
+    mapping_report(mappings, &mut report)?;
+    if report.error_count > 0 { return Err(bad_request("导入模板包含无效或冲突的字段映射")); }
+    Ok(())
+}
+fn assign_property(object: &mut Value, parts: &[&str], value: Value) {
+    // Validated disjoint paths ensure intermediate nodes can only be objects.
+    let mut current = object;
+    for part in &parts[..parts.len() - 1] {
+        current = current.as_object_mut().unwrap().entry((*part).to_owned()).or_insert_with(|| json!({}));
+    }
+    current.as_object_mut().unwrap().insert(parts.last().unwrap().to_string(), value);
+}
 pub(super) fn map_and_report(inputs: &[Value], request: &ImportRequest, identity: &[String]) -> ApiResult<(Vec<Value>, Report)> {
-    validate_mappings(&request.mappings)?;
     let mut report = Report::new(inputs.len());
+    mapping_report(&request.mappings, &mut report)?;
+    if report.error_count > 0 { return Ok((vec![], report)); }
+    let paths = request.mappings.iter().map(|m| target_parts(m.target_path.as_deref().unwrap_or(""))).collect::<ApiResult<Vec<_>>>()?;
     let mut output = Vec::with_capacity(inputs.len());
     let mut identities = HashSet::new();
     for (index, input) in inputs.iter().enumerate() {
         let mut record = if request.mappings.is_empty() { input.clone() } else { json!({}) };
-        for m in &request.mappings {
-            match extract(input, &m.source_key, m.json_path.as_deref()) {
-                Ok(value) => { record[&m.target_key] = value; }
-                Err(code) => report.add("records", index + 1, code == "invalid_json", &m.source_key, &m.target_key, m.json_path.as_deref().unwrap_or(""), code, reason(code)),
+        for (m, parts) in request.mappings.iter().zip(&paths) {
+            if !parts.is_empty() { record.as_object_mut().unwrap().entry(m.target_key.clone()).or_insert_with(|| json!({})); }
+            let assembling = !parts.is_empty();
+            let result = extract_for_target(input, &m.source_key, m.json_path.as_deref(), parts.len());
+            match result {
+                Ok(value) => {
+                    if assembling {
+                        let object = record.as_object_mut().unwrap().entry(m.target_key.clone()).or_insert_with(|| json!({}));
+                        assign_property(object, parts, value);
+                    } else { record[&m.target_key] = value; }
+                }
+                Err(code) => report.mapping_issue("records", index + 1, matches!(code, "invalid_json" | "assembled_depth_exceeded"), m, code,
+                    if assembling && matches!(code, "source_missing" | "path_missing") { "来源字段或路径缺失，本次不生成该属性；更新时不会保留目标 JSON 的旧属性" } else { reason(code) }),
             }
         }
         if !identity.is_empty() {
@@ -131,7 +202,16 @@ async fn with_batch<T>(state: &AppState, id: &str, operation: impl FnOnce(&[Valu
 fn scan(db: &Connection, inputs: &[Value], request: &ImportRequest) -> ApiResult<(Vec<Value>, Report)> {
     let raw: String = db.query_row("SELECT identity_fields_json FROM datasets WHERE id=?1", [&request.dataset_id], |r| r.get(0)).optional().map_err(internal)?.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "目标数据集不存在".into()))?;
     let identity = if request.evolved_fields.is_empty() { serde_json::from_str(&raw).map_err(internal)? } else { request.evolved_identity_fields.clone() };
-    map_and_report(inputs, request, &identity)
+    let (mapped, mut report) = map_and_report(inputs, request, &identity)?;
+    let raw_fields: String = db.query_row("SELECT fields_json FROM datasets WHERE id=?1", [&request.dataset_id], |row| row.get(0)).map_err(internal)?;
+    let mut fields: Vec<FieldDefinition> = serde_json::from_str(&raw_fields).map_err(internal)?;
+    fields.extend(request.evolved_fields.iter().cloned());
+    for (index, mapping) in request.mappings.iter().enumerate() {
+        if mapping.target_path.as_deref().is_some_and(|p| !p.is_empty()) && !fields.iter().any(|field| field.source_key == mapping.target_key) {
+            report.mapping_issue("mappings", index + 1, true, mapping, "undefined_json_target", "请先定义目标 JSON 字段及其用途，或随导入创建该字段");
+        }
+    }
+    Ok((mapped, report))
 }
 pub(super) async fn run(state: AppState, request: ImportRequest, preview: bool) -> ApiResult<Json<Value>> {
     with_batch(&state, &request.batch_id, |inputs, keys| {
@@ -158,7 +238,7 @@ pub(super) async fn report(State(state): State<AppState>, Query(format): Query<F
     }).await
 }
 #[derive(Deserialize)]
-pub(super) struct SampleRequest { source_key: String, #[serde(default)] json_path: Option<String>, #[serde(default)] reveal: bool }
+pub(super) struct SampleRequest { source_key: String, #[serde(default)] json_path: Option<String>, #[serde(default)] target_path: Option<String>, #[serde(default)] reveal: bool }
 fn sample_value(value: Option<&Value>, reveal: bool) -> Value {
     let Some(value) = value else { return json!({"present":false}); };
     let kind = match value { Value::Null => "null", Value::Bool(_) => "boolean", Value::Number(_) => "number", Value::String(_) => "string", Value::Array(_) => "array", Value::Object(_) => "object" };
@@ -168,6 +248,7 @@ fn sample_value(value: Option<&Value>, reveal: bool) -> Value {
 }
 pub(super) async fn samples(State(state): State<AppState>, Path(id): Path<String>, Json(request): Json<SampleRequest>) -> ApiResult<Response> {
     validate_path(request.json_path.as_deref().unwrap_or(""))?;
+    let target_depth = target_parts(request.target_path.as_deref().unwrap_or(""))?.len();
     if request.source_key.is_empty() || request.source_key.len() > 1024 { return Err(bad_request("源字段无效")); }
     with_batch(&state, &id, |inputs, keys| {
         if request.reveal {
@@ -175,7 +256,7 @@ pub(super) async fn samples(State(state): State<AppState>, Path(id): Path<String
             db.execute("INSERT INTO audit_events(event,field_name) VALUES('import_samples_reveal',?1)", [&request.source_key]).map_err(internal)?;
         }
         let rows: Vec<Value> = inputs.iter().take(3).enumerate().map(|(i, input)| {
-            let result = extract(input, &request.source_key, request.json_path.as_deref());
+            let result = extract_for_target(input, &request.source_key, request.json_path.as_deref(), target_depth);
             let code = result.as_ref().err().copied().unwrap_or("matched");
             json!({"row":i+1,"status":code,"message":reason(code),"before":sample_value(input.get(&request.source_key),request.reveal),"after":sample_value(result.as_ref().ok().or_else(|| if code=="matched_null" { Some(&Value::Null) } else { None }),request.reveal)})
         }).collect();
@@ -191,6 +272,106 @@ mod tests {
     fn request(batch: &str) -> ImportRequest {
         serde_json::from_value(json!({"dataset_id":"test","batch_id":batch,"mappings":[{"source_key":"payload","target_key":"key","json_path":"items.0.id"}]})).unwrap()
     }
+    #[test]
+    fn json_assembly_keeps_types_nulls_and_missing_attributes_separate() {
+        let mappings = json!([
+            {"source_key":"key","target_key":"key"},
+            {"source_key":"artist_id","target_key":"payload","target_path":"artist.id"},
+            {"source_key":"artist_name","target_key":"payload","target_path":"artist.name"},
+            {"source_key":"bundle_ids","target_key":"payload","target_path":"bundle_ids"},
+            {"source_key":"enabled","target_key":"payload","target_path":"enabled"},
+            {"source_key":"count","target_key":"payload","target_path":"count"},
+            {"source_key":"empty","target_key":"payload","target_path":"empty"},
+            {"source_key":"nil","target_key":"payload","target_path":"nil"},
+            {"source_key":"encoded","target_key":"payload","json_path":"detail","target_path":"detail"},
+            {"source_key":"missing","target_key":"payload","target_path":"optional.value"}
+        ]);
+        let req: ImportRequest = serde_json::from_value(json!({"dataset_id":"test","batch_id":"b","mappings":mappings})).unwrap();
+        let rows = vec![json!({"key":"one","artist_id":9007199254740993u64,"artist_name":"001","bundle_ids":["one", "two"],"enabled":false,"count":0,"empty":"","nil":null,"encoded":r#"{"detail":{"flag":true,"nil":null}}"#})];
+        let (mapped, report) = map_and_report(&rows, &req, &["key".into()]).unwrap();
+        assert_eq!(report.error_count, 0); assert_eq!(report.warning_count, 1);
+        assert_eq!(mapped, vec![json!({"key":"one","payload":{"artist":{"id":9007199254740993u64,"name":"001"},"bundle_ids":["one","two"],"enabled":false,"count":0,"empty":"","nil":null,"detail":{"flag":true,"nil":null}}})]);
+        assert_eq!(report.issues[0].target_path, "optional.value");
+        let (mapped, _) = map_and_report(&[json!({"key":"none"})], &req, &[]).unwrap();
+        assert_eq!(mapped[0]["payload"], json!({}));
+        let mut reversed = req; reversed.mappings.reverse();
+        assert_eq!(map_and_report(&rows, &reversed, &[]).unwrap().0[0]["payload"]["artist"]["id"], json!(9007199254740993u64));
+    }
+
+    #[test]
+    fn conflicting_target_paths_are_reported_before_examining_any_record() {
+        for (a, b) in [("artist.id", "artist.id"), ("artist", "artist.id"), ("artist.id", "artist"), ("", "artist.id"), ("artist.id", "")] {
+            let req: ImportRequest = serde_json::from_value(json!({"dataset_id":"d","batch_id":"b","mappings":[{"source_key":"a","target_key":"payload","target_path":a},{"source_key":"b","target_key":"payload","target_path":b}]})).unwrap();
+            let (mapped, report) = map_and_report(&[json!({"a":"SECRET-TEST"}),json!({})], &req, &[]).unwrap();
+            assert!(mapped.is_empty()); assert_eq!(report.error_count, 2); assert_eq!(report.checked_rows, 2);
+            assert!(report.issues.iter().all(|issue| issue.scope == "mappings" && issue.code == "target_path_conflict"));
+            assert!(!serde_json::to_string(&report).unwrap().contains("SECRET-TEST"));
+            assert!(validate_mapping_configuration(&req.mappings).is_err());
+        }
+        for path in [".artist", "artist.", "artist..id", "items.0.id", "items[0].id", "artist.*", "artist. id"] {
+            let mut req = request("b"); req.mappings[0].target_path = Some(path.into());
+            assert!(map_and_report(&[json!({})], &req, &[]).unwrap().1.error_count > 0, "{path}");
+        }
+        let req: ImportRequest = serde_json::from_value(json!({"dataset_id":"d","batch_id":"b","mappings":[{"source_key":"a","target_key":"payload","target_path":"artist.id"},{"source_key":"b","target_key":"payload","target_path":"artist.identifier"}]})).unwrap();
+        assert_eq!(map_and_report(&[json!({"a":1,"b":2})], &req, &[]).unwrap().0, vec![json!({"payload":{"artist":{"id":1,"identifier":2}}})]);
+        assert!(target_parts(&vec!["a";33].join(".")).is_err());
+    }
+
+    #[test]
+    fn assembly_rejects_combined_nesting_that_would_break_storage_or_export() {
+        let mut nested = json!(false);
+        for _ in 0..63 { nested = json!([nested]); }
+        let input = json!({"value":nested});
+        let mut req: ImportRequest = serde_json::from_value(json!({"dataset_id":"d","batch_id":"b","mappings":[{"source_key":"value","target_key":"payload","target_path":"value"}]})).unwrap();
+        let (mapped, report) = map_and_report(&[input.clone()], &req, &[]).unwrap();
+        assert_eq!(report.error_count, 0);
+        assert!(serde_json::from_str::<Value>(&serde_json::to_string(&mapped).unwrap()).is_ok());
+        req.mappings[0].target_path = Some("nested.value".into());
+        let (_, report) = map_and_report(&[input], &req, &[]).unwrap();
+        assert_eq!(report.error_count, 1); assert_eq!(report.issues[0].code, "assembled_depth_exceeded");
+    }
+
+    #[tokio::test]
+    async fn assembly_preview_commit_replace_skip_and_protected_fields_use_one_pipeline() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("samples/.build"); fs::create_dir_all(&root).unwrap();
+        let directory = root.join(format!("json-assembly-{}",Uuid::new_v4()));
+        struct Cleanup(PathBuf); impl Drop for Cleanup { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+        let _cleanup = Cleanup(directory.clone()); private_dir(&directory).unwrap();
+        let state = rotation::state_for(directory); let (keys,_) = initialize_vault(&state,"assembly-test-password-2026").unwrap(); activate(&state,keys,true).await;
+        let dataset = create_dataset(State(state.clone()),Json(serde_json::from_value(json!({"category_path":"导入/组装","fields":[{"source_key":"key","zone":"indexes"},{"source_key":"payload","zone":"secrets"}],"identity_fields":["key"],"sample_data":[{"key":"one","payload":{"old":"remove","artist":{"name":"old"}}}]})).unwrap())).await.unwrap().0["dataset_id"].as_str().unwrap().to_owned();
+        state.batches.lock().await.insert("assembly".into(),ImportBatch::new(vec![json!({"key":"one","artist_id":"001","nil":null})],None));
+        let mut body = json!({"dataset_id":dataset,"batch_id":"assembly","template_name":"assembly","mappings":[{"source_key":"key","target_key":"key"},{"source_key":"artist_id","target_key":"payload","target_path":"artist.id"},{"source_key":"nil","target_key":"payload","target_path":"artist.name"}]});
+        async fn export_values(state: &AppState, dataset: &str, secrets: bool) -> Value {
+            let mut headers = HeaderMap::new(); headers.insert("x-vault-owner", HeaderValue::from_static("true"));
+            let response = export_dataset(State(state.clone()),Path(dataset.to_owned()),Query(serde_json::from_value(json!({"format":"json","include_secrets":secrets})).unwrap()),headers).await.unwrap();
+            serde_json::from_slice(&axum::body::to_bytes(response.into_body(),100000).await.unwrap()).unwrap()
+        }
+        let before = export_values(&state,&dataset,true).await;
+        assert_eq!(run(state.clone(),serde_json::from_value(body.clone()).unwrap(),true).await.unwrap().0["updated"],1);
+        assert_eq!(export_values(&state,&dataset,true).await,before);
+        body["skip_existing"] = json!(true);
+        assert_eq!(run(state.clone(),serde_json::from_value(body.clone()).unwrap(),false).await.unwrap().0["skipped"],1);
+        assert_eq!(export_values(&state,&dataset,true).await,before);
+        body["skip_existing"] = json!(false);
+        assert_eq!(run(state.clone(),serde_json::from_value(body.clone()).unwrap(),false).await.unwrap().0["updated"],1);
+        let after = export_values(&state,&dataset,true).await;
+        assert_eq!(after, json!([{"key":"one","payload":{"artist":{"id":"001","name":null}}}]));
+        assert_eq!(export_values(&state,&dataset,false).await,json!([{"key":"one"}]));
+        with_connection(&state,|db,_| {
+            let public: String = db.query_row("SELECT indexes_json || display_json FROM records", [], |r| r.get(0)).unwrap();
+            assert!(!public.contains("artist"));
+            let template: String = db.query_row("SELECT mappings_json FROM import_templates WHERE name='assembly'",[],|r|r.get(0)).unwrap();
+            assert!(template.contains("target_path")); Ok(())
+        }).await.unwrap();
+        body["mappings"][2]["target_path"] = json!("artist");
+        let preview = run(state.clone(),serde_json::from_value(body.clone()).unwrap(),true).await.unwrap().0;
+        assert_eq!(preview["valid"],false); assert_eq!(preview["diagnostics"]["error_count"],2);
+        assert!(run(state.clone(),serde_json::from_value(body.clone()).unwrap(),false).await.is_err());
+        assert_eq!(export_values(&state,&dataset,true).await,after);
+        body["mappings"][2]["target_path"] = json!("artist.name"); body["mappings"][2]["target_key"] = json!("undefined");
+        assert_eq!(run(state.clone(),serde_json::from_value(body).unwrap(),true).await.unwrap().0["valid"],false);
+    }
+
     #[test]
     fn extraction_matches_write_semantics_for_falsy_null_and_arrays() {
         for value in [json!(0), json!(false), json!("")] {
@@ -216,8 +397,8 @@ mod tests {
         let mut capped = Report::new(10000);
         for i in 0..10002 { capped.add("records",i,true,"x","y","","invalid_json","invalid JSON"); }
         assert_eq!(capped.error_count,10002); assert_eq!(capped.issues.len(),10000); assert!(capped.truncated);
-        req.mappings.push(FieldMapping { source_key:"other".into(),target_key:"key".into(),json_path:None });
-        assert!(map_and_report(&rows,&req,&[]).is_err());
+        req.mappings.push(FieldMapping { source_key:"other".into(),target_key:"key".into(),json_path:None, target_path:None });
+        assert!(map_and_report(&rows,&req,&[]).unwrap().1.error_count > 0);
     }
     #[tokio::test]
     async fn csv_is_formula_safe_and_contains_summary_not_record_values() {

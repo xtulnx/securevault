@@ -88,6 +88,27 @@ def run(serve=False):
                     assert updated['updated'] == len(expected_rows)
                     return request
 
+                assembly_fields = [dict(source_key=key, display_name=key, zone=zone, position=i) for i, (key, zone) in enumerate([('code', 'indexes'), ('payload', 'normal'), ('secure_payload', 'secrets')])]
+                assembly_mappings = [dict(source_key='code', target_key='code')] + [dict(source_key=source_key, target_key='payload', target_path=path) for source_key, path in [('long_id', 'artist.id'), ('name', 'artist.name'), ('count', 'count'), ('enabled', 'enabled'), ('memo', 'memo')]] + [dict(source_key='token', target_key='secure_payload', target_path='credentials.token')]
+                assembly_expected = [dict(code=row['code'], payload=dict(artist=dict(id=row['long_id'], name=row['name']), count=row['count'], enabled=row['enabled'], memo=row['memo']), secure_payload=dict(credentials=dict(token=row['token']))) for row in rows]
+                def assembly_dataset(name):
+                    return client.request('/datasets', dict(name=name, category_path='组装回归/' + name, fields=assembly_fields, identity_fields=['code'], sample_data=[dict(code='001', payload={'legacy': True, 'artist': {'old': 'remove'}}, secure_payload={'old': 'remove'})]))['dataset_id']
+                def assembly_import(target, batch, template):
+                    request = dict(dataset_id=target, batch_id=batch['batch_id'], mappings=assembly_mappings, template_name=template)
+                    before = values(target)
+                    preview = client.request('/records/import/preview', request)
+                    assert preview['valid'] and preview['updated'] == 1 and preview['imported'] == 1
+                    assert values(target) == before, 'assembly preview wrote records'
+                    client.request('/records/import', {**request, 'skip_existing': True})
+                    assert values(target)[0] == before[0], 'skip must preserve the whole old JSON'
+                    client.request('/records/import', request)
+                    assert values(target) == assembly_expected
+                    public = values(target, False)
+                    assert all('secure_payload' not in row and 'artist' not in row for row in public)
+                    saved = client.request(f'/datasets/{target}/templates')['templates']
+                    assert saved[0]['mappings'][1]['target_path'] == 'artist.id'
+                    return request
+
                 source = dataset('来源', rows)
                 search = client.search(dataset_id=source)['records']
                 expired_id = next(row['id'] for row in search if row['indexes']['code'] == '002')
@@ -114,6 +135,69 @@ def run(serve=False):
                                 checks.append(f'{fmt} text {mode} parse/preview/commit/update/skip; secrets={secrets}')
                     active, _ = raw(f'/datasets/{source}/export?format={fmt}&include_expired=false')
                     assert upload(active, f'active.{fmt}')['record_count'] == 1
+                    assembly_body = raw(f'/datasets/{source}/export?format={fmt}&include_secrets=true')[0]
+                    target = assembly_dataset('文件-' + fmt)
+                    assembly_request = assembly_import(target, upload(assembly_body, 'source.' + fmt), '组装-文件-' + fmt)
+                    checks.append(f'{fmt} file JSON assembly preview/replace/skip, exact types, protected JSON and saved mappings')
+                    if fmt != 'xlsx':
+                        parsed = client.request('/imports/text', dict(text=assembly_body.decode(), format=fmt))
+                        target = assembly_dataset('文本-' + fmt)
+                        assembly_request = assembly_import(target, parsed, '组装-文本-' + fmt)
+                        checks.append(f'{fmt} text JSON assembly preview/replace/skip and template paths')
+
+                # Null is written, absence is omitted, and objects/arrays retain their types.
+                typed = dict(code='typed', artist_id=9007199254740993, bundle_ids=['app.one', 'app.two'], nil=None, empty='', encoded=json.dumps({'item': {'enabled': False, 'count': 0}}))
+                batch = client.request('/imports/text', dict(text=json.dumps(typed), format='json'))
+                typed_mappings = [dict(source_key='code', target_key='code')] + [dict(source_key=key, target_key='payload', target_path=path) for key, path in [('artist_id', 'artist.id'), ('bundle_ids', 'bundle_ids'), ('nil', 'nil'), ('empty', 'empty'), ('missing', 'absent.value')]] + [dict(source_key='encoded', json_path='item', target_key='payload', target_path='object')]
+                request = dict(dataset_id=target, batch_id=batch['batch_id'], mappings=typed_mappings)
+                preview = client.request('/records/import/preview', request)
+                assert preview['valid'] and preview['diagnostics']['warning_count'] == 1
+                client.request('/records/import', request)
+                expected = dict(artist={'id': 9007199254740993}, bundle_ids=['app.one', 'app.two'], nil=None, empty='', object={'enabled': False, 'count': 0})
+                assert next(row for row in values(target) if row['code'] == 'typed')['payload'] == expected
+                before = values(target)
+                conflict = {**request, 'mappings': typed_mappings + [dict(source_key='artist_id', target_key='payload', target_path='artist')]}
+                preview = client.request('/records/import/preview', conflict)
+                assert not preview['valid'] and preview['diagnostics']['error_count'] == 2
+                assert any(issue.get('target_path') == 'artist.id' for issue in preview['diagnostics']['issues'])
+                client.request('/records/import', conflict, expected=400)
+                report = raw('/records/import/report?format=csv', json.dumps(conflict).encode(), {'Content-Type': 'application/json'})[0].decode('utf-8-sig')
+                assert 'target_path' in report and 'artist.id' in report and '9007199254740993' not in report
+                assert values(target) == before
+                bad_rows = [{**typed, 'code': 'good'}, {**typed, 'code': 'bad', 'encoded': 'INVALID-TEST-JSON'}]
+                bad_batch = client.request('/imports/text', dict(text=json.dumps(bad_rows), format='json'))
+                invalid = {**request, 'batch_id': bad_batch['batch_id']}
+                assert not client.request('/records/import/preview', invalid)['valid']
+                client.request('/records/import', invalid, expected=400)
+                assert values(target) == before
+                nested_value = False
+                for _ in range(63):
+                    nested_value = [nested_value]
+                depth_batch = client.request('/imports/text', dict(text=json.dumps(dict(code='depth', nested=nested_value)), format='json'))
+                depth_request = dict(dataset_id=target, batch_id=depth_batch['batch_id'], mappings=[dict(source_key='code', target_key='code'), dict(source_key='nested', target_key='payload', target_path='nested.value')])
+                depth_preview = client.request('/records/import/preview', depth_request)
+                assert not depth_preview['valid'] and depth_preview['diagnostics']['issues'][0]['code'] == 'assembled_depth_exceeded'
+                client.request('/records/import', depth_request, expected=400)
+                assert values(target) == before
+                checks.append('assembly null/missing/object/array/large integer preservation, conflict CSV reports and atomic rejection')
+
+                empty_target = client.request('/datasets', dict(category_path='组装回归/首次导入', fields=[]))['dataset_id']
+                first_request = dict(dataset_id=empty_target, batch_id=batch['batch_id'], mappings=typed_mappings, evolved_fields=assembly_fields, evolved_identity_fields=['code'])
+                assert client.request('/records/import/preview', first_request)['valid']
+                assert values(empty_target) == []
+                client.request('/records/import', first_request)
+                assert values(empty_target) == [dict(code='typed', payload=expected)]
+                checks.append('first import defines JSON schema and identity without flattening assembled fields')
+
+                # Templates survive native transfer, including both source and target paths.
+                package = raw(f'/datasets/{target}/export?content=schema&include_templates=true')[0].decode()
+                transfer_request = dict(package=package, category_path='组装回归/模板迁移', template_names=['组装-迁移'])
+                preview = client.request('/datasets/transfer/preview', transfer_request)
+                migrated = client.request('/datasets/transfer/import', {**transfer_request, 'confirmation_token': preview['confirmation_token'], 'confirm_changes': True})['dataset_id']
+                templates = client.request(f'/datasets/{migrated}/templates')['templates']
+                assert templates[0]['mappings'][1]['target_path'] == 'artist.id'
+                checks.append('native schema export/import preserves JSON assembly template paths')
+
 
                 nested_toml = '\n'.join(['[[private_key.keys]]', 'id="KEY-TEST"', '#invalid=true', 'issuer_id="issuer-test"', 'artistName="示例"', 'bundle_ids=["com.example.one", "com.example.two"]', 'private_key="""-----BEGIN PRIVATE KEY-----', 'TEST-ONLY', '-----END PRIVATE KEY-----', '"""'])
                 key_fields = [dict(source_key=key, display_name=key, zone=zone, position=i) for i, (key, zone) in enumerate([('id', 'indexes'), ('bundle_ids', 'indexes'), ('artistName', 'display'), ('issuer_id', 'normal'), ('private_key', 'secrets')])]
@@ -242,11 +326,12 @@ def run(serve=False):
                 print(json.dumps(info, ensure_ascii=False), flush=True)
                 if serve:
                     browser_target = dataset('浏览器验证')
+                    assembly_browser = assembly_dataset('浏览器组装')
                     fixture = folder / 'browser-records.yaml'
                     (folder / 'nested-keys.toml').write_text(nested_toml)
                     (folder / 'multi.xlsx').write_bytes(multi_xlsx)
                     fixture.write_text('- code: "UI-FILE"\n  name: "文件录入"\n  enabled: false\n')
-                    print(json.dumps(dict(url=f'http://127.0.0.1:{port}', password=PASSWORD, dataset=browser_target, upload=str(fixture)), ensure_ascii=False), flush=True)
+                    print(json.dumps(dict(url=f'http://127.0.0.1:{port}', password=PASSWORD, dataset=browser_target, assembly_dataset=assembly_browser, upload=str(fixture)), ensure_ascii=False), flush=True)
                     while True:
                         time.sleep(1)
             finally:

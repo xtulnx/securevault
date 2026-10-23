@@ -1387,7 +1387,7 @@ async function previewMappingSample(row, reveal = false) {
   const output = row.querySelector('[data-sample-result]'), button = row.querySelector('[data-preview-sample]');
   button.disabled = true; output.textContent = '正在检查样例…';
   try {
-    const samples = await api(`/imports/${encodeURIComponent(batch)}/samples`, { method: 'POST', body: JSON.stringify({ source_key: row.querySelector('[data-map-source]').dataset.mapSource, json_path: row.querySelector('[data-map-path]').value.trim() || null, reveal }) });
+    const samples = await api(`/imports/${encodeURIComponent(batch)}/samples`, { method: 'POST', body: JSON.stringify({ source_key: row.querySelector('[data-map-source]').dataset.mapSource, json_path: row.querySelector('[data-map-path]').value.trim() || null, target_path: row.querySelector('[data-map-target-path]').value.trim() || null, reveal }) });
     if (!current()) return;
     output.replaceChildren();
     const info = document.createElement('p'); info.textContent = `前 ${samples.rows.length} 条 / 共 ${samples.record_count} 条。${reveal ? '样例值将在 30 秒后隐藏。' : '样例值默认隐藏。'}`; output.append(info);
@@ -1431,9 +1431,9 @@ function drawImportDiagnostics(context) {
   for (const issue of report.issues.slice(start, end)) {
     const item = document.createElement('article'); item.className = 'import-issue';
     const text = document.createElement('p');
-    const scope = { records: '主表', supplements: '附表', templates: '模板' }[issue.scope] || issue.scope;
+    const scope = { records: '主表', supplements: '附表', templates: '模板', mappings: '映射' }[issue.scope] || issue.scope;
     text.textContent = `${issue.severity === 'error' ? '错误' : '提醒'} · ${scope}第 ${issue.row} 条 · ${issue.message}`;
-    const location = document.createElement('code'); location.textContent = [issue.source_key, issue.target_key && `→ ${issue.target_key}`, issue.json_path && `路径 ${issue.json_path}`].filter(Boolean).join(' ') || issue.code;
+    const location = document.createElement('code'); location.textContent = [issue.source_key, issue.target_key && `→ ${issue.target_key}`, issue.json_path && `来源路径 ${issue.json_path}`, issue.target_path && `目标属性 ${issue.target_path}`].filter(Boolean).join(' ') || issue.code;
     item.append(text, location);
     if (!transfer && issue.source_key) {
       const locate = document.createElement('button'); locate.type = 'button'; locate.className = 'clear-button'; locate.textContent = '定位字段';
@@ -1442,7 +1442,7 @@ function drawImportDiagnostics(context) {
         const control = $$('[data-map-source]').find(select => select.dataset.mapSource === issue.source_key);
         if (!control) return;
         const row = control.closest('.mapping-row'); row.hidden = false; row.querySelector('details').open = true;
-        (issue.json_path ? row.querySelector('[data-map-path]') : control).focus();
+        (issue.target_path || issue.code === 'invalid_target_path' || issue.code === 'target_path_conflict' ? row.querySelector('[data-map-target-path]') : issue.json_path ? row.querySelector('[data-map-path]') : control).focus();
       }); item.append(locate);
     }
     panel.append(item);
@@ -1600,7 +1600,7 @@ function updateMappingSummary() {
     row.querySelector('.mapping-status').textContent = { pending: '未处理', mapped: '已映射', ignore: '明确忽略', new: '新增字段' }[action];
     if (action !== 'pending') select.removeAttribute('aria-invalid');
     const duplicate = select.value && targets.filter(value => value === select.value).length > 1;
-    row.hidden = Boolean(state.mappingFocus && row.dataset.autoMapped === 'true' && action === 'mapped' && !duplicate && !row.querySelector('[data-map-path]').value.trim());
+    row.hidden = Boolean(state.mappingFocus && row.dataset.autoMapped === 'true' && action === 'mapped' && !duplicate && !row.querySelector('[data-map-path]').value.trim() && !row.querySelector('[data-map-target-path]').value.trim());
     if (row.hidden) collapsed++;
   }
   $('#mapping-counts').textContent = `已映射 ${counts.mapped} · 新增 ${counts.new} · 忽略 ${counts.ignore} · 未处理 ${counts.pending}`;
@@ -1627,17 +1627,17 @@ renderMappings = function(sourceFields, targetFields, autoSelect = false, templa
   $('#mapping-list').innerHTML = sourceFields.map(source => {
     const template = templates.find(item => item.source_key === source);
     const selected = targetFields.find(field => field.source_key === (template?.target_key || source));
-    return `<div class="mapping-row"><code>${escapeHtml(source)}</code><div class="mapping-target"><label class="mobile-field-label">目标字段</label><select aria-label="${escapeHtml(source)} 的目标字段" data-map-source="${escapeHtml(source)}"><option value="" data-mapping-action="pending" disabled ${selected ? '' : 'selected'}>请选择处理方式…</option><option value="" data-mapping-action="ignore">忽略本次导入</option>${targetFields.map(field => `<option value="${escapeHtml(field.source_key)}" data-field-zone="${escapeHtml(field.zone || '')}" ${selected?.source_key === field.source_key ? 'selected' : ''}>${escapeHtml(field.display_name || field.source_key)} · ${escapeHtml(field.source_key)}${field.zone === 'ignore' ? '（忽略，不保存）' : ''}</option>`).join('')}<option value="__new" data-mapping-action="new">新增字段…</option></select><input aria-label="新字段名称" data-map-new="${escapeHtml(source)}" placeholder="新字段名称" hidden /></div><div class="mapping-path"><label class="mobile-field-label">JSON 路径</label><input aria-label="${escapeHtml(source)} 内的 JSON 路径" data-map-path="${escapeHtml(source)}" value="${escapeHtml(template?.json_path || '')}" placeholder="可选，例如 endpoint" /></div><span class="mapping-status"></span></div>`;
+    return `<div class="mapping-row"><code>${escapeHtml(source)}</code><div class="mapping-target"><label class="mobile-field-label">目标字段</label><select aria-label="${escapeHtml(source)} 的目标字段" data-map-source="${escapeHtml(source)}"><option value="" data-mapping-action="pending" disabled ${selected ? '' : 'selected'}>请选择处理方式…</option><option value="" data-mapping-action="ignore">忽略本次导入</option>${targetFields.map(field => `<option value="${escapeHtml(field.source_key)}" data-field-zone="${escapeHtml(field.zone || '')}" ${selected?.source_key === field.source_key ? 'selected' : ''}>${escapeHtml(field.display_name || field.source_key)} · ${escapeHtml(field.source_key)}${field.zone === 'ignore' ? '（忽略，不保存）' : ''}</option>`).join('')}<option value="__new" data-mapping-action="new">新增字段…</option></select><input aria-label="新字段名称" data-map-new="${escapeHtml(source)}" placeholder="新字段名称" hidden /></div><div class="mapping-path"><label>来源 JSON 路径（取值，可选）</label><input aria-label="${escapeHtml(source)} 内的 JSON 路径" data-map-path="${escapeHtml(source)}" value="${escapeHtml(template?.json_path || '')}" placeholder="可选，例如 endpoint" /><label>目标 JSON 属性路径（组装，可选）</label><input aria-label="${escapeHtml(source)} 写入目标 JSON 的属性路径" data-map-target-path="${escapeHtml(source)}" value="${escapeHtml(template?.target_path || '')}" placeholder="留空整字段赋值，例如 artist.id" /></div><span class="mapping-status"></span></div>`;
   }).join('');
   $$('.mapping-row').forEach((row, index) => {
     const select = row.querySelector('[data-map-source]');
     row.dataset.autoMapped = String(mappingDisposition(select) === 'mapped');
     const path = row.querySelector('.mapping-path');
     const details = document.createElement('details');
-    details.className = 'mapping-path-options'; details.open = Boolean(path.querySelector('input').value);
-    details.innerHTML = '<summary>JSON 路径（可选）</summary>';
+    details.className = 'mapping-path-options'; details.open = [...path.querySelectorAll('input')].some(input => input.value);
+    details.innerHTML = '<summary>高级映射：取值 / 组装 JSON</summary>';
     path.before(details); details.append(path);
-    const help = document.createElement('small'); help.textContent = '点分隔字段，数字段表示数组下标，例如 items.0.id。仅检查前 3 条；完整错误见下一步预检。';
+    const help = document.createElement('small'); help.textContent = '来源路径可用 items.0.id 取值。目标路径只写对象属性，如 artist.id；多个来源可组装同一 JSON 字段，数组整体赋值。缺失属性省略，null 保留；更新时整个 JSON 替换，不与旧值合并。用途与加密设置按目标字段整体生效。仅检查前 3 条样例，完整错误见预检。';
     const sample = document.createElement('div'); sample.className = 'mapping-sample';
     sample.innerHTML = '<button type="button" class="clear-button" data-preview-sample>预览路径样例</button><div data-sample-result role="status" aria-live="polite"></div>';
     details.append(help, sample);
@@ -1688,25 +1688,48 @@ function buildImportRequest() {
     const row = select.closest('.mapping-row');
     const target_key = select.options[select.selectedIndex]?.dataset.mappingAction === 'new' ? row.querySelector('[data-map-new]').value.trim() : select.value;
     if (!target_key) { const input = row.querySelector('[data-map-new]'); importFieldError(input, '请填写新字段名称'); input.focus(); throw new Error('请填写新字段名称'); }
-    return { source_key: select.dataset.mapSource, target_key, json_path: row.querySelector('[data-map-path]').value.trim() || null };
+    return { source_key: select.dataset.mapSource, target_key, json_path: row.querySelector('[data-map-path]').value.trim() || null, target_path: row.querySelector('[data-map-target-path]').value.trim() || null };
   });
   if (!mappings.length) throw new Error('至少选择一个导入字段');
-  if (new Set(mappings.map(item => item.target_key)).size !== mappings.length) {
-    const duplicates = mappings.filter(item => mappings.filter(other => other.target_key === item.target_key).length > 1);
-    for (const item of duplicates) importFieldError($$('[data-map-source]').find(select => select.dataset.mapSource === item.source_key), `目标字段 ${item.target_key} 被重复使用`);
+  const targetControl = mapping => $$('[data-map-target-path]').find(input => input.dataset.mapTargetPath === mapping.source_key);
+  let invalidPaths = false;
+  for (const mapping of mappings) {
+    const path = mapping.target_path;
+    if (!path) continue;
+    const parts = path.split('.');
+    if (new Blob([path]).size > 1024 || parts.length > 32 || parts.some(part => !part || part.trim() !== part || /[\[\]*$\u0000-\u001f\u007f-\u009f]/.test(part) || /^\d+$/.test(part))) {
+      importFieldError(targetControl(mapping), '仅支持点分隔对象属性，最多 32 层 / 1024 字节；不支持空段、数组下标或通配符'); invalidPaths = true;
+    }
+  }
+  if (invalidPaths) { $('#mapping-list [aria-invalid]').focus(); throw new Error('请修正目标 JSON 属性路径'); }
+  const conflicts = mappings.filter((item, index) => mappings.some((other, otherIndex) => {
+    if (index === otherIndex || item.target_key !== other.target_key) return false;
+    const a = item.target_path || '', b = other.target_path || '';
+    return !a || !b || a === b || a.startsWith(b + '.') || b.startsWith(a + '.');
+  }));
+  if (conflicts.length) {
+    for (const item of conflicts) importFieldError(targetControl(item), `目标字段 ${item.target_key} 存在重复、父子路径，或整字段与属性写入冲突`);
     $('#mapping-list [aria-invalid]').focus();
-    throw new Error('多个源字段不能同时写入同一个目标字段');
+    throw new Error('同一个目标字段只能写入互不重叠的属性路径，不能混用整字段赋值');
   }
   let fields = [], identity = [...(dataset.identity_fields || [])];
   if (!dataset.fields.length) {
     fields = $$('#first-schema-fields .schema-field').flatMap(row => {
       const source = row.querySelector('.schema-source-key').textContent;
       const mapping = mappings.find(item => item.source_key === source);
-      return mapping ? [{ source_key: mapping.target_key, display_name: row.querySelector('.schema-field-label').value.trim(), zone: row.querySelector('.schema-field-zone').value, unique: row.querySelector('.schema-field-unique').checked }] : [];
+      return mapping ? [{ source_key: mapping.target_key, display_name: mapping.target_path ? mapping.target_key : row.querySelector('.schema-field-label').value.trim(), zone: row.querySelector('.schema-field-zone').value, unique: row.querySelector('.schema-field-unique').checked }] : [];
     });
+    const seen = new Map();
+    for (const field of fields) {
+      const previous = seen.get(field.source_key);
+      if (previous && (previous.zone !== field.zone || previous.unique !== field.unique)) throw new Error(`同一目标 JSON 字段 ${field.source_key} 的用途和唯一 KEY 设置必须一致`);
+      seen.set(field.source_key, field);
+    }
+    fields = [...seen.values()];
     identity = fields.filter(field => field.unique).map(field => field.source_key);
   } else {
-    fields = mappings.filter(mapping => !dataset.fields.some(field => field.source_key === mapping.target_key)).map(mapping => ({ source_key: mapping.target_key, display_name: mapping.target_key, zone: /key|secret|token|password|private/i.test(mapping.target_key) ? 'secrets' : 'indexes', unique: false }));
+    fields = mappings.filter(mapping => !dataset.fields.some(field => field.source_key === mapping.target_key)).map(mapping => ({ source_key: mapping.target_key, display_name: mapping.target_key, zone: /key|secret|token|password|private/i.test(mapping.target_key) ? 'secrets' : mapping.target_path ? 'normal' : 'indexes', unique: false }));
+    fields = [...new Map(fields.map(field => [field.source_key, field])).values()];
   }
   if ($('#delete-missing').checked && !identity.length) throw new Error('删除缺失记录需要完整的逻辑唯一 KEY');
   return { dataset_id: dataset.id, batch_id: state.pendingBatchId, mappings, evolved_fields: fields, evolved_identity_fields: identity, template_name: $('#mapping-template').value.trim() || null, skip_existing: $('#skip-existing').checked, delete_missing: $('#delete-missing').checked };
@@ -1743,6 +1766,7 @@ commitImport = async function() {
     const target = transfer ? `${request.category_path} · ${datasetLabelText(request)}` : `${datasetLocator(dataset)} · ${datasetLabelText(dataset)}`;
     $('#import-confirm-summary').innerHTML = `<dl class="dataset-info-summary"><div><dt>目标</dt><dd>${escapeHtml(target)}</dd></div><div><dt>导入内容</dt><dd>${transfer ? state.transferPackage?.mode === 'schema' ? '仅结构' : '结构与数据' : '记录数据'}</dd></div><div><dt>新增</dt><dd>${stats.imported || 0} 条</dd></div><div><dt>更新</dt><dd>${stats.updated || 0} 条</dd></div><div><dt>跳过</dt><dd>${stats.skipped || 0} 条</dd></div><div><dt>删除旧记录</dt><dd>${stats.deleted_missing || 0} 条</dd></div></dl>${transfer && preview.changes.length ? `<h4>结构变更</h4><ul>${preview.changes.map(change => `<li>${escapeHtml(change)}</li>`).join('')}</ul>` : ''}<p>以上为当前预检结果。确认前尚未写入数据。</p>`;
     if (!transfer && !request.skip_existing) $('#import-confirm-summary').insertAdjacentHTML('beforeend', '<p class="import-deletion-warning" role="note">更新匹配的逻辑 KEY 会替换该记录的字段值，本批次未写入或忽略的旧字段也会被清除。若需保留整条旧记录，请返回配置并选择“跳过已存在的唯一 KEY”。</p>');
+    if (!transfer && request.mappings.some(mapping => mapping.target_path)) $('#import-confirm-summary').insertAdjacentHTML('beforeend', '<p class="security-note">目标 JSON 按本批映射重新组装并整字段替换；旧属性不合并。来源缺失的属性省略，显式 null 保留。所有属性使用目标字段统一的用途与加密设置。</p>');
     if (stats.deleted_missing) $('#import-confirm-summary').insertAdjacentHTML('afterbegin', `<p class="import-deletion-warning" role="note">将从目标数据集 ${escapeHtml(target)} 删除 ${stats.deleted_missing} 条本批次缺失的旧记录。请核对文件是否覆盖需要保留的记录。</p>`);
     if (ignored.length) $('#import-confirm-summary').insertAdjacentHTML('beforeend', `<section class="ignored-import-fields"><h4>不会导入的源字段（${ignored.length}）</h4><ul>${ignored.map(source => `<li><code>${escapeHtml(source)}</code></li>`).join('')}</ul></section>`);
     $('#confirm-structure-wrap').hidden = !transfer || !preview.changes.length;

@@ -338,6 +338,8 @@ struct FieldMapping {
     target_key: String,
     #[serde(default)]
     json_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_path: Option<String>,
 }
 
 #[derive(Deserialize)]

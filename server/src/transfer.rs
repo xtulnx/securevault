@@ -387,7 +387,7 @@ fn package_report(package: &Package) -> ApiResult<import_diagnostics::Report> {
     }
     let mut templates = HashSet::new();
     for (i, template) in package.templates.iter().enumerate() {
-        if template.name.trim().is_empty() || !templates.insert(&template.name) || template.mappings.iter().any(|m| m.source_key.is_empty() || !schema.fields.iter().any(|f| f.source_key == m.target_key)) {
+        if import_diagnostics::validate_mapping_configuration(&template.mappings).is_err() || template.name.trim().is_empty() || !templates.insert(&template.name) || template.mappings.iter().any(|m| m.source_key.is_empty() || !schema.fields.iter().any(|f| f.source_key == m.target_key)) {
             report.add("templates", i+1, true, "", "", "", "invalid_template", "导入模板定义无效");
         }
     }
