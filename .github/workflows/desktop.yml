@@ -30,15 +30,20 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+          rustup target add "${{ matrix.target }}"
           npm ci
+      - name: Verify app versions and release tooling
+        run: |
+          python3 scripts/release.py version
+          python3 -m unittest discover -s scripts -p 'test_*.py' -v
       - name: Web regression tests
         run: npm test
       - name: Server tests
-        run: cargo test --locked --manifest-path server/Cargo.toml
+        run: cargo test --locked --manifest-path server/Cargo.toml --target "${{ matrix.target }}"
       - name: Prepare bundled service
         run: python3 scripts/desktop.py prepare --target ${{ matrix.target }}
       - name: Desktop tests
-        run: cargo test --locked --manifest-path desktop/Cargo.toml
+        run: cargo test --locked --manifest-path desktop/Cargo.toml --target "${{ matrix.target }}"
       - name: Service lifecycle checks
         run: python3 scripts/smoke_desktop.py --binary desktop/binaries/securevault-${{ matrix.target }}
       - name: Build app

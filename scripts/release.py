@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import subprocess
 import tarfile
+import tomllib
 import zipfile
 
 
@@ -19,7 +20,30 @@ TARGETS = (
 )
 
 
+def validate_versions(root=ROOT):
+    """Reject inconsistent app versions before any platform build starts."""
+    versions = {}
+    for directory, name in (("server", "securevault"), ("desktop", "securevault-desktop")):
+        manifest_path = f"{directory}/Cargo.toml"
+        manifest = tomllib.loads((root / manifest_path).read_text(encoding="utf-8"))
+        versions[manifest_path] = manifest["package"]["version"]
+        lock_path = f"{directory}/Cargo.lock"
+        lock = tomllib.loads((root / lock_path).read_text(encoding="utf-8"))
+        packages = [p for p in lock["package"] if p["name"] == name]
+        if len(packages) != 1:
+            raise ValueError(f"{lock_path} must contain exactly one {name} package")
+        versions[lock_path] = packages[0]["version"]
+    config_path = "desktop/tauri.conf.json"
+    versions[config_path] = json.loads((root / config_path).read_text(encoding="utf-8"))["version"]
+    version = versions["server/Cargo.toml"]
+    mismatches = [f"{path}={value}" for path, value in versions.items() if value != version]
+    if mismatches:
+        raise ValueError(f"Version mismatch: server/Cargo.toml={version}; " + "; ".join(mismatches))
+    return version
+
+
 def metadata():
+    version = validate_versions()
     result = subprocess.run(
         ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1",
          "--manifest-path", str(ROOT / "server/Cargo.toml")],
@@ -27,7 +51,9 @@ def metadata():
     )
     data = json.loads(result.stdout)
     package = next(p for p in data["packages"] if p["name"] == "securevault")
-    return package["version"], Path(data["target_directory"])
+    if package["version"] != version:
+        raise ValueError("Cargo metadata version does not match server/Cargo.toml")
+    return version, Path(data["target_directory"])
 
 
 def verify_tag(version, tag):

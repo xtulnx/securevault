@@ -184,7 +184,7 @@ python3 samples/scripts/api_demo.py  # 验证应用检索范围与解密权限
 
 项目新增 Tauri 桌面入口，可用 `make desktop` 启动、`make desktop-package` 生成本机应用包。桌面版复用完整工作台，提供原生保存与复制、单实例和退出清理，默认使用独立的系统应用数据目录。构建依赖、打开已有保险库、平台状态与验证方法见 [桌面版说明](docs/DESKTOP.md)。
 
-需要 Rust stable（支持 edition 2024）、C/C++ 编译工具及 Perl；SQLCipher 与 OpenSSL 从源码构建。使用 `make` 命令需要 Make，打包还需要 Python 3。当前发布支持下表中的 Linux 和 macOS 平台。
+需要 Rust stable（支持 edition 2024）、C/C++ 编译工具及 Perl；SQLCipher 与 OpenSSL 从源码构建。使用 `make` 命令需要 Make，打包还需要 Python 3.11 或更新版本。当前发布支持下表中的 Linux 和 macOS 平台。
 
 ```sh
 make             # 编译 release 二进制
@@ -240,16 +240,16 @@ python3 samples/scripts/security_check.py  # 先构建 release；临时数据库
 
 ## 自动发布
 
-将 `server/Cargo.toml` 的版本号更新为目标版本；如果依赖或包版本有变化，运行 `cargo check --manifest-path server/Cargo.toml` 更新锁文件，并一并提交。推送前可用 `python3 scripts/release.py version --tag v0.1.0` 检查目标 tag 是否与版本一致。
+将 `server/Cargo.toml`、`desktop/Cargo.toml` 和 `desktop/tauri.conf.json` 的版本号同步更新为目标版本，并同步两个 Cargo.lock 中的自身包版本、网页显示版本及 Raycast 扩展的 package.json/package-lock.json。发布校验会在构建前拒绝服务端、桌面端或 Cargo 锁文件版本不一致的提交。推送前可用 `python3 scripts/release.py version --tag v0.2.0` 检查目标 tag 是否与版本一致。
 
-推送与 Cargo 版本一致的 `v` 标签即可触发 GitHub Actions，例如版本 `0.1.0`：
+推送与 Cargo 版本一致的 `v` 标签即可触发 GitHub Actions，例如版本 `0.2.0`：
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
-工作流先检查 tag 与 Cargo 版本是否一致，再在各平台的原生 runner 上运行测试、构建 release、执行二进制 `--help` 检查并打包。每个平台还会用临时数据验证嵌入前端、保险库初始化、更换主密码、备份恢复和完整密钥轮换：
+工作流先检查 tag 与应用版本是否一致，并运行发布脚本测试及前端回归测试；全部通过后，再在各平台的原生 runner 上运行服务端测试、构建 release、执行二进制 `--help` 检查并打包。每个平台还会用临时数据验证嵌入前端、保险库初始化、更换主密码、备份恢复和完整密钥轮换：
 
 | 平台 | Rust target | GitHub runner | 压缩格式 |
 | --- | --- | --- | --- |
@@ -264,4 +264,4 @@ runner 标签见 [GitHub 官方说明](https://docs.github.com/en/actions/refere
 
 含 `-` 的版本标签（如 `v0.2.0-rc.1`）标记为预发布；重跑工作流会更新已有 Release 的附件。也可在 Actions 页面手动运行 Release 工作流，验证全部平台并下载构建附件；手动运行不会创建或修改 GitHub Release。无需额外 Token，发布任务使用仓库的 `GITHUB_TOKEN`。
 
-tag 固定指向创建时的提交；版本不匹配或构建配置修复后，重跑旧 tag 不会使用新代码。当前 Cargo 版本为 `0.1.0` 时，应先提交并推送修复，再在该提交上创建、推送 `v0.1.0`。以后每次发布先同步 Cargo.toml 与 Cargo.lock 的版本，再创建对应的新 tag。
+tag 固定指向创建时的提交；版本不匹配或构建配置修复后，重跑旧 tag 不会使用新代码。当前 Cargo 版本为 `0.2.0` 时，应先提交并推送修复，再在该提交上创建、推送 `v0.2.0`。以后每次发布先同步服务端、桌面端、网页及扩展版本，再创建对应的新 tag。

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Build the bundled service and run/package the Tauri desktop app."""
 import argparse
-import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+
+from release import validate_versions
 
 ROOT = Path(__file__).resolve().parents[1]
 DESKTOP = ROOT / "desktop"
@@ -26,11 +27,10 @@ def main():
     forwarded = incoming[separator + 1:]
     args = parser.parse_args(incoming[:separator])
     target = args.target or subprocess.check_output(["rustc", "--print", "host-tuple"], text=True).strip()
-    version = next(line.split('"')[1] for line in (ROOT / "server/Cargo.toml").read_text().splitlines() if line.startswith("version ="))
-    config = json.loads((DESKTOP / "tauri.conf.json").read_text())
-    desktop_version = next(line.split('"')[1] for line in (DESKTOP / "Cargo.toml").read_text().splitlines() if line.startswith("version ="))
-    if config["version"] != version or desktop_version != version:
-        raise SystemExit("server/Cargo.toml、desktop/Cargo.toml 和 desktop/tauri.conf.json 版本必须一致")
+    try:
+        validate_versions()
+    except (ValueError, OSError) as error:
+        raise SystemExit(str(error)) from error
     environment = os.environ.copy()
     # Make artifact discovery deterministic even when a shell overrides Cargo's target directory.
     environment["CARGO_TARGET_DIR"] = str(ROOT / "server/target")

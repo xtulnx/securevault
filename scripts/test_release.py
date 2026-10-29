@@ -1,4 +1,5 @@
 import hashlib
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -77,6 +78,37 @@ class ReleaseTests(unittest.TestCase):
         for tag in ["v0.0.3", "0.1.0", "v0.1.0-rc.1"]:
             with self.subTest(tag=tag), self.assertRaisesRegex(ValueError, "must match"):
                 release.verify_tag("0.1.0", tag)
+
+    def version_fixture(self):
+        root = self.root / "project"
+        for directory, name in (("server", "securevault"), ("desktop", "securevault-desktop")):
+            (root / directory).mkdir(parents=True, exist_ok=True)
+            (root / directory / "Cargo.toml").write_text(
+                f'[package]\nname = "{name}"\nversion = "0.2.0"\n', encoding="utf-8")
+            (root / directory / "Cargo.lock").write_text(
+                f'[[package]]\nname = "{name}"\nversion = "0.2.0"\n', encoding="utf-8")
+        (root / "desktop/tauri.conf.json").write_text(
+            json.dumps({"version": "0.2.0"}), encoding="utf-8")
+        return root
+
+    def test_app_manifests_and_lockfiles_must_share_one_version(self):
+        root = self.version_fixture()
+        self.assertEqual(release.validate_versions(root), "0.2.0")
+        for path in ("server/Cargo.lock", "desktop/Cargo.toml", "desktop/Cargo.lock", "desktop/tauri.conf.json"):
+            with self.subTest(path=path):
+                file = root / path
+                original = file.read_text(encoding="utf-8")
+                file.write_text(original.replace("0.2.0", "0.1.0"), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, path):
+                    release.validate_versions(root)
+                file.write_text(original, encoding="utf-8")
+
+    def test_lockfile_must_include_the_application_package(self):
+        root = self.version_fixture()
+        (root / "desktop/Cargo.lock").write_text(
+            '[[package]]\nname = "unrelated"\nversion = "0.2.0"\n', encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "desktop/Cargo.lock.*securevault-desktop"):
+            release.validate_versions(root)
 
     def test_version_cli_reports_the_real_manifest_and_rejects_an_old_tag(self):
         command = [sys.executable, str(release.ROOT / "scripts/release.py"), "version"]

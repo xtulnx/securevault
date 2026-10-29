@@ -8,7 +8,7 @@ macOS 最低版本设为 13.3，以覆盖现有页面使用的 WebKit 功能。�
 
 预览包默认使用 ad-hoc 本地签名，并在构建后验证完整应用包及随附服务的签名。它没有 Apple 开发者身份或公证，不能当作已公证的公开分发版本。
 
-需要现有 Rust/C/Perl 构建环境、Node.js/npm、Python 3，以及对应平台的 [Tauri 构建依赖](https://v2.tauri.app/start/prerequisites/)。首次安装前端工具：
+需要现有 Rust/C/Perl 构建环境、Node.js/npm、Python 3.11 或更新版本，以及对应平台的 [Tauri 构建依赖](https://v2.tauri.app/start/prerequisites/)。首次安装前端工具：
 
 ```sh
 npm ci
